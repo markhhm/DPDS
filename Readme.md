@@ -136,7 +136,7 @@ the namespace exits. PMD, payload, or application failures are test failures.
 
 ```sh
 cd build
-./dpds -l 0-3 --no-pci --no-huge --no-telemetry \
+./dpds -l 0-3 --no-pci --no-huge --no-telemetry -m 256 \
   --vdev=net_null0,no-rx=1 --vdev=net_null1,no-rx=1 \
   -- -c config.json -o stats.txt
 ```
@@ -289,8 +289,9 @@ Cross-NUMA egress DMA remains possible.
 
 The RX producer waits for handoff space before another burst. An unexpected
 short ring enqueue invalidates the run and counts its discarded suffix.
-The TX backlog permits 256 packets per line. An exhausted backlog invalidates
-the run.
+The TX backlog permits 1024 packets per line (about 126 us at 8.127 Mpps,
+estimate), and each port requests 1024 TX descriptors. An exhausted backlog
+invalidates the run. Under `--no-huge` the larger pools need `-m 256`.
 
 The one-second TX retry bound starts after the first unsuccessful admission.
 Actual-time TX outage holds and scheduler shutdown have a five-second bound.

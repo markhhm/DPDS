@@ -21,15 +21,15 @@ int main(int argc, char **argv)
     assert(host_pool_objects(0, 2) == 0);
     assert(host_prepare_port(0) == 0 && host_prepare_port(1) == 0);
     struct port_resources saved0 = host.resources[0], saved1 = host.resources[1];
-    /* Synthetic adjusted PMD limits: RX512 + egressTX768 + reserves3200 + storage64. */
+    /* Synthetic adjusted PMD limits: RX512 + egressTX768 + reserves6272 + storage64. */
     host.resources[0].rx_descriptors = 512;
     host.resources[0].tx_descriptors = 1024;
     host.resources[1].tx_descriptors = 768;
-    assert(host_pool_objects(0, 2) == 4544);
+    assert(host_pool_objects(0, 2) == 7616);
     host.lines[2].egress_port = 0;
-    assert(host_pool_objects(0, 2) == 5568);
+    assert(host_pool_objects(0, 2) == 8640);
     size_t saved_capacity = host.lines[0].storage_capacity_packets;
-    host.lines[0].storage_capacity_packets = UINT_MAX - 4481u;
+    host.lines[0].storage_capacity_packets = UINT_MAX - 7553u;
     assert(host_pool_objects(0, 2) == 0);
     host.lines[0].storage_capacity_packets = saved_capacity;
     host.lines[2].egress_port = 1;

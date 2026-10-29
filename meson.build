@@ -13,13 +13,16 @@ test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_arg
 common_sources = ['common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split']
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending']
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--file-prefix=hng-' + name]
   if name == 'rings'
     args += ['--vdev=net_null0,no-rx=1', '--vdev=net_null1,no-rx=1']
+  endif
+  if name == 'tx_pending'
+    args += ['--vdev=net_null0,no-rx=1']
   endif
   if name == 'rx_split'
     args += ['--vdev=net_null0', '--vdev=net_null1']

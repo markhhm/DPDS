@@ -13,7 +13,7 @@ for cores in (2, 3, 4, 5):
     for no_rx in (True, False):
         suffix = ",no-rx=1" if no_rx else ""
         command = [binary]+eal_arguments(cores)+["--no-pci", "--no-huge",
-                   "--no-telemetry", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}",
+                   "--no-telemetry", "-m", "256", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}",
                    f"--vdev=net_null0{suffix}", f"--vdev=net_null1{suffix}"]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         time.sleep(0.25)
