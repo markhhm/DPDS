@@ -199,6 +199,11 @@ int main(int argc, char **argv)
         " retries=%"PRIu64" pending_peak=%"PRIu64" conservation=%s status=%s\n",
         s->rx.received, s->tx.transmitted, s->worker.emulator_drops, drops - s->worker.emulator_drops,
         s->tx.retries, s->tx.pending_peak, conserved ? "PASS" : "FAIL", host.invalid ? "INVALID" : "DRAINED");
+    /* Bucket b counts TX calls carrying 2^b to 2^(b+1)-1 frames; whole run, all TX lcores. */
+    uint64_t calls = 0;
+    printf("ring_rate tx_burst_hist=");
+    for (int b = 0; b < BURST_HIST_BUCKETS; ++b) { printf("%s%"PRIu64, b ? "," : "", s->tx.burst_hist[b]); calls += s->tx.burst_hist[b]; }
+    printf(" mean_frames_per_call=%.2f\n", calls ? (double)s->tx.transmitted / (double)calls : 0.0);
     bool ok = conserved && !host.invalid;
     host_cleanup();
     for (uint16_t p = 0; p < 2; ++p) close_port(p);

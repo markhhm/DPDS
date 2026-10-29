@@ -34,4 +34,5 @@ result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOU
 print(result.stdout, end="")
 assert result.returncode == 0, "hng-ring-rate failed"
 assert "conservation=PASS status=DRAINED" in result.stdout, "run was not conserved and drained"
+assert "tx_burst_hist=" in result.stdout, "no TX burst histogram"
 assert "total_pps=" in result.stdout and " total_pps=0 " not in result.stdout, "no packets measured"
