@@ -49,3 +49,8 @@ ring_rate = executable('hng-ring-rate', ['perf/ring_rate.c', 'core/receive.c'] +
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_rate.py', ring_rate],
   timeout: 60, is_parallel: false)
+pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c'],
+  dependencies: [dpdk, core], link_args: ['-lm'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
+  timeout: 60, is_parallel: false)

@@ -180,6 +180,37 @@ unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
 The scheduling-core microbenchmark is in the core README.
 
+`hng-pool-calc` sizes the mbuf pool and core metadata per NUMA node. The host
+allocates one pool per ingress port on that port's node, so one node holds the
+lines of one direction. Without `--verify` it needs no EAL:
+
+```sh
+./build/hng-pool-calc                      # 100G, t=142 ms, delta=320 ms, Q=50 ms, p=0.01 and 0.10
+./build/hng-pool-calc --lines-per-port 2   # cable and LEO with the same parameters
+./build/hng-pool-calc --help
+```
+
+It mirrors the engine's startup storage check, which assumes that every packet
+is late, so the required size does not depend on p. The `mean_occupancy` lines
+use t + p*delta and are estimates, not sizing bounds. `--min-frame` is the
+smallest L2 frame (with FCS) in the declared envelope; the default 1522 is an
+all-MTU, single-VLAN mix. Smaller frames raise the slot count sharply.
+Object bytes use the real `rte_mempool_calc_obj_size` stride and the rule that
+an object never straddles a page (`--page-bytes`, default 2 MiB). Core metadata
+uses `hng_slot_metadata_bytes()` from the core and lives in the process heap,
+not in hugepages.
+
+`--verify` builds the same configuration on two `net_null` ports and compares
+the prediction with the real allocation: DPDK heap growth for each pool, and
+process heap growth across engine load. It uses the page size the EAL really
+uses (4 KiB under `--no-huge`) and fails above 5% error:
+
+```sh
+./build/hng-pool-calc -l 0 --no-pci --no-huge --no-telemetry -m 512 \
+  --vdev=net_null0 --vdev=net_null1 -- \
+  --c-bps 1000000000 --t-ms 20 --delta-ms 40 --q-ms 5 --burst 256 --lines-per-port 2 --verify
+```
+
 ## Configuration and packet contract
 
 Use [config.json](config.json) for a small software example. Use
