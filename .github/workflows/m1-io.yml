@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Software PMD integrity
+on: [push, pull_request]
+jobs:
+  m1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Private forks can supply a read-only token with access to both repos.
+          token: ${{ secrets.DPDS_READ_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build user-local DPDK with virtual PMDs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential meson ninja-build pkg-config libpcap-dev libnuma-dev python3-pyelftools
+          curl -fsSLO https://fast.dpdk.org/rel/dpdk-26.03.tar.xz
+          tar -xf dpdk-26.03.tar.xz
+          meson setup dpdk-build dpdk-26.03 --prefix="$RUNNER_TEMP/dpdk" --libdir=lib -Dexamples= -Dtests=false -Denable_drivers=net/null,net/pcap,net/ring,net/af_packet,mempool/ring,bus/vdev
+          meson compile -C dpdk-build -j 4
+          meson install -C dpdk-build
+      - name: Build and run registered software checks without hugepages
+        run: |
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/dpdk/lib/pkgconfig"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/dpdk/lib"
+          meson setup build
+          meson compile -C build
+          meson test -C build --print-errorlogs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m1-test-logs
+          path: build/meson-logs/
