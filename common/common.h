@@ -19,9 +19,11 @@ struct packet_meta {
 static inline struct packet_meta *packet_meta(struct rte_mbuf *m) {
     return (struct packet_meta *)rte_mbuf_to_priv(m);
 }
+/* One cache line per port: owners of different ports must not share a line. */
 struct ingress_frontier {
     _Atomic uint64_t version, enqueued, watermark_ns;
-};
+} __attribute__((aligned(64)));
+_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
 struct port_resources { uint16_t rx_descriptors, tx_descriptors; bool prepared; };
 struct host_context {
     struct Engine *engine;
@@ -59,12 +61,14 @@ struct rx_stats {
     uint64_t ring_full_skips[2];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
+_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
 struct worker_stats {
     uint64_t received, received_bytes, sent, sent_bytes, emulator_drops, tx_ring_drops;
     uint64_t invalid_drops, invalid_drop_bytes, storage_drops, storage_drop_bytes;
     uint64_t shutdown_drops, shutdown_drop_bytes, tx_ring_drop_bytes;
     struct HngStats lines[HNG_MAX_LINES];
 } __attribute__((aligned(64)));
+_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
 struct tx_stats {
     uint64_t received, received_bytes, transmitted, transmitted_bytes, tx_drops, tx_drop_bytes;
     uint64_t retries, pending_peak, trace_outage_drops, trace_outage_bytes;
@@ -73,6 +77,7 @@ struct tx_stats {
     uint64_t line_transmitted[HNG_MAX_LINES], line_transmitted_bytes[HNG_MAX_LINES];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
+_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
 /* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts. */
 struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2]; };
 struct lcore_parameters {

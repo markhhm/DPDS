@@ -30,7 +30,7 @@
 static uint64_t packets_per_port = 2000000, warmup_ns = 5000000, gap_ps = 123360;
 static _Atomic unsigned ready;
 
-struct owner {
+struct __attribute__((aligned(128))) owner {
     int port;                 /* -1: all lines (single owner) */
     struct rte_mbuf **free_list;
     unsigned free_count;

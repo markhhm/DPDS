@@ -94,46 +94,64 @@ static uint64_t watermark(struct worker_state *s, uint16_t port)
 uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
     uint16_t count, struct rte_mbuf **out_batch, uint64_t now)
 {
-    for (uint16_t i = 0; i < count; ++i) {
-        struct rte_mbuf *m = in_batch[i];
-        struct packet_meta *meta = packet_meta(m);
-        s->stats->received++;
-        s->stats->received_bytes += m->pkt_len;
-        if (meta->ingress_port >= RTE_MAX_ETHPORTS || s->ended || s->aborted) {
-            host_invalidate("invalid RX metadata or admission after end");
-            discard_invalid(s, m);
-            continue;
+    /* Classify the whole input first, then admit it with one core call; offers stay in input order. */
+    struct Line *handles[HNG_MAX_LINES];
+    uint16_t line_of[2 * MAX_BURST_SIZE];
+    struct rte_mbuf *offer[2 * MAX_BURST_SIZE];
+    void *packets[2 * MAX_BURST_SIZE];
+    uint32_t bytes[2 * MAX_BURST_SIZE];
+    uint64_t arrivals[2 * MAX_BURST_SIZE], seqs[2 * MAX_BURST_SIZE];
+    enum PushResult results[2 * MAX_BURST_SIZE];
+    struct HngPacket records[2 * MAX_BURST_SIZE];
+    for (size_t i = 0; i < host.line_count; ++i) handles[i] = s->line[i];
+    for (uint16_t first = 0; first < count; first += 2 * MAX_BURST_SIZE) {
+        uint16_t end = count - first > 2 * MAX_BURST_SIZE ? first + 2 * MAX_BURST_SIZE : count, n = 0;
+        for (uint16_t i = first; i < end; ++i) {
+            struct rte_mbuf *m = in_batch[i];
+            struct packet_meta *meta = packet_meta(m);
+            s->stats->received++;
+            s->stats->received_bytes += m->pkt_len;
+            if (meta->ingress_port >= RTE_MAX_ETHPORTS || s->ended || s->aborted) {
+                host_invalidate("invalid RX metadata or admission after end");
+                discard_invalid(s, m);
+                continue;
+            }
+            int line = classify(s, m);
+            s->admitted_frontier[meta->ingress_port] = meta->arrival_ns;
+            if (line == -2) host_invalidate("packet handed to a scheduler that does not own its line");
+            if (line < 0) {
+                discard_invalid(s, m);
+                continue;
+            }
+            meta->line = (uint16_t)line;
+            line_of[n] = (uint16_t)line; offer[n] = m; packets[n] = m; bytes[n] = m->pkt_len;
+            arrivals[n] = meta->arrival_ns; seqs[n] = meta->ingress_seq;
+            n++;
         }
-        int line = classify(s, m);
-        s->admitted_frontier[meta->ingress_port] = meta->arrival_ns;
-        if (line == -2) host_invalidate("packet handed to a scheduler that does not own its line");
-        if (line < 0) {
-            discard_invalid(s, m);
-            continue;
+        hng_lines_offer_burst(handles, line_of, packets, bytes, arrivals, seqs, n, results, records);
+        for (uint16_t k = 0; k < n; ++k) {
+            struct rte_mbuf *m = offer[k];
+            enum PushResult result = results[k];
+            if (result == Accepted) {
+                /* Annotate now, while the mbuf is cached; the record never changes after admission. */
+                packet_meta(m)->release_ns = records[k].release_ns;
+                packet_meta(m)->deadline_ns = records[k].deadline_ns;
+                m->port = host.lines[line_of[k]].egress_port;
+                continue;
+            }
+            if (result == QDrop || result == TraceLoss || result == TraceOutage) {
+                s->stats->emulator_drops++;
+            } else if (result == StorageDrop) {
+                s->stats->storage_drops++;
+                s->stats->storage_drop_bytes += m->pkt_len;
+                host_invalidate("core delay storage exhausted");
+            } else {
+                host_invalidate("core rejected timestamp/sequence/length");
+                discard_invalid(s, m);
+                continue;
+            }
+            rte_pktmbuf_free(m);
         }
-        meta->line = (uint16_t)line;
-        struct HngPacket record;
-        enum PushResult result = hng_line_offer_record(s->line[line], m, m->pkt_len,
-            meta->arrival_ns, meta->ingress_seq, &record);
-        if (result == Accepted) {
-            /* Annotate now, while the mbuf is cached; the record never changes after admission. */
-            meta->release_ns = record.release_ns;
-            meta->deadline_ns = record.deadline_ns;
-            m->port = host.lines[line].egress_port;
-            continue;
-        }
-        if (result == QDrop || result == TraceLoss || result == TraceOutage) {
-            s->stats->emulator_drops++;
-        } else if (result == StorageDrop) {
-            s->stats->storage_drops++;
-            s->stats->storage_drop_bytes += m->pkt_len;
-            host_invalidate("core delay storage exhausted");
-        } else {
-            host_invalidate("core rejected timestamp/sequence/length");
-            discard_invalid(s, m);
-            continue;
-        }
-        rte_pktmbuf_free(m);
     }
     s->consumed += count;
     if (s->ended && !s->aborted) {
