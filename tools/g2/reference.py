@@ -70,9 +70,9 @@ def trace_reference(value):
         raise ValueError("trace path/hash must be nonempty path and SHA-256 strings")
 
 
-def load_config(path):
+def load_config(path, *, contents=None):
     path = Path(path)
-    config = strict_json(path.read_text())
+    config = strict_json(path.read_bytes() if contents is None else contents)
     fields(config, ("schema", "lines"))
     if not isinstance(config["lines"], list):
         raise ValueError("lines must be an array")
@@ -370,7 +370,8 @@ def main():
     from .protocol import StreamReader, StreamWriter
     writer = None
     try:
-        config, traces = load_config(args.config)
+        config_contents = Path(args.config).read_bytes()
+        config, traces = load_config(args.config, contents=config_contents)
         ref = Reference(config, args.run, traces)
         source = StreamReader(args.ingress_jsonl, role="ingress", run=args.run)
         writer = StreamWriter(sys.stdout, args.run, "expected", "expected", source.header["clock_id"],
@@ -386,7 +387,7 @@ def main():
         summary.update(schema="hng-g2-reference-v1", expected_sha256=output_digest.hexdigest(),
                        trace_sha256={line["name"]: line["trace"]["sha256"].lower()
                                      for line in config["lines"] if line["trace"]},
-                       config_file_sha256=hashlib.sha256(Path(args.config).read_bytes()).hexdigest(),
+                       config_file_sha256=hashlib.sha256(config_contents).hexdigest(),
                        input_streams=[source.integrity], oracle_version="independent-fraction-v1")
         writer.emit("summary", **{key: value for key, value in summary.items() if key not in {"kind", "run"}})
         writer.finish()

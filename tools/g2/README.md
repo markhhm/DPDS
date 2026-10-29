@@ -67,6 +67,31 @@ python3 -m unittest tools.g2.tests.test_reference tools.g2.tests.test_report too
 python3 -m pytest tools/g2/tests
 ```
 
+`python3 -m tools.g2.validate manifest.json` is a registration preflight. It
+checks the complete v1 manifest, config/trace bytes and explicit calibration,
+without opening capture interfaces. Its `check=registration-preflight` result
+does **not** evaluate capture integrity or the four data-path gates. Those
+checks are listed as unavailable; `g2_qualified` remains false. Exit 0 means
+the preflight passed, not that a captured run passed G2.
+
+The executable manifest example is `tests/test_registration.py:manifest`.
+Port entries declare logical ingress/egress, link rate, TX `queue_id` and
+`rx_queue_ids`/`tx_queue_ids`. Lines must exactly match config port/VLAN mapping
+and list registered app labels. `clocks` maps `engine` and per-ingress
+`observation` IDs. Streams register unique role/ID/path/file-hash entries.
+Producer versions include explicit dependency versions. Every required cell
+registers its mask and `planned_survivors`; a pooled cell additionally declares
+distinct `pooled_repeats`. Default hash sampling stays at 1/1024. The planner
+uses the largest mask meeting the 0.001 undersampling risk target, with
+`N_plan(10)=440433` and `N_plan(0)=368`. Actual paired counts still determine
+timing sufficiency; registration cannot promise a passing interval.
+
+Capacity registration includes active-join and main-sample bounds, maximum join
+lag, ring/record widths, explicit processing/storage qualification booleans and
+named handoff queues. Offload registration covers FCS/VLAN retention, segments,
+segmentation/coalescing flags, CQE compression and timestamp mode. Full capture
+and counter validation remain part of the pending online report integration.
+
 Meson builds the pinned core's `examples/m2_replay.rs` adapter and includes all
 Python checks in `g2-software`. The million-event test compares **1,048,576**
 events in 32 cases, every admission outcome/Q occupancy, every survivor's

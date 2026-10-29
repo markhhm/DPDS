@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # HNG observer v1 implementation plan
 
-**Goal:** Finish software M2 against DPDS-Core `fd4ed12`, tip `158814e`,
+**Goal:** Finish software M2 against DPDS-Core `fd4ed12`, current spec `1be2960`,
 `docs/HNG-OBSERVER.md` (`hng-observer-v1`). Existing delivery is host20433e1,
 core4ae06c5. All work stays on the measurement branch; no hardware access.
 
@@ -134,3 +134,6 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
   port ordinals and exports source integrity, end/line counts and resource peaks.
   The in-process draft remains for differential checks. Debug custody replay and
   calibration are tested components; default online integration remains open.
+- Registration preflight verifies topology/queue layout, sources and calibration,
+  required-cell sample planning, pool declarations and bounded debug retention.
+  It is explicitly separate from captured-stream integrity and data-path gates.
