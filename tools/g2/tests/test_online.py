@@ -195,3 +195,18 @@ class OnlineTests(unittest.TestCase):
         report=cells.finish()["rows"][0]
         self.assertEqual(report["counts"]["received"],1)
         self.assertNotIn("missing_main_pairs",report["reason_codes"])
+
+    def test_diagnostic_cells_cannot_change_the_required_cell_verdict(self):
+        registration=manifest()
+        registration["required_cells"][1]["required"]=False
+        cells=OnlineCells(registration)
+        cells.violation(expected(0,"leo"),"unexpected_order")
+        report=cells.finish()
+        self.assertEqual(report["status"],"PASS")
+        self.assertFalse(report["rows"][1]["required"])
+
+    def test_empty_strata_have_explicit_applicability(self):
+        report=OnlineCells(manifest()).finish()
+        timing=report["rows"][0]["timing"]
+        for name in ("main","ordinary-main","late-main","late_extra","app_extra:app-a","app_extra:app-b"):
+            self.assertEqual(timing[name]["status"],"not_applicable")

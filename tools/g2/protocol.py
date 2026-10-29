@@ -100,12 +100,15 @@ def _dispatch_map(value):
         uint(item, "consumed handoff prefix")
 
 
-def _identity(value, required, optional=()):
+def _identity(value, required, optional=(), nullable_line=False):
     shape(value, required, optional)
     uint(value["ingress_port"], "ingress port", 65535)
     uint(value["ingress_seq"], "ingress sequence", U64-1)
     identifier(value["external_identity"], "external_identity")
-    identifier(value["line"], "line")
+    if nullable_line:
+        nullable(value["line"], identifier, "line")
+    else:
+        identifier(value["line"], "line")
 
 
 def _packet(value):
@@ -140,6 +143,12 @@ def _validate_record(row, role):
     identifier(row["run"], "run")
     identifier(row["stream_id"], "stream_id")
     uint(row["seq"], "stream sequence")
+    if isinstance(row.get("extensions"), dict) and "native_observer_v1" in row["extensions"]:
+        native = row["extensions"]["native_observer_v1"]
+        shape(native, ("producer", "producer_seq", "order"))
+        uint(native["producer"], "native producer", 4)
+        uint(native["producer_seq"], "native producer sequence")
+        uint(native["order"], "native reservation order")
     kind = row["kind"]
     if not isinstance(kind, str) or kind not in ROLES[role] | {"gap"}:
         raise ValueError(f"unsupported {role} record kind {kind!r}")
@@ -192,7 +201,8 @@ def _validate_record(row, role):
     elif kind in {"offer", "terminal"}:
         required = ENVELOPE + ("ingress_port", "ingress_seq", "external_identity", "line", "at_ns")
         required += ("actual_selection_seq",) if kind == "offer" else ("reason",)
-        _identity(row, required, ("subreason", "bytes") if kind == "terminal" else ())
+        _identity(row, required, ("subreason", "bytes") if kind == "terminal" else (),
+                  nullable_line=kind=="terminal" and row["reason"]=="invalid_input_drop")
         uint(row["at_ns"], "at_ns")
         if kind == "offer":
             uint(row["actual_selection_seq"], "actual selection sequence", U64-1)
@@ -343,6 +353,12 @@ def validate_record(row, role):
         if isinstance(exc, StreamError):
             raise
         raise StreamError("RECORD_SCHEMA", str(exc)) from exc
+
+
+def actor(row):
+    """A normalized logical stream may preserve several native SPSC actors."""
+    provenance = row.get("extensions", {}).get("native_observer_v1")
+    return (row["stream_id"], provenance["producer"]) if provenance is not None else row["stream_id"]
 
 
 def _header(row, role=None, run=None):

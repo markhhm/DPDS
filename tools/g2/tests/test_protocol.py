@@ -44,6 +44,16 @@ def stream(rows=None, role="ingress", **seal_changes):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_invalid_input_terminal_keeps_known_identity_with_an_unknown_line(self):
+        from tools.g2.protocol import validate_record
+        row=dict(kind="terminal",run="demo",stream_id="host",seq=1,
+                 ingress_port=0,ingress_seq=0,external_identity="known",line=None,
+                 at_ns=10,reason="invalid_input_drop")
+        validate_record(row,"host")
+        row["reason"]="handoff_drop"
+        with self.assertRaises(StreamError):
+            validate_record(row,"host")
+
     def read(self, data, **kwargs):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.jsonl"

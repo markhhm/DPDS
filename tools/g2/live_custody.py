@@ -4,6 +4,7 @@ from collections import Counter
 
 from .custody import MODEL_REASONS
 from .reference import Trace
+from .protocol import actor
 
 
 def key(row):
@@ -47,11 +48,11 @@ class LiveCustody:
         for port, total in self.input_next.items():
             count, frontier = seen[str(port)], frontiers[str(port)]
             through, ended = frontier["through_ns"], frontier["input_complete"]
-            old = self.snapshots.get((event["stream_id"], port))
+            old = self.snapshots.get((actor(event), port))
             if count > total or ended and (port not in self.input_end or count != total):
                 self.issue("ingress_prefix", "INCONCLUSIVE", event)
                 valid = False
-            if old and (count < old[0] or old[2] and not ended or old[1] is not None and
+            if old and (count < old[0] or old[2] and not ended or not ended and old[1] is not None and
                         (through is None or through < old[1])):
                 self.issue("backward_frontier", "INCONCLUSIVE", event)
                 valid = False
@@ -64,7 +65,7 @@ class LiveCustody:
                 if row["ingress_port"]==port and row["ingress_seq"]>=count and through is not None and row["arrival_ns"]<=through:
                     self.issue("frontier_unconsumed_input", "INVALID", row)
                     valid = False
-            self.snapshots[event["stream_id"], port] = count, through, ended
+            self.snapshots[actor(event), port] = count, through, ended
         return valid
 
     def gate(self, line, at, row):
@@ -103,9 +104,9 @@ class LiveCustody:
             if end<start or end>queue["next"]:
                 self.issue("consumed_dispatch_prefix", "INCONCLUSIVE", event)
                 continue
-            if queue["consumer"] not in {None, event["stream_id"]}:
+            if queue["consumer"] not in {None, actor(event)}:
                 self.issue("handoff_multiple_consumers", "INCONCLUSIVE", event)
-            queue["consumer"] = event["stream_id"]
+            queue["consumer"] = actor(event)
             for ordinal in range(start, end):
                 identity = queue["items"].pop(ordinal, None)
                 state = self.active.get(identity)
@@ -153,9 +154,9 @@ class LiveCustody:
             if queue is None:
                 self.issue("handoff_mapping", "INVALID", event)
                 return
-            if queue["producer"] not in {None, event["stream_id"]}:
+            if queue["producer"] not in {None, actor(event)}:
                 self.issue("handoff_multiple_producers", "INCONCLUSIVE", event)
-            queue["producer"] = event["stream_id"]
+            queue["producer"] = actor(event)
             if event["first_handoff_seq"]!=queue["next"]:
                 self.issue("dispatch_sequence", "INCONCLUSIVE", event)
                 return
@@ -188,14 +189,14 @@ class LiveCustody:
             queue["next"] += len(event["identities"])
             return
         port = event["egress_port"]
-        previous = self.attempts.get(port, (0, 0, event["stream_id"]))
+        previous = self.attempts.get(port, (0, 0, actor(event)))
         if event["attempt_id"]!=previous[0]:
             self.issue("attempt_sequence", "INCONCLUSIVE", event)
         if event["gate_ns"]<previous[1]:
             self.issue("attempt_time", "INVALID", event)
-        if event["stream_id"]!=previous[2]:
+        if actor(event)!=previous[2]:
             self.issue("multiple_tx_owners", "INCONCLUSIVE", event)
-        self.attempts[port] = event["attempt_id"]+1, event["submit_after_ns"], event["stream_id"]
+        self.attempts[port] = event["attempt_id"]+1, event["submit_after_ns"], actor(event)
         if self.ports.get(port)!=event["queue_id"]:
             self.issue("port_mapping", "INVALID", event)
         self.consume(event, event["consumed_dispatch"])

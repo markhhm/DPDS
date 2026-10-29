@@ -229,8 +229,8 @@ def _validate(manifest, config):
     capacity = manifest["capacity"]
     shape(capacity, ("max_unresolved", "timing_sample_capacity", "max_diagnostics", "max_join_lag_ns",
                     "observer_ring_records", "raw_record_bytes", "join_disk_bytes", "processing_qualified",
-                    "storage_qualified", "handoff_queues"), ("identity_index_capacity",))
-    if "identity_index_capacity" in capacity and not uint(capacity["identity_index_capacity"], "identity index capacity"):
+                    "storage_qualified", "handoff_queues", "identity_index_capacity"))
+    if not uint(capacity["identity_index_capacity"], "identity index capacity"):
         raise ValueError("identity index capacity must be positive")
     for key in ("max_unresolved", "timing_sample_capacity", "max_diagnostics", "max_join_lag_ns", "observer_ring_records"):
         if not uint(capacity[key], key):

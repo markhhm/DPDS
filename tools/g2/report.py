@@ -46,6 +46,22 @@ def write_outputs(result, destination):
     (destination / "summary.txt").write_text("\n".join(lines) + "\n")
 
 
+def error_report(exc, manifest):
+    code = getattr(exc, "code", "REPORT_INVALID")
+    state = getattr(exc, "measurement_status", "INVALID")
+    rows = []
+    for cell in manifest.get("required_cells", []) if isinstance(manifest.get("required_cells", []), list) else []:
+        if isinstance(cell, dict):
+            rows.append({**{name:cell.get(name) for name in ("condition_id","repeat","direction","line","phase")},
+                         "required":cell.get("required",True),"status":"INVALID","measurement_status":state,
+                         "g2_pass":False,"g2_qualified":False,"reason_codes":[code]})
+    return dict(schema="hng-g2-report-v1",run=manifest.get("run"),condition_id=manifest.get("condition_id"),
+        status="INVALID",measurement_status=state,scope=manifest.get("scope","software-only"),g2_qualified=False,
+        reason_codes=[code],reason=str(exc),rows=rows,sources={},directions={},stream_integrity=[],observer_cost={},
+        registration=manifest,stage1_source_commit=manifest.get("stage1_source_commit"),
+        stage1_source_review=manifest.get("stage1_source_review"),unavailable=["handled_setup_or_schema_error"])
+
+
 def identity(row):
     run, port, external = row["run"], row["ingress_port"], row["external_identity"]
     uint(port, "identity ingress port", 65535)
@@ -408,17 +424,22 @@ def main():
     parser.add_argument("--out", help="new directory for report.json, results.csv and summary.txt")
     args = parser.parse_args()
     destination = None
+    manifest = {}
+    counter_view = None
     try:
         if args.out:
             destination = Path(args.out)
             destination.mkdir(parents=True, exist_ok=False)
         with open(args.manifest_json) as source:
             manifest = strict_json(source.read())
+        if not isinstance(manifest,dict):
+            manifest = {}
+            raise ValueError("manifest must be an object")
         config, traces = load_config(args.config)
         if manifest.get("schema")=="hng-g2-manifest-v1":
             from .bundle import build_bundle_report
             from .validate import preflight
-            preflight(args.manifest_json)
+            checked_sources = preflight(args.manifest_json)
             if hashlib.sha256(Path(args.config).read_bytes()).hexdigest()!=manifest["config"]["sha256"]:
                 raise StreamError("SOURCE_HASH_MISMATCH", "positional config differs from registration")
             root = Path(args.manifest_json).parent
@@ -428,9 +449,32 @@ def main():
                 streams = [stream for stream in manifest["streams"] if stream["role"]==role]
                 if len(streams)!=1:
                     raise StreamError("POSITIONAL_PARTITION_UNSUPPORTED", "positional stream requires one registered partition")
+                if role=="counters":
+                    with open(path) as source:
+                        try:
+                            first = strict_json(source.readline())
+                        except ValueError:
+                            first = None
+                    if not isinstance(first,dict) or first.get("kind")!="header":
+                        counter_view = strict_json(Path(path).read_bytes())
+                        if not isinstance(counter_view,dict) or counter_view.get("schema")!="hng-g2-counters-v1":
+                            raise StreamError("COUNTER_VIEW_SCHEMA", "counter positional requires full snapshots or the normalized v1 view")
+                        continue
                 paths[streams[0]["stream_id"]] = path
             result = build_bundle_report(config, traces, manifest, paths,
                 strict_json((root/manifest["calibration_path"]).read_bytes()), destination)
+            result["sources"].update(checked_sources["sources"])
+            if counter_view is not None:
+                actual = result.get("counters")
+                fields = ("schema","run","scope","measurement_status","ports","observer","diagnostics", "descriptors","endpoints","reason_codes")
+                if actual is None or any(counter_view.get(name)!=actual.get(name) for name in fields):
+                    raise StreamError("COUNTER_VIEW_MISMATCH", "normalized counter view differs from sealed snapshots")
+                actual_streams = [row for row in result["stream_integrity"] if row.get("role")=="counters"]
+                claimed = {row["stream_id"]:row for row in counter_view.get("streams",[])}
+                if set(claimed)!={row["stream_id"] for row in actual_streams} or any(
+                        claimed[row["stream_id"]].get("file_sha256")!=row["file_sha256"] for row in actual_streams):
+                    raise StreamError("COUNTER_VIEW_MISMATCH", "normalized counter view lacks matching source hashes")
+                result["sources"]["counter_view_sha256"] = hashlib.sha256(Path(args.counters_json).read_bytes()).hexdigest()
         else:
             # Legacy draft input remains restricted to explicit software fixtures.
             with open(args.expected_jsonl) as source:
@@ -445,9 +489,7 @@ def main():
                 counters = strict_json(source.read())
             result = build_report(rows[:-1], rows[-1], received, counters, config, manifest, traces)
     except (ValueError, KeyError, TypeError, OSError) as exc:
-        result = dict(schema="hng-g2-report-v1", status="INVALID", measurement_status=getattr(exc, "measurement_status", "INVALID"),
-                      reason_codes=[getattr(exc, "code", "REPORT_INVALID")], reason=str(exc),
-                      scope="software-only", g2_qualified=False, rows=[])
+        result = error_report(exc, manifest)
         if isinstance(exc, FileExistsError):
             destination = None
     if destination is not None:

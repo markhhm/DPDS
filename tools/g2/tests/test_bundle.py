@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Complete synthetic streams exercise the default bounded oracle boundary."""
 import copy
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,8 @@ import tempfile
 import unittest
 
 from tools.g2.protocol import StreamWriter
+from tools.g2.protocol import StreamReader
+from tools.g2.counters import normalize_counters
 from tools.g2.reference import Reference, canonical
 from tools.g2.tests.test_calibration import document
 from tools.g2.tests.test_counters import OBSERVER_FIELDS, PORT_FIELDS, snapshot
@@ -94,7 +97,7 @@ def fixture(root, count=400, mutate=None, mode="stream"):
         if row["scope"]=="observer" and row["phase"]=="end" and not row["values"]["records_dropped"]:
             row["values"].update(records_attempted=len(rows[row["scope_id"]]),
                                  records_emitted=len(rows[row["scope_id"]]))
-    sources = {}
+    sources, input_integrity = {}, []
     for role, events in rows.items():
         path = root / f"{role}.jsonl"
         writer = StreamWriter(path, "demo", role, role, "engine" if role not in {"before", "receiver"} else "obs")
@@ -103,12 +106,19 @@ def fixture(root, count=400, mutate=None, mode="stream"):
             values = {key:value for key,value in event.items() if key not in {"kind", "run", "stream_id", "seq"}}
             if event["kind"]=="summary":
                 values["expected_sha256"] = digest.hexdigest()
+                values.setdefault("input_streams", input_integrity)
+                values.setdefault("trace_sha256", {})
+                values.setdefault("config_file_sha256", hashlib.sha256(json.dumps(cfg).encode()).hexdigest())
             written = writer.emit(event["kind"], **values)
             if event["kind"]=="expected":
                 digest.update(canonical(written)+b"\n")
-        writer.finish()
+        seal = writer.finish()
         sources[role] = path
         next(stream for stream in reg["streams"] if stream["role"]==role)["file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        if role=="ingress":
+            input_integrity.append(dict(stream_id=role, role=role,
+                file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), records_sha256=seal["records_sha256"],
+                record_count=seal["record_count"],complete=True,dropped_records=0,issues=[]))
     raw = json.dumps(cfg).encode()
     (root/"engine.json").write_bytes(raw)
     reg["config"]["sha256"] = hashlib.sha256(raw).hexdigest()
@@ -139,6 +149,12 @@ class BundleTests(unittest.TestCase):
         self.assertLessEqual(result["observer_cost"]["active_join_peak"], 32)
         self.assertTrue(result["identity_index"]["released"])
         self.assertFalse(result["g2_qualified"])
+        self.assertTrue({"counters", "q", "serialization", "clamp", "outage", "clock",
+                         "offered_bps_l1", "delivered_bps_l1", "delivered_bps_l2", "pps", "l7_bps"}<=set(row))
+        self.assertEqual(row["shared_q_drops"], 0)
+        self.assertEqual(row["probe_sent"], 0)
+        self.assertEqual(row["serialization"]["modeled"]["wait"]["n"], 400)
+        self.assertEqual(row["serialization"]["actual_attempt"]["wait"]["n"], 400)
 
     def test_receive_wire_order_is_independent_of_export_order(self):
         result = self.run_bundle(mutate=lambda rows, reg: rows["receiver"].reverse())
@@ -189,6 +205,9 @@ class BundleTests(unittest.TestCase):
     def test_complete_wire_swap_fails_even_when_export_lines_stay_in_ingress_order(self):
         def swap(rows, reg):
             rows["receiver"][0]["receive_seq"], rows["receiver"][1]["receive_seq"] = 1, 0
+            for index, time in ((0, 2001), (1, 2000)):
+                rows["receiver"][index]["receive_ns"] = time
+                rows["receiver"][index]["timestamp"]["raw"] = time
         result = self.run_bundle(mutate=swap)
         self.assertEqual(result["status"], "FAIL")
         self.assertIn("unexpected_order", result["rows"][0]["observed_failures"])
@@ -253,6 +272,43 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(result["status"], "INVALID")
         self.assertIn("join_lag_exceeded", result["reason_codes"])
 
+    def test_clock_regression_is_checked_in_wire_order(self):
+        def regress(rows, reg):
+            rows["receiver"][1]["receive_ns"] = 190
+            rows["receiver"][1]["timestamp"]["raw"] = 190
+        result = self.run_bundle(mutate=regress)
+        self.assertIn("CLOCK_BACKWARD", result["reason_codes"])
+        self.assertEqual(result["rows"][0]["measurement_status"], "INCONCLUSIVE")
+
+    def test_reference_summary_end_counts_are_verified(self):
+        def fault(rows, reg):
+            rows["expected"][-1]["end_counts"] = {"0":399}
+        result = self.run_bundle(mutate=fault)
+        self.assertEqual(result["status"], "INVALID")
+        self.assertIn("reference_summary_mismatch", result["reason_codes"])
+
+    def test_reference_summary_must_bind_full_ingress_marker_streams(self):
+        def fault(rows, reg):
+            rows["expected"][-1]["input_streams"] = []
+        result = self.run_bundle(mutate=fault)
+        self.assertEqual(result["status"], "INVALID")
+        self.assertIn("reference_input_stream_mismatch", result["reason_codes"])
+
+    def test_input_end_certificate_is_available_to_last_dispatch(self):
+        def ended(rows, reg):
+            for row in rows["host"][-2:]:
+                row["frontiers"]["0"].update(input_complete=True, through_ns=None)
+        self.assertEqual(self.run_bundle(mutate=ended)["status"], "PASS")
+
+    def test_counter_endpoints_must_cover_the_complete_host_drain(self):
+        def early(rows, reg):
+            for row in rows["counters"]:
+                if row["phase"]=="end":
+                    row["at_ns"] = 100
+        result = self.run_bundle(mutate=early)
+        self.assertEqual(result["status"], "INVALID")
+        self.assertIn("counter_window_incomplete", result["reason_codes"])
+
     def test_index_capacity_invalidates_a_numeric_failure_and_releases_memory(self):
         def fault(rows, reg):
             reg["capacity"]["identity_index_capacity"] = 2
@@ -272,6 +328,58 @@ class BundleTests(unittest.TestCase):
         result = subprocess.run(command, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2)
         self.assertTrue({"report.json", "results.csv", "summary.txt"}<={path.name for path in out.iterdir()})
+        error = json.loads((out/"report.json").read_text())
+        self.assertTrue({"run", "condition_id", "sources", "rows", "directions", "stream_integrity",
+                         "observer_cost", "registration", "unavailable"}<=set(error))
+
+    def test_cli_csv_has_stable_columns_and_numeric_cell_counters(self):
+        fixture(self.root)
+        out = self.root/"result"
+        command = [sys.executable, "-m", "tools.g2.report", *[str(self.root/name) for name in (
+            "engine.json", "expected.jsonl", "receiver.jsonl", "counters.jsonl", "manifest.json")], "--out", str(out)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        with (out/"results.csv").open() as stream:
+            reader = csv.DictReader(stream)
+            self.assertEqual(",".join(reader.fieldnames), "condition_id,repeat,direction,line,phase,status,measurement_status,g2_pass,g2_qualified,error_median_ms,error_p99_ms,delay_storage_drops,capture_drops,nic_drops,shared_q_status,shared_q_drops,trace_loss_drops,trace_outage_drops,probe_sent,probe_received,probe_lost,probe_selected_late,probe_actual_ooo,probe_selected_late_ooo,probe_unexpected_ooo,timing_samples,reasons")
+            row = next(reader)
+            self.assertEqual((row["capture_drops"],row["shared_q_drops"],row["probe_sent"],row["timing_samples"]),
+                             ("0","0","0","400"))
+            self.assertEqual(row["nic_drops"], "")
+        before = {path.name:path.read_bytes() for path in out.iterdir()}
+        again = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(again.returncode, 2)
+        self.assertEqual({path.name:path.read_bytes() for path in out.iterdir()}, before)
+
+    def test_preflight_error_report_has_final_shape_and_registered_invalid_rows(self):
+        fixture(self.root)
+        (self.root/"engine.json").write_text("{}")
+        out = self.root/"result"
+        command = [sys.executable, "-m", "tools.g2.report", *[str(self.root/name) for name in (
+            "engine.json", "expected.jsonl", "receiver.jsonl", "counters.jsonl", "manifest.json")], "--out", str(out)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        report = json.loads((out/"report.json").read_text())
+        self.assertEqual(report["run"], "demo")
+        self.assertEqual(report["rows"][0]["status"], "INVALID")
+        self.assertTrue({"sources","directions","stream_integrity","observer_cost","registration","unavailable"}<=set(report))
+
+    def test_normalized_counter_positional_view_is_verified_against_the_sealed_snapshots(self):
+        _, registration, sources, _ = fixture(self.root)
+        reader = StreamReader(sources["counters"])
+        normalized = normalize_counters(reader,registration)
+        normalized["streams"] = [reader.integrity]
+        view = self.root/"counters.json"
+        view.write_text(json.dumps(normalized,indent=2))
+        command = [sys.executable,"-m","tools.g2.report",*[str(self.root/name) for name in (
+            "engine.json","expected.jsonl","receiver.jsonl","counters.json","manifest.json")]]
+        result = subprocess.run(command,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        normalized["ports"]["0"]["tx_accepted"] -= 1
+        view.write_text(json.dumps(normalized))
+        result = subprocess.run(command,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,2)
+        self.assertIn("COUNTER_VIEW_MISMATCH",json.loads(result.stdout)["reason_codes"])
 
 
 if __name__ == "__main__":
