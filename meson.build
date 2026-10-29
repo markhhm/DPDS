@@ -3,7 +3,7 @@ project('dpds', 'c', version: '0.2', meson_version: '>=0.56.0',
 dpdk = dependency('libdpdk', required: true)
 configure_file(input: 'config.json', output: 'config.json', copy: true)
 cargo_build = custom_target('dpds-core', output: 'libdpds_core.stamp',
-  command: ['sh', '-c', 'cargo build --locked --release --manifest-path "' + meson.project_source_root() / 'dpds-core/Cargo.toml' + '" && touch @OUTPUT@'],
+  command: ['sh', '-c', 'cargo build --locked --release --lib --examples --manifest-path "' + meson.project_source_root() / 'dpds-core/Cargo.toml' + '" && touch @OUTPUT@'],
   build_by_default: true, build_always_stale: true, console: true)
 core = declare_dependency(
   link_args: ['-L' + meson.project_source_root() / 'dpds-core/target/release', '-ldpds_core'],
@@ -26,3 +26,8 @@ endforeach
 python = find_program('python3')
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
+
+test('g2-software', python,
+  args: ['-m', 'unittest', 'tools.g2.tests.test_reference',
+         'tools.g2.tests.test_report', 'tools.g2.tests.test_probe', 'tools.g2.tests.test_differential'],
+  workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
