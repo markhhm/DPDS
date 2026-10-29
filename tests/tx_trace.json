@@ -29,7 +29,7 @@
       "egress_port": 13,
       "vlan_id": 101,
       "model": {
-        "c_bps": 8000000000,
+        "c_bps": 800,
         "q_bytes": 80,
         "t_ns": 0,
         "delta_ns": 0,
@@ -45,7 +45,7 @@
       },
       "trace": {
         "path": "fixtures/trace-hold.json",
-        "sha256": "c6e36b656330d6eb9d32bd3a3659a5a7c11913cab2228c9243688bf9e4d2ec80"
+        "sha256": "c8397f8f0cb62828dc729765d94d8274863053f1622e698632d9ba797b4cb58d"
       }
     },
     {

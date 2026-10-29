@@ -42,9 +42,9 @@ int main(int argc, char **argv)
     assert(delivered == 1 && ids[0] == 1 && tx_has_backlog(&tx) && !host.invalid);
     tx_step_at(&tx, NULL, 0, 299);
     assert(delivered == 1);
-    tx_step_at(&tx, NULL, 0, 300);
+    tx_step_at(&tx, NULL, 0, 2000000300);
     assert(delivered == 3 && ids[1] == 0 && ids[2] == 2 && !tx_has_backlog(&tx));
-    assert(stats.tx.late_submit_packets == 3 && stats.tx.late_submit_max_ns == 110);
+    assert(stats.tx.late_submit_packets == 3 && stats.tx.late_submit_max_ns == 2000000110);
     batch[0] = packet(pool, 2, 3, 190);
     tx_step_at(&tx, batch, 1, 250);
     assert(host.invalid && quit_signal_receive && stats.tx.trace_outage_drops == 1);

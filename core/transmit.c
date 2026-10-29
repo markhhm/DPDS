@@ -59,6 +59,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             continue;
         }
         packet_meta(m)->pending_since_ns = now;
+        packet_meta(m)->retry_active = false;
         table->m_table[table->len++] = m;
         if (table->len > s->stats->pending_peak) s->stats->pending_peak = table->len;
     }
@@ -91,7 +92,8 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                 remove_head(table);
                 continue;
             }
-            if (gate != 0 || now - packet_meta(m)->pending_since_ns > TERMINAL_TIMEOUT_NS) {
+            if (gate != 0 || (packet_meta(m)->retry_active &&
+                now - packet_meta(m)->retry_since_ns > TERMINAL_TIMEOUT_NS)) {
                 host_invalidate(gate ? "TX trace coverage expired" : "TX retry timeout");
                 terminal_drop(s, line);
                 continue;
@@ -110,7 +112,6 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                 if (key_before(s->pending[line].m_table[0], table->m_table[i])) { n = i; break; }
             }
         }
-        if (live_clock) now = host_now_ns();
         if (host.policies[chosen] && hng_tx_policy_gate(host.policies[chosen], now) != 0) continue;
         uint32_t bytes[MAX_BURST_SIZE];
         uint64_t lateness[MAX_BURST_SIZE];
@@ -140,6 +141,10 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         table->len -= sent;
         memmove(table->m_table, table->m_table + sent, table->len * sizeof(table->m_table[0]));
         if (sent < n) {
+            for (uint16_t i = 0; i < n - sent; ++i) {
+                struct packet_meta *meta = packet_meta(table->m_table[i]);
+                if (!meta->retry_active) { meta->retry_active = true; meta->retry_since_ns = now; }
+            }
             s->stats->retries++;
             blocked_port[port] = true;
         }

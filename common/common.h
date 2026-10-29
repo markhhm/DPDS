@@ -12,7 +12,8 @@
 extern _Atomic uint8_t quit_signal_receive, quit_signal_worker, quit_signal_transmit;
 #define HNG_MAX_LINES 4
 struct packet_meta {
-    uint64_t arrival_ns, ingress_seq, release_ns, deadline_ns, pending_since_ns;
+    uint64_t arrival_ns, ingress_seq, release_ns, deadline_ns, pending_since_ns, retry_since_ns;
+    bool retry_active;
     uint16_t ingress_port, vlan_id, line;
 };
 static inline struct packet_meta *packet_meta(struct rte_mbuf *m) {
