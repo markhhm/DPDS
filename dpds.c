@@ -154,7 +154,6 @@ int main(int argc, char **argv)
         functions[2] = (lcore_function_t *)lcore_receive;
     }
     host.epoch_cycles = rte_get_timer_cycles();
-    printf("layout=%u-lcore\n", workers + 1);
     for (unsigned i = 0; i < workers; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
         if (!parameters) rte_exit(EXIT_FAILURE, "Cannot allocate core parameters\n");
@@ -162,6 +161,8 @@ int main(int argc, char **argv)
         if (rte_eal_remote_launch(functions[i], parameters, cores[i]) != 0)
             rte_exit(EXIT_FAILURE, "Cannot launch lcore\n");
     }
+    printf("layout=%u-lcore\n", workers + 1);
+    fflush(stdout);
     RTE_LCORE_FOREACH_WORKER(core) {
         if (rte_eal_wait_lcore(core) < 0) host_invalidate("lcore failed");
     }
