@@ -15,7 +15,8 @@
  * departure is the tick of the TX burst that sent it; TX must drain every call.
  * TX totals and per-line counts match across all three layouts; burst sizes
  * follow the scheduler's call batching, so layout 3 matches layout 2 on every
- * TX counter.
+ * TX counter. A second pass uses a TX that refuses the first offer of every
+ * fifth sequence number: TX retries at the same tick, so records stay the same.
  *
  * The single-owner output must also match a golden digest from the pre-M4
  * scheduler (DPDS d75f4fc). Regenerate it by building this file with
@@ -78,11 +79,16 @@ static unsigned collect(struct output *o, struct rte_mbuf **m, unsigned n, uint6
 /* The TX burst function records departures at the current tick instead of a NIC. */
 static struct output *tx_out;
 static uint64_t tx_now;
+static bool refuse;
 static uint16_t capture(uint16_t port, uint16_t queue, struct rte_mbuf **m, uint16_t n)
 {
     (void)queue;
     assert(n && m[0]->port == port);
-    return (uint16_t)collect(tx_out, m, n, tx_now);
+    uint16_t accept = n;
+    /* Refuse from the first frame offered for the first time whose sequence is a multiple of 5. */
+    for (uint16_t i = 0; refuse && i < n && accept == n; ++i)
+        if (!packet_meta(m[i])->retry_active && packet_meta(m[i])->ingress_seq % 5 == 0) accept = i;
+    return (uint16_t)collect(tx_out, m, accept, tx_now);
 }
 #endif
 
@@ -106,7 +112,8 @@ static unsigned to_tx(struct tx_state *tx, struct rte_mbuf **m, unsigned n, uint
 {
     tx_now = now;
     tx_step_at(tx, m, (uint16_t)n, now);
-    assert(!tx_has_backlog(tx));
+    /* A refused frame blocks its port for this step; retry at the same tick. */
+    for (unsigned retry = 0; tx_has_backlog(tx); ++retry) { assert(refuse && retry < 64); tx_step_at(tx, NULL, 0, now); }
     return n;
 }
 #endif
@@ -229,37 +236,45 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < HNG_MAX_LINES; ++i) { q_drops += a[i].q_drops; late += a[i].selected_late; }
     assert(q_drops > 0 && late > 0 && ta.emulator_drops == q_drops && ta.sent > 0);
     assert(txa.transmitted == ta.sent && txa.tx_drops == 0 && txa.retries == 0);
-    /* Layout 2: scheduler per ingress port. Layout 3: also RX and TX per direction. */
-    static struct tx_stats txs;
-    for (unsigned layout = 2; layout <= 3; ++layout) {
-        static struct output split[2];
-        struct HngStats b[HNG_MAX_LINES];
-        struct totals tb;
-        static struct tx_stats txb;
-        memset(split, 0, sizeof(split));
-        run(layout, split, b, &tb, &txb);
-        for (unsigned p = 0; p < 2; ++p) {
-            assert(single[p].n == split[p].n && single[p].n > 0);
-            assert(!memcmp(single[p].r, split[p].r, single[p].n * sizeof(struct record)));
+    /* Layout 2: scheduler per ingress port. Layout 3: also RX and TX per direction.
+     * Pass 0: TX accepts every frame. Pass 1: TX refuses some first offers. */
+    uint64_t retries = 0;
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        refuse = pass == 1;
+        static struct tx_stats txs;
+        for (unsigned layout = pass ? 1 : 2; layout <= 3; ++layout) {
+            static struct output split[2];
+            struct HngStats b[HNG_MAX_LINES];
+            struct totals tb;
+            static struct tx_stats txb;
+            memset(split, 0, sizeof(split));
+            run(layout, split, b, &tb, &txb);
+            for (unsigned p = 0; p < 2; ++p) {
+                assert(single[p].n == split[p].n && single[p].n > 0);
+                assert(!memcmp(single[p].r, split[p].r, single[p].n * sizeof(struct record)));
+            }
+            assert(ta.sent == tb.sent && ta.emulator_drops == tb.emulator_drops && ta.tx_ring_drops == tb.tx_ring_drops);
+            for (unsigned i = 0; i < HNG_MAX_LINES; ++i) {
+                assert(a[i].accepted == b[i].accepted && a[i].q_drops == b[i].q_drops && a[i].dequeued == b[i].dequeued);
+                assert(a[i].selected_late == b[i].selected_late && a[i].q_high_water_bytes == b[i].q_high_water_bytes);
+            }
+            /* TX counters: totals, lateness and per-line counts match the single owner without
+             * refusals. Burst sizes, pending_peak and retries depend on how the scheduler
+             * batches its output, so layout 3 must match layout 2 of the same pass on every field. */
+            assert(txa.received == txb.received && txa.received_bytes == txb.received_bytes);
+            assert(txa.transmitted == txb.transmitted && txa.transmitted_bytes == txb.transmitted_bytes);
+            assert(txa.tx_drops == txb.tx_drops && txa.trace_outage_drops == txb.trace_outage_drops);
+            assert(txa.late_submit_packets == txb.late_submit_packets && txa.late_submit_total_ns == txb.late_submit_total_ns);
+            assert(txa.late_submit_max_ns == txb.late_submit_max_ns);
+            assert(!memcmp(txa.line_transmitted, txb.line_transmitted, sizeof(txa.line_transmitted)));
+            assert(!memcmp(txa.line_transmitted_bytes, txb.line_transmitted_bytes, sizeof(txa.line_transmitted_bytes)));
+            assert(pass ? txb.retries > 0 : txb.retries == 0);
+            if (pass) retries += txb.retries;
+            if (layout == 2) txs = txb;
+            else if (layout == 3) assert(!memcmp(&txs, &txb, sizeof(txs)));
         }
-        assert(ta.sent == tb.sent && ta.emulator_drops == tb.emulator_drops && ta.tx_ring_drops == tb.tx_ring_drops);
-        for (unsigned i = 0; i < HNG_MAX_LINES; ++i) {
-            assert(a[i].accepted == b[i].accepted && a[i].q_drops == b[i].q_drops && a[i].dequeued == b[i].dequeued);
-            assert(a[i].selected_late == b[i].selected_late && a[i].q_high_water_bytes == b[i].q_high_water_bytes);
-        }
-        /* Every TX counter, including per-line counts, peaks and burst histograms. */
-        /* TX counters: totals and per-line counts match the single owner. Burst sizes and
-         * pending_peak depend on how the scheduler calls batch output, so the per-direction
-         * TX layout must match the per-direction scheduler layout (2) on every field. */
-        assert(txa.received == txb.received && txa.received_bytes == txb.received_bytes);
-        assert(txa.transmitted == txb.transmitted && txa.transmitted_bytes == txb.transmitted_bytes);
-        assert(txa.tx_drops == txb.tx_drops && txa.retries == txb.retries && txa.trace_outage_drops == txb.trace_outage_drops);
-        assert(txa.late_submit_packets == txb.late_submit_packets && txa.late_submit_total_ns == txb.late_submit_total_ns);
-        assert(!memcmp(txa.line_transmitted, txb.line_transmitted, sizeof(txa.line_transmitted)));
-        assert(!memcmp(txa.line_transmitted_bytes, txb.line_transmitted_bytes, sizeof(txa.line_transmitted_bytes)));
-        if (layout == 2) txs = txb;
-        else assert(!memcmp(&txs, &txb, sizeof(txs)));
     }
+    refuse = false;
     /* Handles are taken in host_load before launch; taking one after launch fails the run. */
     assert(host_load("split.json") && !host.invalid);
     /* Each ingress port feeds one egress port, as the 7-lcore layout requires. */
@@ -274,9 +289,9 @@ int main(int argc, char **argv)
     assert(!host_take_line_handles() && host.invalid);
     host_cleanup();
     printf("single owner vs per-direction owners vs per-direction RX/scheduler/TX: egress0=%zu egress1=%zu"
-        " sent=%" PRIu64 " q_drops=%" PRIu64 " late=%" PRIu64 " digest0=%016" PRIx64 " digest1=%016" PRIx64
+        " sent=%" PRIu64 " q_drops=%" PRIu64 " late=%" PRIu64 " refused_retries=%" PRIu64 " late_submit_max_ns=%" PRIu64 " digest0=%016" PRIx64 " digest1=%016" PRIx64
         " identical_records_departures_counters=PASS pre_m4_golden=PASS\n",
-        single[0].n, single[1].n, ta.sent, q_drops, late, digest(single), digest(single + 1));
+        single[0].n, single[1].n, ta.sent, q_drops, late, retries, txa.late_submit_max_ns, digest(single), digest(single + 1));
 #endif
     assert(rte_mempool_avail_count(pool) == 4095);
     rte_mempool_free(pool);
