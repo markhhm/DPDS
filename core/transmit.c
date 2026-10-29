@@ -179,10 +179,14 @@ void tx_state_cleanup(struct tx_state *s)
 
 void tx_stats_merge(struct tx_stats *dst, const struct tx_stats *src)
 {
-    /* Every field is a uint64_t counter (the struct is only uint64_t and their arrays). */
+    /* Summed as one uint64_t array except the two maxima. Adding a field breaks this
+     * count on purpose: check it is a summable counter or a maximum, then update it. */
+    enum { COUNTERS = 13 + 4 * HNG_MAX_LINES + BURST_HIST_BUCKETS };
+    _Static_assert(offsetof(struct tx_stats, burst_hist) + sizeof(dst->burst_hist) == COUNTERS * sizeof(uint64_t),
+        "tx_stats changed: review tx_stats_merge");
     uint64_t *d = (uint64_t *)dst;
     const uint64_t *s = (const uint64_t *)src;
-    for (size_t i = 0; i < sizeof(*dst) / sizeof(uint64_t); ++i) {
+    for (size_t i = 0; i < COUNTERS; ++i) {
         size_t at = i * sizeof(uint64_t);
         bool peak = at == offsetof(struct tx_stats, pending_peak) || at == offsetof(struct tx_stats, late_submit_max_ns);
         d[i] = peak ? (d[i] > s[i] ? d[i] : s[i]) : d[i] + s[i];

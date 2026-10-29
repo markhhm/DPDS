@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
@@ -66,10 +67,14 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
 
 void rx_stats_merge(struct rx_stats *dst, const struct rx_stats *src)
 {
-    /* Every field is a uint64_t counter. */
+    /* Summed as one uint64_t array. Adding a field breaks this count on purpose:
+     * check it is a summable counter, then update the count. */
+    enum { COUNTERS = 5 + 2 + BURST_HIST_BUCKETS };
+    _Static_assert(offsetof(struct rx_stats, burst_hist) + sizeof(dst->burst_hist) == COUNTERS * sizeof(uint64_t),
+        "rx_stats changed: review rx_stats_merge");
     uint64_t *d = (uint64_t *)dst;
     const uint64_t *s = (const uint64_t *)src;
-    for (size_t i = 0; i < sizeof(*dst) / sizeof(uint64_t); ++i) d[i] += s[i];
+    for (size_t i = 0; i < COUNTERS; ++i) d[i] += s[i];
 }
 
 int lcore_receive(struct lcore_parameters *parameters)
