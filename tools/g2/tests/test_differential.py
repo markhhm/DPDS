@@ -122,6 +122,21 @@ class DifferentialTests(unittest.TestCase):
         self.assertEqual(intended.finish()["line_counts"]["line-0"]["accepted"], 3)
         self.assertEqual([row["outcome"] for row in expected], ["accepted"] * 3)
 
+    def test_legacy_diagnostics_use_actual_selector_after_invalid_and_storage_faults(self):
+        # Software fault fixture: invalid offers consume no selector; storage faults do.
+        events = [dict(ingress_seq=i, arrival_ns=t, length=length)
+                  for i, (t, length) in enumerate([(0, 76), (100, 0), (100, 0),
+                                                   (100, 76), (1100, 76), (1101, 76)])]
+        rows = replay(dict(model=model(t_ns=1000, p="0.5", seed=3, storage_capacity_packets=1)), events)
+        admissions = [row for row in rows if row["kind"] == "admission"]
+        self.assertEqual([row["outcome"] for row in admissions],
+                         ["accepted", "invalid_input", "invalid_input", "storage_drop", "storage_drop", "accepted"])
+        self.assertEqual([row["selection_seq"] for row in admissions], [0, 1, 1, 1, 2, 3])
+        self.assertEqual([row["late"] for row in admissions], [True, False, False, False, False, True])
+        outputs = [row for row in rows if row["kind"] == "output"]
+        self.assertEqual([(row["ingress_seq"], row["selection_seq"], row["late"]) for row in outputs],
+                         [(0, 0, True), (5, 3, True)])
+
     def test_optimized_python_cannot_disable_mismatch_detection(self):
         with tempfile.TemporaryDirectory() as directory:
             bad = Path(directory) / "bad-core"
