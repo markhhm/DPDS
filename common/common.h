@@ -22,6 +22,7 @@ static inline struct packet_meta *packet_meta(struct rte_mbuf *m) {
 struct ingress_frontier {
     _Atomic uint64_t version, enqueued, watermark_ns;
 };
+struct port_resources { uint16_t rx_descriptors, tx_descriptors; bool prepared; };
 struct host_context {
     struct Engine *engine;
     struct LineInfo lines[HNG_MAX_LINES];
@@ -29,6 +30,7 @@ struct host_context {
     size_t line_count;
     uint16_t ports[RTE_MAX_ETHPORTS], port_count;
     struct ingress_frontier frontier[RTE_MAX_ETHPORTS];
+    struct port_resources resources[RTE_MAX_ETHPORTS];
     uint64_t epoch_cycles, cycles_hz;
     _Atomic bool invalid;
 };
@@ -66,6 +68,8 @@ struct lcore_parameters {
     uint16_t num_ports;
 };
 void signal_handler(int signum);
+int host_prepare_port(uint16_t port);
+unsigned host_pool_objects(uint16_t ingress_port, unsigned lcores);
 int initialize_port(uint16_t port, struct rte_mempool *pool);
 int close_port(uint16_t port);
 #endif

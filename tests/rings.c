@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <rte_eal.h>
@@ -16,6 +17,22 @@ static struct lcore_parameters *parameters(struct pipeline_stats *stats, struct 
 int main(int argc, char **argv)
 {
     assert(rte_eal_init(argc, argv) >= 0 && host_load("rings.json"));
+    assert(host_pool_objects(0, 2) == 0);
+    assert(host_prepare_port(0) == 0 && host_prepare_port(1) == 0);
+    struct port_resources saved0 = host.resources[0], saved1 = host.resources[1];
+    /* Synthetic adjusted PMD limits: RX512 + egressTX768 + reserves3200 + storage64. */
+    host.resources[0].rx_descriptors = 512;
+    host.resources[0].tx_descriptors = 1024;
+    host.resources[1].tx_descriptors = 768;
+    assert(host_pool_objects(0, 2) == 4544);
+    host.lines[2].egress_port = 0;
+    assert(host_pool_objects(0, 2) == 5568);
+    size_t saved_capacity = host.lines[0].storage_capacity_packets;
+    host.lines[0].storage_capacity_packets = UINT_MAX - 4481u;
+    assert(host_pool_objects(0, 2) == 0);
+    host.lines[0].storage_capacity_packets = saved_capacity;
+    host.lines[2].egress_port = 1;
+    host.resources[0] = saved0; host.resources[1] = saved1;
     struct rte_mempool *pool = rte_pktmbuf_pool_create("rings_test", 1023, 0,
         RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN),
         RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());

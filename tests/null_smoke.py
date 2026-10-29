@@ -21,4 +21,6 @@ for cores in (2, 3, 4):
         assert f"layout={cores}-lcore" in output, output
         assert "conservation=PASS byte_conservation=PASS status=DRAINED" in output, output
         assert output.count("owned=0") == 2, output
+        for port in (0, 1):
+            assert output.index(f"descriptors port={port} ") < output.index("pool port=0 "), output
         print(f"null PMD {cores} lcores no_rx={no_rx}: PASS")

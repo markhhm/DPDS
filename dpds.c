@@ -106,14 +106,14 @@ int main(int argc, char **argv)
             !rte_eth_dev_is_valid_port(host.lines[i].egress_port))
             rte_exit(EXIT_FAILURE, "Line %zu references an unavailable port\n", i);
     }
+    for (uint16_t i = 0; i < host.port_count; ++i)
+        if (host_prepare_port(host.ports[i]) != 0)
+            rte_exit(EXIT_FAILURE, "Port %u descriptor preflight failed\n", host.ports[i]);
     struct rte_mempool *pools[RTE_MAX_ETHPORTS] = {0};
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
-        uint64_t count = RX_RING_SIZE + TX_RING_SIZE + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ +
-            MBUF_CACHE_SIZE * rte_lcore_count() + HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE;
-        for (size_t line = 0; line < host.line_count; ++line)
-            if (host.lines[line].ingress_port == port) count += host.lines[line].storage_capacity_packets;
-        if (count > UINT_MAX) rte_exit(EXIT_FAILURE, "Pool envelope too large\n");
+        uint64_t count = host_pool_objects(port, rte_lcore_count());
+        if (!count) rte_exit(EXIT_FAILURE, "Port %u has an invalid pool envelope\n", port);
         char name[32];
         snprintf(name, sizeof(name), "ingress_pool_%u", port);
         int socket = rte_eth_dev_socket_id(port);
@@ -126,8 +126,11 @@ int main(int argc, char **argv)
         rte_mempool_calc_obj_size(pools[port]->elt_size, pools[port]->flags, &size);
         printf("pool port=%u numa=%d objects=%"PRIu64" object_bytes=%u total_object_bytes=%"PRIu64"\n",
             port, socket, count, size.total_size, count * size.total_size);
+    }
+    for (uint16_t i = 0; i < host.port_count; ++i) {
+        port = host.ports[i];
         if (initialize_port(port, pools[port]) != 0) rte_exit(EXIT_FAILURE, "Port %u initialization failed\n", port);
-        if (rte_eth_stats_reset(port) != 0) printf("nic=%u reset=UNAVAILABLE\n", port);
+        printf("nic=%u reset=%s\n", port, rte_eth_stats_reset(port) == 0 ? "OK" : "UNAVAILABLE");
     }
     printf("clock=software-rx-relative-ns queues=1 offloads=none VLAN=retained FCS=stripped wire_overhead=20\n");
     struct pipeline_stats *stats = rte_zmalloc("stats", sizeof(*stats), 64);

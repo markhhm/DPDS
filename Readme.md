@@ -85,8 +85,11 @@ A missed-deadline outage discard is a non-model failure.
 
 Each ingress port has a pool on its NIC NUMA node, or the current node for a
 software port. Its object count includes all configured storage slots on that
-port, plus descriptor, ring, cache, burst, and TX reserves. Startup prints the
-actual object footprint and NUMA node. It does not reserve a fixed 32 GiB.
+port, plus ring, cache, and burst reserves. Descriptor preflight runs before
+pool allocation. The pool includes the adjusted RX count and adjusted TX counts
+for each distinct mapped egress. Port setup uses those same descriptor counts.
+
+Startup prints the actual object footprint and NUMA node. It does not reserve a fixed 32 GiB.
 Cross-NUMA egress DMA remains possible.
 
 The RX producer waits for handoff space before another burst. An unexpected
@@ -95,7 +98,8 @@ The TX backlog permits 256 packets per line. An exhausted backlog invalidates
 the run.
 
 The one-second TX retry bound starts after the first unsuccessful admission.
-Outage holds and scheduler shutdown have a five-second bound.
+Actual-time TX outage holds and scheduler shutdown have a five-second bound.
+The pending TX bound is separate from modeled outage storage in Rust.
 These bounds are software defaults, not model Q loss.
 
 Shutdown closes RX first, then drains RX handoffs, the core, TX handoffs, and

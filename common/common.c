@@ -7,6 +7,8 @@
 #include <rte_ether.h>
 #include <rte_cycles.h>
 #include <string.h>
+#include <limits.h>
+#include <errno.h>
 
 #include "common.h"
 #include "config.h"
@@ -93,6 +95,41 @@ void signal_handler(int signum)
     }
 }
 
+int host_prepare_port(uint16_t port)
+{
+    if (port >= RTE_MAX_ETHPORTS) return -EINVAL;
+    struct port_resources *r = &host.resources[port];
+    if (r->prepared) return 0;
+    uint16_t rx = RX_RING_SIZE, tx = TX_RING_SIZE;
+    int result = rte_eth_dev_adjust_nb_rx_tx_desc(port, &rx, &tx);
+    if (result != 0) return result;
+    if (!rx || !tx) return -EINVAL;
+    r->rx_descriptors = rx; r->tx_descriptors = tx; r->prepared = true;
+    printf("descriptors port=%u rx=%u tx=%u\n", port, rx, tx);
+    return 0;
+}
+
+unsigned host_pool_objects(uint16_t port, unsigned lcores)
+{
+    if (port >= RTE_MAX_ETHPORTS || !host.resources[port].prepared || lcores < 1 || lcores > 4) return 0;
+    uint64_t count = host.resources[port].rx_descriptors + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ +
+        MBUF_CACHE_SIZE * lcores + HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE;
+    bool reserved_egress[RTE_MAX_ETHPORTS] = {0};
+    for (size_t line = 0; line < host.line_count; ++line) {
+        if (host.lines[line].ingress_port != port) continue;
+        uint16_t egress = host.lines[line].egress_port;
+        if (egress >= RTE_MAX_ETHPORTS || !host.resources[egress].prepared) return 0;
+        if (!reserved_egress[egress]) {
+            if (host.resources[egress].tx_descriptors > UINT_MAX - count) return 0;
+            count += host.resources[egress].tx_descriptors;
+            reserved_egress[egress] = true;
+        }
+        if (host.lines[line].storage_capacity_packets > UINT_MAX - count) return 0;
+        count += host.lines[line].storage_capacity_packets;
+    }
+    return (unsigned)count;
+}
+
 // -------------------------------------------
 // Initialization of ports
 // -------------------------------------------
@@ -110,12 +147,10 @@ int initialize_port(uint16_t port, struct rte_mempool *mbuf_pool)
     const uint16_t rx_rings = 1;
     const uint16_t tx_rings = 1;
 
-    // Ring sizes need to be copied here, because they might be adjusted to capabilities later.
-    uint16_t num_rx_descriptors = RX_RING_SIZE;
-    uint16_t num_tx_descriptors = TX_RING_SIZE;
-
-    if (!rte_eth_dev_is_valid_port(port))
-        return -1;
+    error_code = host_prepare_port(port);
+    if (error_code != 0) return error_code;
+    uint16_t num_rx_descriptors = host.resources[port].rx_descriptors;
+    uint16_t num_tx_descriptors = host.resources[port].tx_descriptors;
 
     // First try and get the device info for the port.
     error_code = rte_eth_dev_info_get(port, &device_info);
@@ -128,11 +163,6 @@ int initialize_port(uint16_t port, struct rte_mempool *mbuf_pool)
 
     // Now configure the device based on the accumulated config.
     error_code = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_configuration);
-    if (error_code != 0)
-        return error_code;
-
-    // After setup, determine the ring sizes. The method might adjust ring sizes to capabilities.
-    error_code = rte_eth_dev_adjust_nb_rx_tx_desc(port, &num_rx_descriptors, &num_tx_descriptors);
     if (error_code != 0)
         return error_code;
 
