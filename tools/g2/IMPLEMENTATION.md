@@ -130,3 +130,7 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
   statistics, separate strata, bounded sample/error storage and wire-order
   reconstruction. Their caller must still verify complete identities, clocks,
   terminal custody and actual TX attempts before any final qualification.
+- Reference CLI now consumes/emits v1 sealed streams, preserves invalid-input
+  port ordinals and exports source integrity, end/line counts and resource peaks.
+  The in-process draft remains for differential checks. Debug custody replay and
+  calibration are tested components; default online integration remains open.

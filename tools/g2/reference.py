@@ -45,7 +45,7 @@ def selected(chance, seed, ordinal):
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
 
 
 def strict_json(text):
@@ -162,9 +162,11 @@ class Reference:
             raise ValueError("invalid schema/run")
         self.config, self.run = config, run
         self.lines, self.ports = {}, {}
+        self.vlan_lines = {}
         self.digest = hashlib.sha256()
         self.expected_digest = hashlib.sha256()
         self.count = 0
+        self.resource_peaks = dict(q_ledger_packets=0, q_bytes=0, q_drain_ns=0)
         mappings = set()
         if not isinstance(config["lines"], list) or not 1 <= len(config["lines"]) <= 4:
             raise ValueError("hng-v1 requires 1..4 lines")
@@ -181,6 +183,7 @@ class Reference:
             if mapping in mappings or mapping[1] == 0:
                 raise ValueError("invalid/duplicate VLAN mapping")
             mappings.add(mapping)
+            self.vlan_lines[mapping] = name
             for key in ("c_bps", "q_bytes", "t_ns", "delta_ns", "seed", "storage_capacity_packets", "storage_capacity_bytes"):
                 uint(model[key], key)
             if (not model["c_bps"] or not model["storage_capacity_packets"]
@@ -219,7 +222,9 @@ class Reference:
                     or required * (high - 4) > model["storage_capacity_bytes"]):
                 raise ValueError("storage is below the declared envelope")
             self.lines[name] = dict(config=line, chance=chance, trace=trace,
-                                    tail=Fraction(0), ledger=deque(), used=0, seq=0, floor=0)
+                                    tail=Fraction(0), ledger=deque(), used=0, seq=0, floor=0,
+                                    counts=dict(offers=0, accepted=0, q_drop=0, trace_loss=0,
+                                                trace_outage=0, invalid_input=0))
             self.ports.setdefault(port, dict(next_seq=0, arrival=0, frontier=-1, ended=False))
         if not self.lines:
             raise ValueError("no lines")
@@ -246,13 +251,44 @@ class Reference:
             return None
         if kind != "packet":
             raise ValueError("unknown ingress event")
-        state = self.lines[event["line"]]
-        line, ordinal = state["config"], state["seq"]
         arrival = uint(event["arrival_ns"], "arrival")
         seq = uint(event["ingress_seq"], "ingress sequence", U64 - 1)
-        selection_seq = uint(event["selection_seq"], "selection sequence", U64 - 1)
         length = uint(event["length"], "length", (1 << 32) - 1)
         identity = event["external_identity"]
+        if seq != port["next_seq"] or arrival < port["arrival"] or arrival <= port["frontier"]:
+            raise ValueError("invalid/gapped packet sequence or event time")
+        if "stream_id" in event:
+            name = self.vlan_lines.get((event["ingress_port"], event["vlan_id"]))
+            state = self.lines.get(name)
+            q = max(length + 4, 64)
+            invalid = (state is None or not length or event["segments"] != 1
+                       or identity is None or event["flow_id"] is None
+                       or not state["config"]["envelope"]["min_q_bytes"] <= q <= state["config"]["envelope"]["max_q_bytes"])
+            if invalid:
+                if (not event["input_error"] or event["selection_seq"] is not None
+                        or event["line"] not in {None, name}):
+                    raise ValueError("invalid raw input requires an explicit rejection and no line ordinal")
+                port.update(next_seq=seq + 1, arrival=arrival)
+                self.count += 1
+                self.digest.update(canonical(event) + b"\n")
+                if state is not None:
+                    while state["ledger"] and state["ledger"][0][0] <= arrival:
+                        state["used"] -= state["ledger"].popleft()[1]
+                drain = max(Fraction(0), state["tail"] - arrival) if state is not None else Fraction(0)
+                result = dict(event, kind="expected", egress_port=None if state is None else state["config"]["egress_port"],
+                              l2_bytes=q, wire_bytes=q + 20, outcome="invalid_input", late=False,
+                              service_ns=None, deadline_ns=None, release_ns=None, clamp_extra_ns=0,
+                              q_bytes=0 if state is None else state["used"],
+                              q_drain_ns=-(-drain.numerator // drain.denominator))
+                if state is not None:
+                    state["counts"]["invalid_input"] += 1
+                self.expected_digest.update(canonical(result) + b"\n")
+                return result
+            if event["line"] != name:
+                raise ValueError("host line disagrees with raw port/VLAN mapping")
+        state = self.lines[event["line"]]
+        line, ordinal = state["config"], state["seq"]
+        selection_seq = uint(event["selection_seq"], "selection sequence", U64 - 1)
         if (line["ingress_port"] != event["ingress_port"] or seq != port["next_seq"]
                 or selection_seq != ordinal or arrival < port["arrival"]
                 or arrival <= port["frontier"] or not length
@@ -303,6 +339,12 @@ class Reference:
         result["q_bytes"] = state["used"]
         drain = max(Fraction(0), state["tail"] - arrival)
         result["q_drain_ns"] = -(-drain.numerator // drain.denominator)
+        state["counts"]["offers"] += 1
+        state["counts"][result["outcome"]] += 1
+        for name, value in dict(q_ledger_packets=sum(len(s["ledger"]) for s in self.lines.values()),
+                                q_bytes=sum(s["used"] for s in self.lines.values()),
+                                q_drain_ns=result["q_drain_ns"]).items():
+            self.resource_peaks[name] = max(self.resource_peaks[name], value)
         self.expected_digest.update(canonical(result) + b"\n")
         return result
 
@@ -312,7 +354,10 @@ class Reference:
         return dict(kind="summary", schema="hng-g2-reference-draft-v1", run=self.run,
                     input_complete=True, event_count=self.count, ingress_sha256=self.digest.hexdigest(),
                     expected_sha256=self.expected_digest.hexdigest(),
-                    config_sha256=hashlib.sha256(canonical(self.config)).hexdigest())
+                    config_sha256=hashlib.sha256(canonical(self.config)).hexdigest(),
+                    end_counts={str(p): s["next_seq"] for p, s in self.ports.items()},
+                    line_counts={name: dict(s["counts"]) for name, s in self.lines.items()},
+                    resource_peaks=dict(self.resource_peaks))
 
 
 def main():
@@ -321,16 +366,33 @@ def main():
     parser.add_argument("run")
     parser.add_argument("ingress_jsonl")
     args = parser.parse_args()
+    # Import here: the interchange parser shares only primitive JSON helpers.
+    from .protocol import StreamReader, StreamWriter
+    writer = None
     try:
         config, traces = load_config(args.config)
         ref = Reference(config, args.run, traces)
-        with open(args.ingress_jsonl) as source:
-            for line in source:
-                row = ref.consume(strict_json(line))
-                if row is not None:
-                    print(json.dumps(row, allow_nan=False))
-        print(json.dumps(ref.finish(), allow_nan=False))
+        source = StreamReader(args.ingress_jsonl, role="ingress", run=args.run)
+        writer = StreamWriter(sys.stdout, args.run, "expected", "expected", source.header["clock_id"],
+                              producer="independent-fraction", producer_commit="independent-fraction-v1")
+        output_digest = hashlib.sha256()
+        for event in source:
+            row = ref.consume(event)
+            if row is not None:
+                written = writer.emit("expected", **{key: value for key, value in row.items()
+                    if key not in {"kind", "run", "stream_id", "seq"}})
+                output_digest.update(canonical(written) + b"\n")
+        summary = ref.finish()
+        summary.update(schema="hng-g2-reference-v1", expected_sha256=output_digest.hexdigest(),
+                       trace_sha256={line["name"]: line["trace"]["sha256"].lower()
+                                     for line in config["lines"] if line["trace"]},
+                       config_file_sha256=hashlib.sha256(Path(args.config).read_bytes()).hexdigest(),
+                       input_streams=[source.integrity], oracle_version="independent-fraction-v1")
+        writer.emit("summary", **{key: value for key, value in summary.items() if key not in {"kind", "run"}})
+        writer.finish()
     except (ValueError, KeyError, TypeError, OSError, StopIteration) as exc:
+        if writer is not None:
+            writer.finish(complete=False)
         print(f"INVALID: {exc}", file=sys.stderr)
         return 2
     return 0

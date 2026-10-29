@@ -51,8 +51,8 @@ and online retention checks are complete.
 
 These tools implement the independent reference/reporting portion of the
 measurement implementation task. **Software-only, not G2.** They cannot qualify a
-hardware run. Observer wiring, final event/payload format and actual-time
-cross-line TX attempt evidence await the design owner’s specification.
+hardware run. The v1 contract is published; complete online joins, host observer
+wiring and final report integration remain in progress.
 
 ## Run and check
 
@@ -81,6 +81,24 @@ python3 -m tools.g2.reference config.json RUN ingress.jsonl > expected.jsonl
 python3 -m tools.g2.report config.json expected.jsonl receiver.jsonl counters.json manifest.json > report.json
 ```
 
+The reference CLI requires a sealed `hng-g2-events-v1` ingress stream and emits a
+sealed expected stream, with its own envelope sequence. Both seals cover header,
+packets and markers. The `hng-g2-reference-v1` summary retains the input canonical
+and file hashes, config/trace hashes, per-port end counts, per-line model counts
+and Q-ledger resource peaks. A source gap or missing seal makes the output seal
+incomplete and returns 2, even without a supplied drop counter. Stdout is a
+transport into the oracle/report pipeline; redirecting it persists full output
+and is reserved for explicit software fixtures or bounded debug windows.
+
+V1 packets add `flow_id`, raw `vlan_id`, `segments`, `length_flags`, `app`,
+`selected_late` and `input_error` to the draft fields below. The reference checks
+raw port/VLAN classification independently. An explicit invalid raw frame keeps
+its port ordinal and produces `invalid_input`, without consuming valid line
+service or a line selection ordinal. A host rejection of otherwise intact input
+does not become an intended model loss. The in-process draft API remains for
+the differential harness; the bounded draft reporter accepts both reference
+schemas. Its receiver/counter/manifest inputs remain provisional.
+
 The reference emits each decision immediately, retaining only finite-Q service
 ledgers and constant line/port state. It uses exact Python Fraction arithmetic,
 an independently written `splitmix64-counter-v1`, exact decimal probabilities,
@@ -89,7 +107,7 @@ outage/terminal policies. Q drops still consume a line-local selection ordinal.
 Trace hashes cover the same bytes that are parsed. Paths are relative to the
 registered host configuration. Unsupported/uncovered inputs fail explicitly.
 
-## Provisional JSONL boundary
+## Draft in-process boundary
 
 Ingress packets contain all of:
 
@@ -109,12 +127,10 @@ observed packets are classified into the declared lines; unsupported frame
 events require the forthcoming observer schema rather than silently skipping
 sequence gaps. Optional packet `app` is an oversampling stratum label.
 
-The output has one `kind=expected` row per packet, including intentional drops,
-plus one required terminal summary with config/input hashes, canonical
-expected-row SHA-256 and event count. The reporter verifies expected rows
-against the seal and enforces schema/kind/run/count/hash consistency.
-This detects changed/mixed reference output; final observer stream seals
-will establish end-to-end source completeness.
+The in-process output has one `kind=expected` row per packet, including
+intentional drops, plus one terminal draft summary. The CLI adds the final
+envelope and complete input/output seals described above. The reporter verifies
+expected rows against the summary hash and validates a supplied v1 stream seal.
 Never feed production-computed deadlines into this reference. The reporter
 requires the summary; truncated reference output cannot pass.
 
@@ -208,8 +224,7 @@ Q/trace drop fails the data path, following the updated observer specification.
 Whole-line stable order is additionally checked
 against the independent P1 model, beyond Stage 1's per-flow high-water count.
 
-The task's 0.2 ms tail injection cannot fail a fixed 0.5 ms threshold from a
-zero-error baseline. Tests preserve the thresholds: 5% at 0.2 ms passes the
-tail gate; the same 5% at 0.6 ms fails (also interpretable as +0.2 ms over a
-registered 0.4 ms tail). Ordinary swaps, storage loss and 1% observer loss are
-tested with their required FAIL/FAIL/INCONCLUSIVE verdicts.
+Tests preserve the thresholds: 5% at 0.2 ms is detected and passes the timing
+gates; 60% at 0.2 ms fails the median gate; 5% at 0.6 ms fails the p99 gate.
+Ordinary swaps, storage loss and 1% observer loss are tested with their required
+FAIL/FAIL/INCONCLUSIVE verdicts.

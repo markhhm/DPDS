@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from tools.g2.reference import canonical
+from tools.g2.protocol import StreamWriter
 from tools.g2.report import build_report, timing_sample, timing_stats
 from tools.g2.tests.test_reference import config
 
@@ -267,9 +268,14 @@ class ReportTests(unittest.TestCase):
             cfg = save("config.json", self.cfg)
             ingress = root / "ingress.jsonl"
             fields = ("run", "ingress_port", "line", "ingress_seq", "selection_seq", "external_identity", "arrival_ns", "length")
-            events = [dict(kind="packet", **{key: row[key] for key in fields}) for row in self.expected]
-            events.append(dict(kind="end", run="fixture", ingress_port=0, next_ingress_seq=600))
-            ingress.write_text("".join(json.dumps(row) + "\n" for row in events))
+            writer = StreamWriter(ingress, "fixture", "ingress", "ingress", "engine")
+            for row in self.expected:
+                writer.emit("packet", **{key: row[key] for key in fields if key != "run"},
+                            flow_id="probe", vlan_id=100, segments=1,
+                            length_flags=dict(fcs_present=False, vlan_retained=True),
+                            app=None, selected_late=None, input_error=None)
+            writer.emit("end", ingress_port=0, next_ingress_seq=600)
+            writer.finish()
             ref = subprocess.run([sys.executable, "-m", "tools.g2.reference", cfg, "fixture", str(ingress)], capture_output=True, text=True)
             self.assertEqual(ref.returncode, 0, ref.stderr)
             output = root / "expected.jsonl"

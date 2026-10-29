@@ -13,6 +13,7 @@ import re
 import sys
 
 from .reference import Reference, canonical, load_config, strict_json, uint
+from .protocol import StreamReader
 
 DROP_FIELDS = ("q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_drop",
                "invalid_input_drop", "handoff_drop", "terminal_tx_drop",
@@ -85,7 +86,7 @@ def timing_gate(stats, name, threshold, uncertainty):
 def build_report(expected, summary, received, counters, config, manifest, traces=None):
     if not all(isinstance(value, dict) for value in (summary, counters, config, manifest)):
         raise ValueError("summary, counters, config and manifest must be JSON objects")
-    if (summary.get("schema") != "hng-g2-reference-draft-v1" or summary.get("kind") != "summary"
+    if (summary.get("schema") not in {"hng-g2-reference-draft-v1", "hng-g2-reference-v1"} or summary.get("kind") != "summary"
             or not isinstance(summary.get("run"), str) or not summary["run"]):
         raise ValueError("unsupported reference summary schema/kind/run")
     uint(summary["event_count"], "event count")
@@ -376,7 +377,11 @@ def main():
         config, traces = load_config(args.config)
         # shortcut: full joins use RAM; replace with a bounded external join before hardware-length runs.
         with open(args.expected_jsonl) as source:
-            rows = [strict_json(line) for line in source]
+            first = strict_json(source.readline())
+            if first.get("kind") != "header":
+                rows = [first] + [strict_json(line) for line in source]
+            else:
+                rows = list(StreamReader(args.expected_jsonl, role="expected"))
         if not rows or rows[-1].get("kind") != "summary":
             raise ValueError("reference stream lacks terminal summary")
         with open(args.receiver_jsonl) as source:
