@@ -155,6 +155,7 @@ Classifier rejection has a separate counter.
 | 3 | RX has one core; worker and TX share another core |
 | 4 | RX, worker, and TX each have one core |
 | 5 | RX and TX each have one core; one scheduler per ingress port |
+| 7 | Per direction: one RX, one scheduler and one TX core |
 
 The main lcore waits for completion. It reads counters after the worker cores exit.
 
@@ -165,6 +166,18 @@ has its own RX handoff ring; both feed one TX handoff ring. The four line states
 are independent, so per-egress output equals that of one scheduler: the `split`
 test compares both on the same input and clock schedule, and the `io-ring-split`
 and `io-ring-stepped-split` tests run the PMD integrity oracle with two owners.
+
+The 7-lcore layout splits RX and TX too. Direction k has an RX lcore that
+polls only port k and feeds only its scheduler's ring, the scheduler owner of
+port k, and a TX lcore that drains only that scheduler's TX ring. All four
+rings are single-producer, single-consumer. RX and TX counters are kept per
+direction and summed at exit. The last RX lcore to stop releases the
+schedulers, and the last scheduler releases TX, so shutdown drains both
+directions. Besides the 5-lcore rule, each ingress port's lines must share one
+egress port, so that each egress queue has one TX lcore. The `split` test
+compares this layout with the other two (records, departures and TX counters),
+and `io-ring-io-split` and `io-ring-stepped-io-split` run the oracle with one
+RX, scheduler and TX owner per direction.
 
 ## Performance tools
 
@@ -187,7 +200,8 @@ and t = 2 us per line, so the model does not limit the rate. The tool prints
 egress packets per second over the window `-d` after a warmup `-w`, and fails
 unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
-`ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port.
+`ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port;
+`ring_rate.py --io-split` runs the 7-lcore layout with RX, scheduler and TX per direction.
 
 `hng-sched-bench` times the production `worker_step_at()` per packet with real
 mbufs and a fixture clock: 1518-byte frames back to back, cable and LEO VLANs
@@ -225,7 +239,8 @@ lines of one direction. Without `--verify` it needs no EAL:
 ./build/hng-pool-calc --help
 ```
 
-Defaults: 5 lcores (the per-ingress-port scheduler layout). For trace lines,
+Defaults: 7 lcores (the per-direction RX, scheduler and TX layout; each lcore
+adds one mempool cache). For trace lines,
 `--trace-max-delay-ms D --trace-max-hold-ms H` sizes storage for the largest
 trace delay plus the longest outage hold, as the engine does. The 2 MiB page
 result is marked unverified: only 4 KiB pages were checked.

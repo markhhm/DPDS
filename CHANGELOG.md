@@ -28,6 +28,9 @@ fork has been released yet.
 - Versioned pre-push hook and installer.
 - GitHub Actions CI running `scripts/check.sh` on virtual PMDs without hugepages.
 - Zero-NIC quickstart in the README.
+- 7-lcore layout: one RX, scheduler and TX lcore per direction, with the
+  `split` equivalence test, `io-ring-io-split` and `io-ring-stepped-io-split`
+  oracle runs, and `ring_rate.py --io-split`.
 
 ### Changed
 
