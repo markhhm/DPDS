@@ -46,7 +46,9 @@ static size_t mbuf_element_bytes(void)
         RTE_MBUF_DEFAULT_BUF_SIZE;
 }
 
-/* Mirrors the engine's startup envelope check and host_pool_objects(). */
+/* Mirrors the engine's startup envelope check and host_pool_objects(). A port's mbufs
+ * sit in one RX and one TX handoff ring in every layout (in the 7-lcore layout, its
+ * direction's own rings) and in up to one mempool cache per lcore. */
 /* Mempool objects never straddle a page, so each page holds floor(page/stride) objects. */
 static uint64_t object_bytes(uint64_t objects, uint64_t stride, uint64_t page)
 {
@@ -187,7 +189,7 @@ static int verify(const struct params *given)
 int main(int argc, char **argv)
 {
     struct params x = {100000000000ull, 142000000, 320000000, 50000000, 1522, 1522, 1024,
-        2097152, 1, 5, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2, false, 0, 0};
+        2097152, 1, 7, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2, false, 0, 0};
     bool do_verify = false, p_given = false;
     static const struct option options[] = {
         {"c-bps", 1, 0, 'c'}, {"t-ms", 1, 0, 't'}, {"delta-ms", 1, 0, 'd'}, {"q-ms", 1, 0, 'q'},
@@ -231,8 +233,8 @@ int main(int argc, char **argv)
         }
     }
     if (!x.c_bps || x.min_q < 64 || x.max_q > 1522 || x.min_q > x.max_q || !x.burst || x.lines < 1 ||
-        x.lines > 2 || x.lcores < 1 || x.lcores > 5) {
-        fputs("invalid parameters: need C > 0, 64 <= min <= max <= 1522, burst > 0, 1-2 lines, 1-5 lcores\n", stderr);
+        x.lines > 2 || x.lcores < 1 || x.lcores > 7) {
+        fputs("invalid parameters: need C > 0, 64 <= min <= max <= 1522, burst > 0, 1-2 lines, 1-7 lcores\n", stderr);
         return 2;
     }
     struct plan r = make_plan(&x);

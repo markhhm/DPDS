@@ -12,7 +12,11 @@ print(calc, end="")
 node = re.search(r"per_numa_node envelope slots_per_line=(\d+) pool_objects=(\d+) mempool_gib=([\d.]+)", calc)
 assert node and float(node.group(3)) > 0, calc
 assert calc.count("mean_occupancy") == 2, calc
-assert " lcores=5 " in calc and "page_bytes=2097152 (unverified)" in calc, calc
+assert " lcores=7 " in calc and "page_bytes=2097152 (unverified)" in calc, calc
+# Each lcore adds one mempool cache (MBUF_CACHE_SIZE = 32): 7 lcores need 64 objects more than 5.
+five, _ = (lambda o: (int(re.search(r"pool_objects=(\d+)", o).group(1)), o))(
+    subprocess.run([binary, "--lcores", "5"], capture_output=True, text=True, check=True).stdout)
+assert int(node.group(2)) - five == 2 * 32, (node.group(2), five)
 # Trace mode sizes storage for the maximum trace delay plus the longest outage hold.
 def slots(args):
     out = subprocess.run([binary]+args, capture_output=True, text=True, check=True).stdout
