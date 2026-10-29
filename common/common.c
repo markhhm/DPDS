@@ -70,16 +70,6 @@ bool host_split_valid(void)
     return true;
 }
 
-bool host_io_split_valid(void)
-{
-    if (!host_split_valid()) return false;
-    for (size_t i = 0; i < host.line_count; ++i)
-        for (size_t j = 0; j < host.line_count; ++j)
-            if (host.lines[i].ingress_port == host.lines[j].ingress_port &&
-                host.lines[i].egress_port != host.lines[j].egress_port) return false;
-    return true;
-}
-
 void host_cleanup(void)
 {
     for (size_t i = 0; i < host.line_count; ++i) hng_tx_policy_destroy(host.policies[i]);

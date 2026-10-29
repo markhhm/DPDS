@@ -16,7 +16,7 @@ present, no CPU isolation). They are not evidence of 100 Gbit/s performance.**
 The 7-lcore layout runs, for each direction k (ingress port `host.ports[k]`):
 
 ```
-RX k (polls only port k) -> owner ring k -> scheduler k -> TX ring k -> TX k (egress of port k)
+RX k (polls only port k) -> owner ring k -> scheduler k -> TX ring k -> TX k (egress ports of port k's lines)
 ```
 
 | Shared object | Producers | Consumers | Flags |
@@ -26,12 +26,14 @@ RX k (polls only port k) -> owner ring k -> scheduler k -> TX ring k -> TX k (eg
 | ingress frontier k | RX k | scheduler k | seqlock of atomics, one cache line per port |
 | `rx_owners[k]`, `owners[k]`, `tx_owners[k]` counters | that lcore only | main lcore after join | 64-byte aligned, whole lines |
 | NIC RX queue of port k | RX k only | | one queue per port |
-| NIC TX queue of the egress of port k | TX k only | | one queue per port |
+| NIC TX queue of each egress port fed by port k | TX k only | | one queue per port |
 
-Startup requires the 5-lcore rule (each egress port fed by one ingress port)
-and, in addition, that each ingress port's lines share one egress port
-(`host_io_split_valid`). Together these give each egress queue exactly one TX
-lcore. TX policies are per line, and each line is drained by one TX lcore.
+Startup requires the 5-lcore rule (each egress port fed by one ingress port).
+That alone gives each egress queue exactly one TX lcore: an egress port is fed
+by one scheduler, whose output goes to one TX ring. An earlier check that also
+required each ingress port to feed a single egress port was removed; the case
+it rejected (one ingress port feeding both egress ports) is safe, with one TX
+lcore serving both egress ports and the other idle. TX policies are per line, and each line is drained by one TX lcore.
 
 Shutdown: SIGINT or an invalidation stops both RX lcores. The last RX lcore to
 finish (`receivers_running`) sets the worker quit signal, so no scheduler

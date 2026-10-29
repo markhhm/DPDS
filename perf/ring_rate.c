@@ -99,7 +99,6 @@ int main(int argc, char **argv)
         if (host_prepare_port(p) != 0 || initialize_port(p, pool) != 0) rte_exit(EXIT_FAILURE, "port %u setup failed\n", p);
     struct pipeline_stats *stats = rte_zmalloc("rate_stats", sizeof(*stats), 64);
     if (split && !host_split_valid()) rte_exit(EXIT_FAILURE, "split needs each egress fed by one ingress port\n");
-    if (io_split && !host_io_split_valid()) rte_exit(EXIT_FAILURE, "7 lcores need one egress port per ingress port\n");
     struct rte_ring *rx_ring = rte_ring_create("rate_rx", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     struct rte_ring *rx_ring1 = rte_ring_create("rate_rx1", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     struct rte_ring *tx_ring = rte_ring_create("rate_tx", SCHED_TX_RING_SZ, rte_socket_id(),

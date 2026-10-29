@@ -173,8 +173,9 @@ port k, and a TX lcore that drains only that scheduler's TX ring. All four
 rings are single-producer, single-consumer. RX and TX counters are kept per
 direction and summed at exit. The last RX lcore to stop releases the
 schedulers, and the last scheduler releases TX, so shutdown drains both
-directions. Besides the 5-lcore rule, each ingress port's lines must share one
-egress port, so that each egress queue has one TX lcore. The `split` test
+directions. The 5-lcore rule (each egress port fed by one ingress port) is
+enough: an egress port is fed by one scheduler, so only one TX lcore sends on
+it. The `split` test
 compares this layout with the other two (records, departures and TX counters),
 and `io-ring-io-split` and `io-ring-stepped-io-split` run the oracle with one
 RX, scheduler and TX owner per direction.

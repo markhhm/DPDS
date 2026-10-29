@@ -146,8 +146,6 @@ int main(int argc, char **argv)
     bool io_split = workers == 6, split = workers == 4 || io_split;
     if (split && (host.port_count != 2 || !host_split_valid()))
         rte_exit(EXIT_FAILURE, "5 and 7 lcores need two ports, each egress fed by one ingress port\n");
-    if (io_split && !host_io_split_valid())
-        rte_exit(EXIT_FAILURE, "7 lcores need each ingress port's lines to share one egress port\n");
     struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0}, *tx_rings[2] = {0};
     if (workers >= 2 && !split) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     for (unsigned k = 0; split && k < 2; ++k) {

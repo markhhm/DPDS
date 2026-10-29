@@ -48,8 +48,6 @@ uint64_t host_now_ns(void);
 bool host_load(const char *path);
 /* Per-direction owners need every egress port fed by lines of one ingress port. */
 bool host_split_valid(void);
-/* Per-direction RX/TX lcores also need each ingress port's lines to share one egress port. */
-bool host_io_split_valid(void);
 /* Take every line handle; fails and invalidates once owners may run (host_mark_launched). */
 bool host_take_line_handles(void);
 /* Call on the main lcore immediately before launching pipeline lcores. */
