@@ -182,6 +182,9 @@ static void check_pcap(const char *dir,struct io_record *expected,size_t count)
     }
     assert(observed==count);
 }
+/* -lcores mode, odd seeds: quit while every packet is still in the pipeline. */
+static bool inflight;
+static _Atomic unsigned admitted;
 /* -lcores mode: the scheduler stand-in between the production RX and TX lcores. It restores the
  * fixture arrival time (production RX stamps the real clock), admits at time 0, drains at the
  * fixture time, then ends its input only after the production RX release chain, as lcore_worker does. */
@@ -201,8 +204,10 @@ static int fixture_scheduler(void *arg)
         received+=n;
         assert(worker_step_at(&w,in,(uint16_t)n,out,0)==0);
     }
-    /* All input is admitted; RX's real-clock frontier only permits output up to the fixture time. */
-    while(w.stats->sent<expected_count[k]) enqueue(par->worker_transmit_ring,out,worker_step_at(&w,NULL,0,out,fixture_now()));
+    /* All input is admitted; RX's real-clock frontier only permits output up to the fixture time.
+     * In-flight seeds emit nothing before the quit, so the whole output drains after it. */
+    atomic_fetch_add(&admitted,1);
+    while(!inflight && w.stats->sent<expected_count[k]) enqueue(par->worker_transmit_ring,out,worker_step_at(&w,NULL,0,out,fixture_now()));
     while(!quit_signal_worker) { assert(rte_ring_empty(par->receive_worker_ring)); rte_pause(); }
     assert(rte_ring_empty(par->receive_worker_ring));
     worker_end_input(&w);
@@ -225,6 +230,7 @@ static int run_lcores(const char *dir)
         host.port_count=2; host.ports[0]=0; host.ports[1]=1;
         quit_signal_receive=quit_signal_worker=quit_signal_transmit=0;
         host.schedulers_running=host.receivers_running=2;
+        inflight=seed%2; atomic_store(&admitted,0);
         memset(&stats,0,sizeof(stats));
         if(s==0) for(unsigned p=0;p<4;++p) assert(initialize_port(p,pool)==0);
         struct rte_eth_stats before[4]; for(unsigned p=0;p<4;++p) assert(rte_eth_stats_get(p,before+p)==0);
@@ -244,6 +250,10 @@ static int run_lcores(const char *dir)
         }
         unsigned sent[2]={0}; size_t next[2]={0}; uint64_t observed=0;
         while(observed<count) {
+            if(inflight && !quit_signal_receive && atomic_load(&admitted)==2) {
+                /* SIGINT equivalent with the whole output still inside the schedulers. */
+                assert(observed==0 && count>0); quit_signal_receive=1;
+            }
             for(unsigned p=0;p<2;++p) if(sent[p]<IO_BATCH) send_burst(p,input,sent+p);
             for(unsigned p=0;p<2;++p) {
                 struct rte_mbuf *packets[MAX_BURST_SIZE]; unsigned n=rte_eth_rx_burst(p+2,0,packets,MAX_BURST_SIZE);
@@ -251,6 +261,7 @@ static int run_lcores(const char *dir)
             }
         }
         /* SIGINT equivalent: the production chain RX -> receivers_running -> schedulers -> TX must drain. */
+        assert(!inflight || quit_signal_receive);
         quit_signal_receive=1;
         rte_eal_mp_wait_lcore();
         assert(atomic_load(&host.receivers_running)==0 && atomic_load(&host.schedulers_running)==0 && quit_signal_transmit);
@@ -278,8 +289,8 @@ static int run_lcores(const char *dir)
         }
         host_cleanup(); assert(!host.invalid && rte_mempool_avail_count(pool)==8191);
         total_in+=2*IO_BATCH; total_out+=count; total_drop+=2*IO_BATCH-count;
-        printf("ring-io-split-lcores seed=%u production_rx_tx=PASS release_chain=PASS cumulative_input=%"PRIu64" cumulative_output=%"PRIu64" cumulative_q_drop=%"PRIu64" every_ID_bytes_order=PASS conservation=PASS drained=PASS\n",
-            seed,total_in,total_out,total_drop);
+        printf("ring-io-split-lcores seed=%u production_rx_tx=PASS release_chain=PASS quit_in_flight=%s cumulative_input=%"PRIu64" cumulative_output=%"PRIu64" cumulative_q_drop=%"PRIu64" every_ID_bytes_order=PASS conservation=PASS drained=PASS\n",
+            seed,inflight?"yes":"no",total_in,total_out,total_drop);
     }
     for(unsigned p=0;p<4;++p) assert(close_port(p)==0);
     for(unsigned p=0;p<2;++p) {
