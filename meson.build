@@ -36,7 +36,7 @@ test('io-oracle', io_oracle)
 io_pmd = executable('io-pmd-test', ['tests/io_pmd.c', 'tests/io_oracle.c'] + common_sources,
   dependencies: [dpdk, core, threads, ring_pmd], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
-foreach mode: ['pcap', 'ring']
+foreach mode: ['pcap', 'ring', 'ring-stepped']
   test('io-' + mode, python, args: [meson.project_source_root() / 'tests/io_pmd.py', mode, io_pmd],
     timeout: 300, is_parallel: false)
 endforeach

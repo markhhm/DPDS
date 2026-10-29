@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Public test CLI: io_pmd.py {oracle|pcap|ring|af_packet} EXECUTABLE.
+"""Public test CLI: io_pmd.py {oracle|pcap|ring|ring-stepped|af_packet} EXECUTABLE.
 
 All fixtures are synthetic. PASS lines report input, output and intentional Q
 loss; every output identity, complete frame and physical egress is checked.
@@ -145,7 +145,7 @@ def main():
         for seed in range(32):
             (directory/f"seed{seed}.json").write_text(json.dumps(config(seed)))
         environment = dict(os.environ, IO_DIR=str(directory), IO_MODE=mode)
-        if mode == "ring":
+        if mode in ("ring", "ring-stepped"):
             subprocess.run(eal(binary), env=environment, check=True, timeout=240)
         elif mode == "pcap":
             for seed in range(32):
