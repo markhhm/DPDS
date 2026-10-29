@@ -34,5 +34,7 @@ result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOU
 print(result.stdout, end="")
 assert result.returncode == 0, "hng-ring-rate failed"
 assert "conservation=PASS status=DRAINED" in result.stdout, "run was not conserved and drained"
+# Q holds 1033 MTU frames per line, more than one direction's population, so a Q drop means a broken run.
+assert " q_drop=0 " in result.stdout or not config.endswith("perf/ring_rate.json"), "the rate fixture must not drop in Q"
 assert "tx_burst_hist=" in result.stdout, "no TX burst histogram"
 assert "total_pps=" in result.stdout and " total_pps=0 " not in result.stdout, "no packets measured"

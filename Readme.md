@@ -200,8 +200,9 @@ direction (every line must go from port q to port 1-q). The frames that can
 reach one TX handoff ring never exceed it, because the production scheduler
 invalidates a run instead of waiting for TX handoff space. So the population
 (`-n`) defaults to and is at most 1023 with one shared TX ring (4 and 5
-lcores) and 2046, split evenly, with one TX ring per direction (7 lcores). `perf/ring_rate.json` sets C = 400 Gbit/s
-and t = 2 us per line, so the model does not limit the rate. The tool prints
+lcores) and 2046, split evenly, with one TX ring per direction (7 lcores). `perf/ring_rate.json` sets C = 400 Gbit/s,
+t = 2 us and Q = 1.5 MiB (1033 MTU frames, more than one direction's population)
+per line, so the model does not limit the rate and cannot drop in Q. The tool prints
 egress packets per second over the window `-d` after a warmup `-w`, and fails
 unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
