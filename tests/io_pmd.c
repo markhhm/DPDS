@@ -11,6 +11,7 @@
 #include <rte_ethdev.h>
 #include <rte_eth_ring.h>
 #include <rte_launch.h>
+#include <rte_malloc.h>
 #include "../core/receive.h"
 #include "../core/worker.h"
 #include "../core/transmit.h"
@@ -181,6 +182,113 @@ static void check_pcap(const char *dir,struct io_record *expected,size_t count)
     }
     assert(observed==count);
 }
+/* -lcores mode: the scheduler stand-in between the production RX and TX lcores. It restores the
+ * fixture arrival time (production RX stamps the real clock), admits at time 0, drains at the
+ * fixture time, then ends its input only after the production RX release chain, as lcore_worker does. */
+static int fixture_scheduler(void *arg)
+{
+    struct lcore_parameters *par=arg; unsigned k=par->owner_index,received=0;
+    struct worker_state w; worker_state_init_owner(&w,&stats.owners[k],(int)k);
+    struct rte_mbuf *in[MAX_BURST_SIZE],*out[MAX_BURST_SIZE];
+    while(received<IO_BATCH) {
+        unsigned n=rte_ring_dequeue_burst(par->receive_worker_ring,(void **)in,MAX_BURST_SIZE,NULL);
+        for(unsigned i=0;i<n;++i) {
+            struct packet_meta *m=packet_meta(in[i]); const uint8_t *d=rte_pktmbuf_mtod(in[i],const uint8_t *);
+            /* Production RX polled only this direction's port and numbered it from 0. */
+            assert(m->ingress_port==k && in[i]->port==k && m->ingress_seq==decode(d+34) && decode(d+18)==base+k*IO_BATCH+received+i);
+            m->arrival_ns=decode(d+26);
+        }
+        received+=n;
+        assert(worker_step_at(&w,in,(uint16_t)n,out,0)==0);
+    }
+    /* All input is admitted; RX's real-clock frontier only permits output up to the fixture time. */
+    while(w.stats->sent<expected_count[k]) enqueue(par->worker_transmit_ring,out,worker_step_at(&w,NULL,0,out,fixture_now()));
+    while(!quit_signal_worker) { assert(rte_ring_empty(par->receive_worker_ring)); rte_pause(); }
+    assert(rte_ring_empty(par->receive_worker_ring));
+    worker_end_input(&w);
+    while(worker_has_backlog(&w)) enqueue(par->worker_transmit_ring,out,worker_step_at(&w,NULL,0,out,fixture_now()));
+    worker_state_cleanup(&w);
+    if(atomic_fetch_sub(&host.schedulers_running,1)<=1) quit_signal_transmit=1;
+    rte_free(par);
+    return 0;
+}
+/* Production lcore_receive (fixed port) and lcore_transmit per direction, one epoch per seed. */
+static int run_lcores(const char *dir)
+{
+    unsigned cores[6],ncores=0,id; RTE_LCORE_FOREACH_WORKER(id) cores[ncores++]=id;
+    assert(ncores==6);
+    uint64_t total_in=0,total_out=0,total_drop=0;
+    for(unsigned s=0;s<32;++s) {
+        seed=s; epoch=s*153; base=(uint64_t)epoch*2*IO_BATCH; /* seed_epoch()==0 */
+        char config[1024]; snprintf(config,sizeof(config),"%s/seed%u.json",dir,seed);
+        assert(host_load(config) && host_split_valid());
+        host.port_count=2; host.ports[0]=0; host.ports[1]=1;
+        quit_signal_receive=quit_signal_worker=quit_signal_transmit=0;
+        host.schedulers_running=host.receivers_running=2;
+        memset(&stats,0,sizeof(stats));
+        if(s==0) for(unsigned p=0;p<4;++p) assert(initialize_port(p,pool)==0);
+        struct rte_eth_stats before[4]; for(unsigned p=0;p<4;++p) assert(rte_eth_stats_get(p,before+p)==0);
+        struct io_record input[2*IO_BATCH],expected[2*IO_BATCH]; uint64_t drops[4];
+        for(unsigned p=0;p<2;++p) for(unsigned i=0;i<IO_BATCH;++i) { io_fixture(input+p*IO_BATCH+i,seed,p,i); input[p*IO_BATCH+i].id+=base; }
+        size_t count=io_reference(input,2*IO_BATCH,(struct io_model){8000000003ULL,600,1000,15000,seed,0},expected,drops);
+        expected_count[0]=expected_count[1]=0;
+        for(size_t i=0;i<count;++i) expected_count[expected[i].port]++;
+        host_mark_launched();
+        lcore_function_t *fn[6]={(lcore_function_t *)lcore_transmit,(lcore_function_t *)lcore_transmit,
+            fixture_scheduler,fixture_scheduler,(lcore_function_t *)lcore_receive,(lcore_function_t *)lcore_receive};
+        for(unsigned i=0;i<6;++i) {
+            unsigned k=i%2; struct lcore_parameters *par=rte_zmalloc(NULL,sizeof(*par),0); assert(par);
+            *par=(struct lcore_parameters){.stats=&stats,.num_ports=2,.split=true,.io_split=true,.owner_index=(uint16_t)k,
+                .owner_rings={rx_handoff[0],rx_handoff[1]},.receive_worker_ring=rx_handoff[k],.worker_transmit_ring=tx_handoff[k]};
+            assert(!rte_eal_remote_launch(fn[i],par,cores[i]));
+        }
+        unsigned sent[2]={0}; size_t next[2]={0}; uint64_t observed=0;
+        while(observed<count) {
+            for(unsigned p=0;p<2;++p) if(sent[p]<IO_BATCH) send_burst(p,input,sent+p);
+            for(unsigned p=0;p<2;++p) {
+                struct rte_mbuf *packets[MAX_BURST_SIZE]; unsigned n=rte_eth_rx_burst(p+2,0,packets,MAX_BURST_SIZE);
+                for(unsigned i=0;i<n;++i) { check_frame(rte_pktmbuf_mtod(packets[i],const uint8_t *),packets[i]->pkt_len,p,expected,count,next); rte_pktmbuf_free(packets[i]); observed++; }
+            }
+        }
+        /* SIGINT equivalent: the production chain RX -> receivers_running -> schedulers -> TX must drain. */
+        quit_signal_receive=1;
+        rte_eal_mp_wait_lcore();
+        assert(atomic_load(&host.receivers_running)==0 && atomic_load(&host.schedulers_running)==0 && quit_signal_transmit);
+        for(unsigned p=0;p<2;++p) { struct rte_mbuf *m; assert(rte_eth_rx_burst(p+2,0,&m,1)==0); }
+        for(unsigned k=0;k<2;++k) {
+            worker_stats_merge(&stats.worker,&stats.owners[k],(int)k);
+            rx_stats_merge(&stats.rx,&stats.rx_owners[k]); tx_stats_merge(&stats.tx,&stats.tx_owners[k]);
+            assert(stats.rx_owners[k].received==IO_BATCH && stats.rx_owners[k].enqueued==IO_BATCH);
+            assert(stats.tx_owners[k].transmitted==expected_count[k] && stats.tx_owners[k].tx_drops==0);
+        }
+        assert(!host.invalid && stats.rx.received==2*IO_BATCH && stats.rx.rx_ring_drops==0);
+        assert(stats.worker.received==2*IO_BATCH && stats.worker.sent==count && stats.worker.emulator_drops==2*IO_BATCH-count);
+        assert(stats.worker.invalid_drops==0 && stats.worker.storage_drops==0 && stats.worker.shutdown_drops==0 && stats.worker.tx_ring_drops==0);
+        assert(stats.tx.received==count && stats.tx.transmitted==count && stats.tx.transmitted_bytes==stats.worker.sent_bytes);
+        assert(stats.rx.received_bytes==stats.worker.received_bytes);
+        for(unsigned line=0;line<4;++line) {
+            struct HngStats *l=stats.worker.lines+line;
+            assert(l->q_drops==drops[line] && l->accepted==l->dequeued && l->input_complete && stats.tx.line_transmitted[line]==l->dequeued);
+        }
+        for(unsigned p=0;p<4;++p) {
+            struct rte_eth_stats after; assert(rte_eth_stats_get(p,&after)==0);
+            uint64_t output_count=expected_count[1-p%2];
+            assert(after.ipackets-before[p].ipackets==(p<2?IO_BATCH:output_count));
+            assert(after.opackets-before[p].opackets==(p<2?output_count:IO_BATCH));
+        }
+        host_cleanup(); assert(!host.invalid && rte_mempool_avail_count(pool)==8191);
+        total_in+=2*IO_BATCH; total_out+=count; total_drop+=2*IO_BATCH-count;
+        printf("ring-io-split-lcores seed=%u production_rx_tx=PASS release_chain=PASS cumulative_input=%"PRIu64" cumulative_output=%"PRIu64" cumulative_q_drop=%"PRIu64" every_ID_bytes_order=PASS conservation=PASS drained=PASS\n",
+            seed,total_in,total_out,total_drop);
+    }
+    for(unsigned p=0;p<4;++p) assert(close_port(p)==0);
+    for(unsigned p=0;p<2;++p) {
+        char name[32]; snprintf(name,sizeof(name),"source%u",p); rte_ring_free(rte_ring_lookup(name));
+        snprintf(name,sizeof(name),"sink%u",p); rte_ring_free(rte_ring_lookup(name));
+    }
+    rte_mempool_free(pool); for(unsigned k=0;k<2;++k) { rte_ring_free(rx_handoff[k]); rte_ring_free(tx_handoff[k]); }
+    assert(rte_eal_cleanup()==0); return 0;
+}
 int main(int argc,char **argv)
 {
     const char *dir=getenv("IO_DIR"),*mode=getenv("IO_MODE"); assert(dir && mode);
@@ -210,6 +318,7 @@ int main(int argc,char **argv)
     unsigned directions=io_split?2:1;
     for(unsigned k=0;k<directions;++k) { char name[32]; snprintf(name,sizeof(name),"io_tx%u",k);
         tx_handoff[k]=rte_ring_create(name,ring_size,rte_socket_id(),(split && !io_split?0:RING_F_SP_ENQ)|RING_F_SC_DEQ); assert(tx_handoff[k]); }
+    if(strstr(mode,"-lcores")) return run_lcores(dir);
     pthread_barrier_init(&barrier,NULL,1+stages()); unsigned cores[6],ncores=0,id;
     RTE_LCORE_FOREACH_WORKER(id) cores[ncores++]=id;
     assert(ncores==stages()); unsigned c=0;

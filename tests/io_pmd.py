@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Public test CLI: io_pmd.py {pcap|ring|ring-stepped|ring-split|ring-stepped-split|ring-io-split|ring-stepped-io-split|af_packet} EXECUTABLE.
+"""Public test CLI: io_pmd.py {pcap|ring|ring-stepped|ring-split|ring-stepped-split|ring-io-split|ring-stepped-io-split|ring-io-split-lcores|af_packet} EXECUTABLE.
 
 The -split modes run one scheduler owner per ingress port on five lcores.
-The -io-split modes also run one RX and one TX owner per direction on seven lcores.
+The -io-split modes also run one RX and one TX owner per direction on seven lcores;
+ring-io-split-lcores uses the production RX and TX lcore functions and shutdown chain.
 
 All fixtures are synthetic. PASS lines report input, output and intentional Q
 loss; every output identity, complete frame and physical egress is checked.
@@ -148,8 +149,8 @@ def main():
         for seed in range(32):
             (directory/f"seed{seed}.json").write_text(json.dumps(config(seed)))
         environment = dict(os.environ, IO_DIR=str(directory), IO_MODE=mode)
-        if mode in ("ring", "ring-stepped", "ring-split", "ring-stepped-split", "ring-io-split", "ring-stepped-io-split"):
-            lcores = 7 if mode.endswith("-io-split") else 5 if mode.endswith("-split") else 4
+        if mode in ("ring", "ring-stepped", "ring-split", "ring-stepped-split", "ring-io-split", "ring-stepped-io-split", "ring-io-split-lcores"):
+            lcores = 7 if "-io-split" in mode else 5 if mode.endswith("-split") else 4
             subprocess.run(eal(binary, lcores), env=environment, check=True, timeout=240)
         elif mode == "pcap":
             for seed in range(32):
