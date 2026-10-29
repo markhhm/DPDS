@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Files inherited from the upstream initial commit (uni-tue-kn/DPDS), which never
+# carried an SPDX header. They remain under the repository's Apache-2.0 LICENSE.
+# New files must carry a header instead of being listed here.
+.devcontainer/Dockerfile
+.devcontainer/post-create.sh
+.gitignore
+.gitmodules
+common/common.c
+common/common.h
+common/config.h
+core/combined.c
+core/combined.h
+core/receive.c
+core/receive.h
+core/transmit.c
+core/transmit.h
+core/worker.c
+core/worker.h
+dpds.c
+meson.build

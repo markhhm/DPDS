@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-name: Software PMD integrity
+name: CI
 on: [push, pull_request]
 jobs:
-  m1:
+  check:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -12,24 +12,30 @@ jobs:
           # Private forks can supply a read-only token with access to both repos.
           token: ${{ secrets.DPDS_READ_TOKEN || github.token }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Build user-local DPDK with virtual PMDs
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential meson ninja-build pkg-config libpcap-dev libnuma-dev python3-pyelftools
+          cd "$RUNNER_TEMP"
           curl -fsSLO https://fast.dpdk.org/rel/dpdk-26.03.tar.xz
           tar -xf dpdk-26.03.tar.xz
           meson setup dpdk-build dpdk-26.03 --prefix="$RUNNER_TEMP/dpdk" --libdir=lib -Dexamples= -Dtests=false -Denable_drivers=net/null,net/pcap,net/ring,net/af_packet,mempool/ring,bus/vdev
           meson compile -C dpdk-build -j 4
           meson install -C dpdk-build
-      - name: Build and run registered software checks without hugepages
+      # Same script as the pre-push hook: policy scan, pinned-core checks, Meson suite.
+      # The runner may forbid unprivileged user namespaces; io-af-packet may then
+      # SKIP, which check-skips.py prints and annotates as a warning (not a pass).
+      - name: Run scripts/check.sh without hugepages
+        env:
+          DPDS_ALLOW_SKIP: io-af-packet
         run: |
           export PKG_CONFIG_PATH="$RUNNER_TEMP/dpdk/lib/pkgconfig"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/dpdk/lib"
-          meson setup build
-          meson compile -C build
-          meson test -C build --print-errorlogs
+          scripts/check.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: m1-test-logs
+          name: test-logs
           path: build/meson-logs/
