@@ -77,9 +77,9 @@ int main(int argc, char **argv)
     if (bytes < 60 || bytes > 1518 || seconds <= 0 || warmup < 0 || population < 64 ||
         population > SCHED_TX_RING_SZ - 1)
         rte_exit(EXIT_FAILURE, "%s", usage);
-    /* 4 lcores: one scheduler. 5 lcores: one scheduler per ingress port, as in dpds. */
-    bool split = rte_lcore_count() == 5;
-    if (rte_lcore_count() != 4 && !split) rte_exit(EXIT_FAILURE, "hng-ring-rate needs 4 or 5 lcores\n");
+    /* 4 lcores: one scheduler. 5: one scheduler per ingress port. 7: RX, scheduler and TX per direction. */
+    bool io_split = rte_lcore_count() == 7, split = rte_lcore_count() == 5 || io_split;
+    if (rte_lcore_count() != 4 && !split) rte_exit(EXIT_FAILURE, "hng-ring-rate needs 4, 5 or 7 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "configuration rejected\n");
     for (unsigned p = 0; p < 2; ++p) {
         char a[32], b[32], name[32];
@@ -99,16 +99,22 @@ int main(int argc, char **argv)
         if (host_prepare_port(p) != 0 || initialize_port(p, pool) != 0) rte_exit(EXIT_FAILURE, "port %u setup failed\n", p);
     struct pipeline_stats *stats = rte_zmalloc("rate_stats", sizeof(*stats), 64);
     if (split && !host_split_valid()) rte_exit(EXIT_FAILURE, "split needs each egress fed by one ingress port\n");
+    if (io_split && !host_io_split_valid()) rte_exit(EXIT_FAILURE, "7 lcores need one egress port per ingress port\n");
     struct rte_ring *rx_ring = rte_ring_create("rate_rx", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     struct rte_ring *rx_ring1 = rte_ring_create("rate_rx1", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
-    struct rte_ring *tx_ring = rte_ring_create("rate_tx", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
-    if (!stats || !rx_ring || !rx_ring1 || !tx_ring) rte_exit(EXIT_FAILURE, "cannot allocate pipeline state\n");
-    lcore_function_t *functions[4] = {(lcore_function_t *)lcore_transmit, (lcore_function_t *)lcore_worker,
-        split ? (lcore_function_t *)lcore_worker : (lcore_function_t *)lcore_receive, (lcore_function_t *)lcore_receive};
-    unsigned cores[4], index = 0, core, stages = split ? 4 : 3;
+    struct rte_ring *tx_ring = rte_ring_create("rate_tx", SCHED_TX_RING_SZ, rte_socket_id(),
+        RING_F_SC_DEQ | (split && !io_split ? 0 : RING_F_SP_ENQ));
+    struct rte_ring *tx_ring1 = rte_ring_create("rate_tx1", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+    if (!stats || !rx_ring || !rx_ring1 || !tx_ring || !tx_ring1) rte_exit(EXIT_FAILURE, "cannot allocate pipeline state\n");
+    lcore_function_t *tx = (lcore_function_t *)lcore_transmit, *wk = (lcore_function_t *)lcore_worker,
+        *rx = (lcore_function_t *)lcore_receive;
+    lcore_function_t *functions[6] = {tx, wk, split ? wk : rx, rx};
+    if (io_split) memcpy(functions, (lcore_function_t *[6]){tx, tx, wk, wk, rx, rx}, sizeof(functions));
+    unsigned cores[6], index = 0, core, stages = io_split ? 6 : split ? 4 : 3;
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
     host.epoch_cycles = rte_get_timer_cycles();
     if (split) host.schedulers_running = 2;
+    if (io_split) host.receivers_running = 2;
     host_mark_launched();
     for (unsigned i = 0; i < stages; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
@@ -117,6 +123,14 @@ int main(int argc, char **argv)
             .worker_transmit_ring = tx_ring, .stats = stats, .num_ports = host.port_count, .split = split,
             .owner_index = (uint16_t)(i == 2), .owner_rings = {rx_ring, rx_ring1}};
         if (split && i == 2) parameters->receive_worker_ring = rx_ring1;
+        if (io_split) {
+            /* Pairs per direction k, as in dpds: TX k, scheduler k, RX k. */
+            unsigned k = i % 2;
+            parameters->io_split = true;
+            parameters->owner_index = (uint16_t)k;
+            parameters->receive_worker_ring = k ? rx_ring1 : rx_ring;
+            parameters->worker_transmit_ring = k ? tx_ring1 : tx_ring;
+        }
         if (rte_eal_remote_launch(functions[i], parameters, cores[i]) != 0) rte_exit(EXIT_FAILURE, "cannot launch lcore\n");
     }
     uint64_t hz = rte_get_timer_hz(), start = rte_get_timer_cycles(), serial = 0, generated = 0;
@@ -149,6 +163,10 @@ int main(int argc, char **argv)
     }
     rte_eal_mp_wait_lcore();
     for (unsigned k = 0; split && k < 2; ++k) worker_stats_merge(&stats->worker, &stats->owners[k], (int)k);
+    for (unsigned k = 0; io_split && k < 2; ++k) {
+        rx_stats_merge(&stats->rx, &stats->rx_owners[k]);
+        tx_stats_merge(&stats->tx, &stats->tx_owners[k]);
+    }
     uint64_t unread = 0;
     for (unsigned p = 0; p < 2; ++p) {
         struct rte_mbuf *m;
@@ -163,7 +181,7 @@ int main(int argc, char **argv)
     double pps = (double)(window[0] + window[1]) / seconds;
     printf("ring_rate layout=%s mbuf_bytes=%u population=%u window_s=%.3f "
         "egress0_pps=%.0f egress1_pps=%.0f total_pps=%.0f per_direction_mean_pps=%.0f\n",
-        split ? "5-lcore-per-ingress-port-schedulers" : "4-lcore", bytes, population, seconds, window[0] / seconds, window[1] / seconds, pps, pps / 2);
+        io_split ? "7-lcore-per-direction-rx-scheduler-tx" : split ? "5-lcore-per-ingress-port-schedulers" : "4-lcore", bytes, population, seconds, window[0] / seconds, window[1] / seconds, pps, pps / 2);
     printf("ring_rate rx=%"PRIu64" tx=%"PRIu64" q_drop=%"PRIu64" other_drops=%"PRIu64
         " retries=%"PRIu64" pending_peak=%"PRIu64" conservation=%s status=%s\n",
         s->rx.received, s->tx.transmitted, s->worker.emulator_drops, drops - s->worker.emulator_drops,
@@ -174,7 +192,7 @@ int main(int argc, char **argv)
     if (rte_mempool_avail_count(pool) != population) { ok = false; puts("ring_rate mbufs_reclaimed=FAIL"); }
     rte_mempool_free(pool);
     for (unsigned p = 0; p < 2; ++p) { rte_ring_free(source[p]); rte_ring_free(sink[p]); }
-    rte_ring_free(rx_ring); rte_ring_free(rx_ring1); rte_ring_free(tx_ring); rte_free(stats);
+    rte_ring_free(rx_ring); rte_ring_free(rx_ring1); rte_ring_free(tx_ring); rte_ring_free(tx_ring1); rte_free(stats);
     rte_eal_cleanup();
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
