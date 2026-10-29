@@ -26,3 +26,18 @@ endforeach
 python = find_program('python3')
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
+
+# Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
+threads = dependency('threads')
+ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
+io_oracle = executable('io-oracle-test', ['tests/io_oracle_test.c', 'tests/io_oracle.c'], c_args: ['-UNDEBUG'])
+test('io-oracle', io_oracle)
+io_pmd = executable('io-pmd-test', ['tests/io_pmd.c', 'tests/io_oracle.c'] + common_sources,
+  dependencies: [dpdk, core, threads, ring_pmd], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+foreach mode: ['pcap', 'ring']
+  test('io-' + mode, python, args: [meson.project_source_root() / 'tests/io_pmd.py', mode, io_pmd],
+    timeout: 300, is_parallel: false)
+endforeach
+test('io-af-packet', python, args: [meson.project_source_root() / 'tests/io_pmd.py', 'af_packet', dpds_exe],
+  timeout: 30, is_parallel: false)
