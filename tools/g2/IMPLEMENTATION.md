@@ -6,8 +6,9 @@
 core4ae06c5. All work stays on the measurement branch; no hardware access.
 
 **Architecture:** A strict sealed interchange surrounds the existing independent
-Fraction reference. Bounded SQLite joins reconcile complete ingress, external
-before, receiver, terminal, dispatch and TX facts. The host exports fixed
+Fraction reference. Bounded active joins reconcile complete ingress, external
+before, receiver, terminal, dispatch and TX facts online. Only main samples,
+bounded histograms and capped mismatches persist by default. The host exports fixed
 metadata to bounded producer queues, serialized outside the packet path.
 Per-line/cell statistical gates consume verified pairs, never production
 deadlines as expected input. Physical timestamp parsing/calibration is offline;
@@ -81,8 +82,9 @@ Files: reference.py, new bundle.py / custody.py / validate.py, tests and fixture
   joins, resource bounds and incomplete/expired identity handling.
 - [ ] Upgrade reference CLI to read/write final sealed streams and summary,
   preserve consume/finish arithmetic, independently derive raw VLAN/length facts.
-- [ ] Use SQLite with bounded page cache/disk quota for full per-identity joins;
-  iterate streams, keep full evidence on disk and capped diagnostics in RAM.
+- [ ] Use bounded active per-identity joins and retire resolved facts; persist
+  main-sample witnesses and capped mismatch diagnostics. Full-history disk joins
+  are allowed only for explicitly bounded debug/software fixtures.
 - [ ] Replay dispatch availability / consumed prefixes and trace gates. Preserve
   failed suffixes exactly, allow only evidenced gate bypass. Missing evidence
   is incomplete; fully observed incorrect selections or terminal loss fail.
@@ -118,3 +120,13 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
   shape; no silent legacy-mode qualification.
 - Hardware observer drivers/capacity calibration are external M5 requirements;
   software M2 validates timestamp adapters with retained raw fixtures only.
+- Latest storage contract: stream mode is the default; full per-packet recording
+  needs an explicit debug window <=2 s. Extra strata retain histograms rather
+  than unbounded full pairs. Main samples retain exact quantiles and bounds.
+- Seal validation is complete in protocol.py; integration into the complete
+  streaming reference/report CLI remains separate. Receiver wire-order and
+  complete-evidence anomaly classification have focused regressions.
+- OnlineCells, Retention and ReceiveOrder provide per-line/direction/phase
+  statistics, separate strata, bounded sample/error storage and wire-order
+  reconstruction. Their caller must still verify complete identities, clocks,
+  terminal custody and actual TX attempts before any final qualification.

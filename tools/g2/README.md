@@ -10,6 +10,24 @@ It makes no network connections and never qualifies hardware. Receiver wire
 order is the explicit `receive_seq`, independent of JSONL export order; the
 receiver join performs its complete permutation checks.
 
+`online.OnlineCells` consumes independent model decisions and verified physical
+OWD pairs. It evaluates registered line/direction/phase cells separately, keeps
+main errors for exact quantiles, and updates bounded 1-microsecond signed/absolute
+histograms for main, ordinary/late main, late extra and each app extra. Empty
+timing populations are not applicable; a nonempty population below 368 main
+pairs is inconclusive. Confirmed data-path loss fails, while missing observer
+pairs remain inconclusive. The caller still owns calibration, full identity
+joining, terminal/attempt evidence and capture-integrity verification; these
+statistics alone cannot qualify a run.
+
+`online.Retention` defaults to `stream`, keeping only registered hash samples,
+capped mismatch records and explicit debug windows (at most two seconds each).
+Complete records are consumed online, not retained by this class. Main-sample
+storage has a registered capacity; exhaustion invalidates evidence. Software
+fixtures can explicitly select full retention. `online.ReceiveOrder` reconstructs
+wire order from `receive_seq` within a registered bound, independently of export
+line order. Its gaps remain incomplete evidence.
+
 Normal storage must use the registered streaming oracle and 1/1024 main sample.
 Complete streams are a transport into that oracle, not a default disk archive.
 Full persistence is an explicit bounded debug option. The provisional reporter
@@ -169,8 +187,10 @@ it does not implement VM126's specific target-load/app/steal admission check.
 `probe.py` preserves the Stage 1 100-byte UDP payload: network-order uint64
 sequence, uint32 magic `0x4c30504b`, one 0/1 late flag, and 87 zero bytes. It
 validates malformed/truncated headers. Receiver records may include
-`selected_late`; flag changes, duplicates and unmatched identities invalidate
-evidence, as in Stage 1. Whole-line stable order is additionally checked
+`selected_late`; flag changes and identities absent from ingress invalidate
+evidence. With complete evidence, duplicate delivery or delivery of an intended
+Q/trace drop fails the data path, following the updated observer specification.
+Whole-line stable order is additionally checked
 against the independent P1 model, beyond Stage 1's per-flow high-water count.
 
 The task's 0.2 ms tail injection cannot fail a fixed 0.5 ms threshold from a

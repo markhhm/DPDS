@@ -135,6 +135,23 @@ def build_report(expected, summary, received, counters, config, manifest, traces
             for field in ("deadline_ns", "release_ns", "wire_bytes", "ingress_seq"):
                 uint(row[field], field)
         expected_by_id[key] = row
+    received=list(received)
+    if any("receive_seq" in row for row in received):
+        if not all("receive_seq" in row for row in received):
+            raise ValueError("mixed receiver wire-order evidence")
+        def wire_key(row):
+            uint(row["receive_seq"],"receiver wire sequence")
+            want=expected_by_id.get(identity(row))
+            return row.get("egress_port",want["egress_port"] if want else 65535),row["receive_seq"]
+        received.sort(key=wire_key)
+        last={}
+        for row in received:
+            port,seq=wire_key(row)
+            if seq<=last.get(port,-1):
+                raise ValueError("duplicate receiver wire sequence")
+            if seq!=last.get(port,-1)+1:
+                reasons.append("receiver_order_gap")
+            last[port]=seq
     seen, duplicates, unknown = {}, [], []
     observed_order = defaultdict(list)
     for row in received:
@@ -153,6 +170,7 @@ def build_report(expected, summary, received, counters, config, manifest, traces
                 reasons.append("negative OWD beyond clock uncertainty; invalid pairing/clock evidence")
     if any(key[1] not in {line["ingress_port"] for line in lines.values()} for key in unknown):
         reasons.append("receiver evidence contains an undeclared ingress direction")
+    structural_unknown=any(key not in expected_by_id for key in unknown)
 
     serialized, late_collisions = {}, {}
     for egress in {line["egress_port"] for line in lines.values()}:
@@ -215,9 +233,7 @@ def build_report(expected, summary, received, counters, config, manifest, traces
             local_reasons.append("receiver/TX accepted mismatch")
 
         order_errors = sum(key[1] == port for key in duplicates + unknown)
-        if any(key[1] == port for key in duplicates):
-            local_reasons.append("duplicate receiver identity")
-        if any(key[1] == port for key in unknown):
+        if any(key[1] == port and key not in expected_by_id for key in unknown):
             local_reasons.append("unmatched receiver identity")
         actual_ooo = selected_late_ooo = flag_mismatches = 0
         highest = {}
@@ -307,7 +323,7 @@ def build_report(expected, summary, received, counters, config, manifest, traces
                           convention="Q: L2 incl VLAN/padding/FCS; drain: remaining exact wire service at C")
         collisions = [late_collisions[identity(row)] for row in survivors]
         statuses = [gate["status"] for gate in gates.values()]
-        status = "INCONCLUSIVE" if reasons or local_reasons else "FAIL" if non_model_drop or nic_loss or "FAIL" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses else "PASS"
+        status = "INVALID" if structural_unknown else "INCONCLUSIVE" if reasons or local_reasons else "FAIL" if non_model_drop or nic_loss or "FAIL" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses else "PASS"
         directions[str(port)] = dict(status=status, gates=gates, timing=timing, q=q,
             counters=terminal, reasons=local_reasons, missing_survivors=len(missing),
             sample_design=dict(algorithm="sha256-hng-g2-timing-v1", seed=seed, rate="1/1024",
@@ -340,7 +356,7 @@ def build_report(expected, summary, received, counters, config, manifest, traces
             probe_unexpected_ooo=actual_ooo-selected_late_ooo,
             timing_samples=main["n"], reasons=";".join(row_reasons)))
     statuses = [direction["status"] for direction in directions.values()]
-    status = "FAIL" if "FAIL" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses or reasons else "PASS"
+    status = "FAIL" if "FAIL" in statuses else "INVALID" if "INVALID" in statuses else "INCONCLUSIVE" if "INCONCLUSIVE" in statuses or reasons else "PASS"
     return dict(schema="hng-g2-report-draft-v1", status=status, scope="software-only, not G2",
                 g2_qualified=False, reasons=reasons, directions=directions,
                 ingress_summary=summary, timing_mode=manifest["timing_mode"],

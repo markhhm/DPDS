@@ -148,12 +148,28 @@ class ReportTests(unittest.TestCase):
     def test_full_sequence_detects_duplicate_identity(self):
         received = self.received + [self.received[0]]
         result = self.run_report(received=received)
-        self.assertEqual(result["status"], "INCONCLUSIVE")
-        self.assertEqual(result["rows"][0]["status"], "INVALID")
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["rows"][0]["status"], "FAIL")
+
+    def test_receive_seq_defines_wire_order_independently_of_export_line_order(self):
+        received=[dict(row,receive_seq=index) for index,row in enumerate(self.received)]
+        received[40],received[41]=received[41],received[40]
+        self.assertEqual(self.run_report(received=received)["status"],"PASS")
+        received[40]["receive_seq"],received[41]["receive_seq"]=received[41]["receive_seq"],received[40]["receive_seq"]
+        self.assertEqual(self.run_report(received=received)["status"],"FAIL")
+
+    def test_complete_delivery_of_model_q_drop_is_fail_not_observation_gap(self):
+        row=dict(self.expected[-1],external_identity="intended-drop",ingress_seq=600,
+                 selection_seq=600,outcome="q_drop",service_ns=None,deadline_ns=None,release_ns=None)
+        expected=self.expected+[row]
+        counters=copy.deepcopy(self.counters)
+        counters["0"].update(rx_returned=601,q_drop=1)
+        received=self.received+[dict(self.received[-1],external_identity="intended-drop")]
+        self.assertEqual(self.run_report(received=received,expected=expected,counters=counters)["status"],"FAIL")
 
     def test_foreign_receiver_records_and_changed_probe_flag_invalidate_evidence(self):
         extra = dict(self.received[0], ingress_port=9)
-        self.assertEqual(self.run_report(received=self.received+[extra])["status"], "INCONCLUSIVE")
+        self.assertEqual(self.run_report(received=self.received+[extra])["status"], "INVALID")
         received = copy.deepcopy(self.received)
         received[0]["selected_late"] = True
         result = self.run_report(received=received)

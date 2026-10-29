@@ -31,7 +31,7 @@ test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_sm
 test('g2-software', python,
   args: ['-m', 'unittest', 'tools.g2.tests.test_reference',
          'tools.g2.tests.test_report', 'tools.g2.tests.test_probe', 'tools.g2.tests.test_differential',
-         'tools.g2.tests.test_protocol'],
+         'tools.g2.tests.test_protocol', 'tools.g2.tests.test_online'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 threads = dependency('threads')
