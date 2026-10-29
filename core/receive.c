@@ -15,7 +15,7 @@ uint16_t rx_step(struct rx_state *s, struct rte_mbuf **batch, uint16_t max_batch
     uint16_t port = host.ports[s->next_port];
     s->last_port = port;
     s->last_index = s->next_port;
-    s->next_port = (s->next_port + 1) % host.port_count;
+    if (!s->fixed) s->next_port = (s->next_port + 1) % host.port_count;
     uint16_t count = rte_eth_rx_burst(port, 0, batch, max_batch);
     for (uint16_t i = 0; i < count; ++i) {
         struct packet_meta *m = packet_meta(batch[i]);
@@ -46,7 +46,7 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
     if (rte_ring_free_count(ring) < MAX_BURST_SIZE) {
         /* Defer only this port: its frames wait in the NIC queue (imissed if it overflows). */
         s->stats->ring_full_skips[s->next_port]++;
-        s->next_port = (s->next_port + 1) % host.port_count;
+        if (!s->fixed) s->next_port = (s->next_port + 1) % host.port_count;
         return 0;
     }
     uint16_t count = rx_step(s, batch, MAX_BURST_SIZE);

@@ -5,6 +5,8 @@ struct rx_state {
     uint16_t next_port, last_port, last_index;
     /* Split layouts hand each port to its own scheduler ring; enqueued counts per ring. */
     bool split;
+    /* Per-direction RX (7 lcores): poll only host.ports[next_port], never advance. */
+    bool fixed;
     uint64_t sequence[RTE_MAX_ETHPORTS], last_watermark, enqueued[2];
     struct rx_stats *stats;
 };
