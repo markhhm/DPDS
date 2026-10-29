@@ -169,6 +169,7 @@ int main(int argc, char **argv)
         host.schedulers_running = 2;
     }
     host.epoch_cycles = rte_get_timer_cycles();
+    host_mark_launched();
     printf("layout=%u-lcore%s\n", workers + 1, split ? " schedulers=per-ingress-port" : "");
     for (unsigned i = 0; i < workers; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);

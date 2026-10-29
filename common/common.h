@@ -27,6 +27,9 @@ struct host_context {
     struct Engine *engine;
     struct LineInfo lines[HNG_MAX_LINES];
     struct TxPolicy *policies[HNG_MAX_LINES];
+    /* Taken by host_load on the main lcore, before any owner launches. */
+    struct Line *line_handle[HNG_MAX_LINES];
+    _Atomic bool launched;
     size_t line_count;
     uint16_t ports[RTE_MAX_ETHPORTS], port_count;
     struct ingress_frontier frontier[RTE_MAX_ETHPORTS];
@@ -41,6 +44,10 @@ uint64_t host_now_ns(void);
 bool host_load(const char *path);
 /* Per-direction owners need every egress port fed by lines of one ingress port. */
 bool host_split_valid(void);
+/* Take every line handle; fails and invalidates once owners may run (host_mark_launched). */
+bool host_take_line_handles(void);
+/* Call on the main lcore immediately before launching pipeline lcores. */
+void host_mark_launched(void);
 void host_cleanup(void);
 void host_invalidate(const char *reason);
 void host_publish(uint16_t port, uint64_t enqueued, uint64_t watermark);

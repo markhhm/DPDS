@@ -9,8 +9,9 @@ void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats,
     s->engine = host.engine;
     s->stats = stats;
     for (size_t i = 0; i < host.line_count; ++i) {
-        s->line[i] = hng_engine_line(host.engine, i);
         if (ingress_port >= 0 && host.lines[i].ingress_port != ingress_port) continue;
+        /* Copy only owned handles; the main lcore took them before launch. */
+        s->line[i] = host.line_handle[i];
         s->owned[i] = true;
         s->owned_lines[s->owned_count++] = (uint16_t)i;
         s->min_delay[i] = hng_line_min_delay(s->line[i]);

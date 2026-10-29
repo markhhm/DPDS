@@ -44,8 +44,22 @@ bool host_load(const char *path)
         host.policies[i] = hng_tx_policy_new(host.engine, i);
         if (!host.policies[i]) return false;
     }
+    return host_take_line_handles();
+}
+
+bool host_take_line_handles(void)
+{
+    /* hng_engine_line borrows the whole Engine; owners may already hold line handles. */
+    if (atomic_load(&host.launched)) {
+        host_invalidate("line handle requested after owner launch");
+        return false;
+    }
+    for (size_t i = 0; i < host.line_count; ++i)
+        if (!(host.line_handle[i] = hng_engine_line(host.engine, i))) return false;
     return true;
 }
+
+void host_mark_launched(void) { atomic_store(&host.launched, true); }
 
 bool host_split_valid(void)
 {

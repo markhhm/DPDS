@@ -109,6 +109,7 @@ int main(int argc, char **argv)
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
     host.epoch_cycles = rte_get_timer_cycles();
     if (split) host.schedulers_running = 2;
+    host_mark_launched();
     for (unsigned i = 0; i < stages; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
         if (!parameters) rte_exit(EXIT_FAILURE, "cannot allocate lcore parameters\n");

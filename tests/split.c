@@ -59,6 +59,9 @@ static void run(unsigned owners, struct output o[2], struct HngStats lines[HNG_M
     memset(stats, 0, sizeof(stats));
     struct worker_state w[2];
     for (unsigned k = 0; k < owners; ++k) worker_state_init_owner(w + k, stats + k, owners == 1 ? -1 : (int)k);
+    /* Owners hold handles only for their own lines. */
+    for (unsigned k = 0; k < owners; ++k)
+        for (size_t i = 0; i < host.line_count; ++i) assert((w[k].line[i] != NULL) == w[k].owned[i]);
     uint64_t last[2] = {0}, consumed[2] = {0}, now = 0;
     struct rte_mbuf *in[MAX_BURST_SIZE], *out[MAX_BURST_SIZE];
     for (unsigned b = 0;; ++b) {
@@ -120,6 +123,11 @@ int main(int argc, char **argv)
         q_drops += a[i].q_drops; late += a[i].selected_late;
     }
     assert(q_drops > 0 && late > 0);
+    /* Handles are taken in host_load before launch; taking one after launch fails the run. */
+    assert(host_load("split.json") && !host.invalid);
+    host_mark_launched();
+    assert(!host_take_line_handles() && host.invalid);
+    host_cleanup();
     assert(rte_mempool_avail_count(pool) == 4095);
     rte_mempool_free(pool);
     assert(rte_eal_cleanup() == 0);

@@ -211,7 +211,8 @@ int main(int argc,char **argv)
     for(epoch=0;epoch<epochs;++epoch) {
         seed=ring_mode?epoch/153:(unsigned)strtoul(getenv("IO_SEED"),NULL,10);
         base=(uint64_t)epoch*2*IO_BATCH; char config[1024]; snprintf(config,sizeof(config),"%s/seed%u.json",dir,seed);
-        if(seed_epoch()==0) { assert(host_load(config) && (!split || host_split_valid())); atomic_store(&clock_ns,0); }
+        /* Owners wait at the barrier here; they take handles copied by host_load. */
+        if(seed_epoch()==0) { assert(host_load(config) && (!split || host_split_valid())); host_mark_launched(); atomic_store(&clock_ns,0); }
         struct HngStats previous[4]; for(unsigned line=0;line<4;++line) assert(hng_engine_stats(host.engine,line,previous+line));
         memset(&stats,0,sizeof(stats)); atomic_store(&workers_done,0); atomic_store(&tx_done,false);
         if(epoch==0) for(unsigned p=0;p<(ring_mode?4:2);++p) assert(initialize_port(p,pool)==0);
