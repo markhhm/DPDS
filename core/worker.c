@@ -13,7 +13,19 @@ void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats,
         if (ingress_port >= 0 && host.lines[i].ingress_port != ingress_port) continue;
         s->owned[i] = true;
         s->owned_lines[s->owned_count++] = (uint16_t)i;
+        s->min_delay[i] = hng_line_min_delay(s->line[i]);
+        /* Group owned lines by egress port, in line order. */
+        uint16_t g = 0;
+        while (g < s->group_count && host.lines[s->group_line[g][0]].egress_port != host.lines[i].egress_port) ++g;
+        if (g == s->group_count) s->group_count++;
+        s->group_handle[g][s->group_size[g]] = s->line[i];
+        s->group_line[g][s->group_size[g]++] = (uint16_t)i;
     }
+    /* host_split_valid(): the owner of an egress port must own every line feeding it. */
+    for (size_t i = 0; i < host.line_count; ++i)
+        for (size_t j = 0; j < host.line_count; ++j)
+            if (s->owned[i] && !s->owned[j] && host.lines[i].egress_port == host.lines[j].egress_port)
+                host_invalidate("egress port shared between scheduler owners");
 }
 
 void worker_state_init(struct worker_state *s, struct pipeline_stats *stats, uint16_t num_ports)
@@ -129,37 +141,33 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             sealed &= hng_line_drain_advance(s->line[s->owned_lines[k]], now);
         if (!sealed) host_invalidate("core service drain requires sealed input");
     }
+    /* One frontier snapshot per step. A newer frontier only permits more output,
+     * so a snapshot can defer a packet to the next step but never reorders one. */
+    uint64_t w[HNG_MAX_LINES][HNG_MAX_LINES], limit[HNG_MAX_LINES];
+    bool blocked[HNG_MAX_LINES] = {0};
+    for (uint16_t g = 0; g < s->group_count; ++g) {
+        /* A head is safe against unseen input only below every same-egress line's W + min delay. */
+        limit[g] = UINT64_MAX;
+        for (uint16_t k = 0; k < s->group_size[g]; ++k) {
+            size_t line = s->group_line[g][k];
+            uint64_t x = w[g][k] = watermark(s, host.lines[line].ingress_port);
+            uint64_t bound = x == UINT64_MAX || UINT64_MAX - x < s->min_delay[line] ? UINT64_MAX : x + s->min_delay[line];
+            if (bound < limit[g]) limit[g] = bound;
+        }
+    }
+    unsigned open = s->group_count;
     uint16_t emitted = 0;
-    for (size_t attempt = 0; attempt < (size_t)MAX_BURST_SIZE * s->owned_count; ++attempt) {
-        size_t start = s->owned_lines[s->next_line++ % s->owned_count];
-        struct HngPacket candidate;
-        size_t chosen = host.line_count;
+    for (size_t attempt = 0; open && attempt < (size_t)MAX_BURST_SIZE * s->owned_count; ++attempt) {
         /* Alternate physical outputs; within an output merge by release, physical seq. */
-        uint16_t port = host.lines[start].egress_port;
-        for (size_t line = 0; line < host.line_count; ++line) {
-            struct HngPacket p;
-            if (host.lines[line].egress_port != port || !s->owned[line] || !hng_line_peek(s->line[line],
-                now, watermark(s, host.lines[line].ingress_port), &p)) continue;
-            if (chosen == host.line_count || p.release_ns < candidate.release_ns ||
-                (p.release_ns == candidate.release_ns && p.ingress_seq < candidate.ingress_seq)) {
-                candidate = p;
-                chosen = line;
-            }
+        uint16_t g = s->next_line++ % s->group_count;
+        if (blocked[g]) continue;
+        struct HngPacket candidate;
+        if (hng_lines_pop_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate) < 0) {
+            /* Nothing on this port changes until the next step: stop retrying it. */
+            blocked[g] = true;
+            open--;
+            continue;
         }
-        if (chosen == host.line_count) continue;
-        bool complete = true;
-        for (size_t line = 0; line < host.line_count; ++line) {
-            if (host.lines[line].egress_port != port) continue;
-            /* host_split_valid() guarantees that one owner holds every line of an egress port. */
-            if (!s->owned[line]) { host_invalidate("egress port shared between scheduler owners"); complete = false; break; }
-            uint64_t w = watermark(s, host.lines[line].ingress_port);
-            uint64_t min_delay = hng_line_min_delay(s->line[line]);
-            if (w != UINT64_MAX && candidate.release_ns >
-                (UINT64_MAX - w < min_delay ? UINT64_MAX : w + min_delay)) complete = false;
-        }
-        if (!complete) continue;
-        if (!hng_line_pop(s->line[chosen], now,
-            watermark(s, host.lines[chosen].ingress_port), &candidate)) continue;
         /* Dequeue does not touch the (usually cold) mbuf; admission annotated it. */
         out_batch[emitted++] = candidate.packet_ptr;
         s->stats->sent++;

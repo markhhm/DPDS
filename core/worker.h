@@ -5,9 +5,12 @@ struct worker_state {
     struct Engine *engine;
     struct Line *line[HNG_MAX_LINES];
     struct worker_stats *stats;
-    uint64_t consumed, admitted_frontier[RTE_MAX_ETHPORTS], shutdown_start;
+    uint64_t consumed, admitted_frontier[RTE_MAX_ETHPORTS], shutdown_start, min_delay[HNG_MAX_LINES];
     bool ended, aborted, owned[HNG_MAX_LINES];
     uint16_t next_line, owned_count, owned_lines[HNG_MAX_LINES];
+    /* Owned lines grouped by egress port; each group merges into one physical output. */
+    struct Line *group_handle[HNG_MAX_LINES][HNG_MAX_LINES];
+    uint16_t group_count, group_size[HNG_MAX_LINES], group_line[HNG_MAX_LINES][HNG_MAX_LINES];
 };
 void worker_state_init(struct worker_state *s, struct pipeline_stats *stats, uint16_t num_ports);
 /* ingress_port < 0: own every line. Otherwise own only that port's lines. */
