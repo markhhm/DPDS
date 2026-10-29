@@ -10,12 +10,14 @@ import os
 from pathlib import Path
 import signal
 import re
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+from eal_args import eal_arguments
 
 
 def config(seed, smoke=False):
@@ -55,7 +57,7 @@ def pcap(path, seed, port):
 
 
 def eal(binary):
-    return [binary, "-l", "0-3", "--no-pci", "--no-huge", "--no-telemetry",
+    return [binary]+eal_arguments(4)+["--no-pci", "--no-huge", "--no-telemetry",
             f"--file-prefix=hng-io-{os.getpid()}"]
 
 
@@ -83,29 +85,31 @@ def smoke(binary, directory):
         for seq in range(32):
             for port in range(2):
                 receivers[port].send(frame(0, port, seq))
-            time.sleep(0.002)
-        deadline = time.monotonic()+5
-        while time.monotonic()<deadline and any(len(x)<32 for x in observed):
-            for port, sock in enumerate(receivers):
-                try:
-                    data, ancillary, flags, address = sock.recvmsg(2048, 1024)
-                    assert not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
-                    for level, kind, value in ancillary:
-                        if level == 263 and kind == 8:
-                            status, _, _, _, _, tci, tpid = struct.unpack("=IIIHHHH", value[:20])
-                            if status & (1 << 4):
-                                data = data[:12]+struct.pack("!HH", tpid if status & (1 << 6) else 0x8100, tci)+data[12:]
-                except TimeoutError:
-                    continue
-                if len(seen[port])<8:
-                    seen[port].append((address[2], data[12:18].hex(), len(data)))
-                if address[2] != socket.PACKET_OUTGOING and data[12:14] == b"\x81\x00" and data[16:18] == b"\x88\xb5":
-                    observed[port].append(data)
+            # One outstanding frame per direction avoids legal cross-line overtakes
+            # when a busy CI runner batches several physical arrivals.
+            deadline = time.monotonic()+5
+            while time.monotonic()<deadline and any(len(x)<seq+1 for x in observed):
+                for port, sock in enumerate(receivers):
+                    try:
+                        data, ancillary, flags, address = sock.recvmsg(2048, 1024)
+                        assert not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+                        for level, kind, value in ancillary:
+                            if level == 263 and kind == 8:
+                                status, _, _, _, _, tci, tpid = struct.unpack("=IIIHHHH", value[:20])
+                                if status & (1 << 4):
+                                    data = data[:12]+struct.pack("!HH", tpid if status & (1 << 6) else 0x8100, tci)+data[12:]
+                    except TimeoutError:
+                        continue
+                    if len(seen[port])<8:
+                        seen[port].append((address[2], data[12:18].hex(), len(data)))
+                    if address[2] != socket.PACKET_OUTGOING and data[12:14] == b"\x81\x00" and data[16:18] == b"\x88\xb5":
+                        observed[port].append(data)
+            assert all(len(x)==seq+1 for x in observed), f"af_packet missing frame {seq}: {seen}"
         assert observed == expected, f"af_packet output mismatch: observed counts {[len(x) for x in observed]}, seen={seen}"
     finally:
         process.send_signal(signal.SIGINT)
         output, _ = process.communicate(timeout=12)
-        if any(len(x)!=32 for x in observed):
+        if observed != expected:
             print(output, file=sys.stderr)
         for sock in receivers:
             sock.close()
@@ -124,6 +128,9 @@ def main():
     if mode == "namespace-child":
         smoke(binary, Path(sys.argv[3])); return
     if mode == "af_packet":
+        if not all(shutil.which(tool) for tool in ("unshare", "ip")):
+            print("SKIP af_packet: unshare and ip executables are required")
+            sys.exit(77)
         probe = subprocess.run(["unshare", "--user", "--map-root-user", "--net", "sh", "-c",
             "ip link add probe0 type veth peer name probe1"], capture_output=True, text=True)
         if probe.returncode:

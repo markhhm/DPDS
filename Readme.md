@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # DPDS HNG host
 
 This fork of [DPDS](https://github.com/uni-tue-kn/DPDS) uses DPDK I/O and the
@@ -24,8 +26,9 @@ meson test -C build --print-errorlogs
 
 The Meson tests use real mbufs, an injected TX callback, null PMDs, and actual
 pcap/ring/af_packet PMD RX/TX.
-They need no PCI devices, hugepages, or root privileges. The test EAL uses
-logical CPU 0. The process tests also use CPUs 1–3.
+They need no PCI devices, hugepages, or root privileges. Test lcores map to CPUs
+in the process affinity mask. Runners with fewer than four CPUs share them
+between lcores for integrity checks; this is unsuitable for performance measurements.
 
 The tests cover four independent queues, VLAN classification, sparse ports,
 the RX frontier, delayed ordinary packets, partial TX, and ownership at shutdown.
@@ -56,6 +59,9 @@ including pkg-config, Python pyelftools, and the libpcap headers/library. Run `p
 before configuring DPDK and `pkg-config --exists --print-errors libdpdk` before
 configuring this host to diagnose missing development dependencies.
 The CI workflow builds this configuration and runs the same Meson suite.
+While the core submodule is private, configure the optional Actions secret
+`DPDS_READ_TOKEN` with read-only contents access to both repositories. The default
+workflow token suffices once the submodule is public. No credential is stored in fixtures.
 
 Public test commands, also available individually:
 
@@ -102,6 +108,10 @@ and Meson records SKIP. A successful probe runs a 64-packet bidirectional smoke
 through two af_packet ports and production application RX/worker/TX, checks all
 output frames, and checks shutdown conservation. The observer reconstructs any
 kernel-stripped VLAN from PACKET_AUXDATA before comparing bytes. Namespace
+smoke sends the next frame only after both directional receivers see the current
+frame, so legal cable/LEO overtakes under CPU contention cannot invalidate its
+simple physical sequence check. The pcap/ring oracle checks model-permitted reordering.
+Namespace
 background frames are rejected by the classifier and explicitly counted as
 `background_rejected`; they are included in software conservation.
 All interfaces disappear when

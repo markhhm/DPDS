@@ -9,6 +9,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Private forks can supply a read-only token with access to both repos.
+          token: ${{ secrets.DPDS_READ_TOKEN || github.token }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Build user-local DPDK with virtual PMDs
         run: |
