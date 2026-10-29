@@ -1,180 +1,112 @@
-# DPDS
+# DPDS HNG host
 
-**DPDS** is a high-performance software **network-link emulator**. It sits
-between two network interfaces and reproduces the three effects a real link
-imposes on traffic — **delay**, **rate limiting**, and **packet loss** — on a
-live packet stream at line rate.
+This fork of [DPDS](https://github.com/uni-tue-kn/DPDS) uses DPDK I/O and the
+[Rust HNG engine](dpds-core/README.md). It preserves the Apache-2.0 license.
+The legacy Rust API remains available in the core. This host accepts only `hng-v1`.
 
-The data plane is built on [DPDK](https://www.dpdk.org/): packets are received,
-passed through the emulation pipeline, and transmitted again with zero copies
-and no kernel involvement on the fast path. The emulation logic itself lives in
-[`dpds-core`](dpds-core/README.md), a Rust library linked in over a small C FFI.
-This repository is the DPDK host application that owns the NICs and drives that
-library.
+Each configured `(ingress_port, VLAN)` selects one line and direction.
+Every flow on that line shares one C/Q state. Cable and LEO in both directions
+use four independent states. The configuration gives the egress port explicitly.
+Sparse DPDK port IDs are valid.
 
-## How it works
+## Build and software checks
 
-```
-        ┌────────┐   rx_ring   ┌────────┐   tx_ring   ┌──────────┐
-NIC ──► │   RX   │ ──────────► │ Worker │ ──────────► │    TX    │ ──► NIC
-        └────────┘             └───┬────┘             └──────────┘
-                                   │
-                            ┌──────▼───────┐
-                            │  dpds-core   │  delay · rate-limit · loss
-                            │  (Buffer)    │
-                            └──────────────┘
-```
+Requirements: DPDK 26.03 with the null PMD, stable Rust, a C compiler, Meson,
+Ninja, and Python 3 for the process tests.
 
-The pipeline has three stages, each able to run on its own isolated CPU core:
-
-| Stage      | Source            | Responsibility                                                                                    |
-| ---------- | ----------------- | ------------------------------------------------------------------------------------------------- |
-| **RX**     | `core/receive.c`  | Poll the NIC for incoming bursts and hand them to the worker.                                      |
-| **Worker** | `core/worker.c`   | Push each packet into the `dpds-core` buffer, then drain packets whose computed send time is due.  |
-| **TX**     | `core/transmit.c` | Transmit ready packets on the outgoing port.                                                       |
-
-The worker delegates *when* (or *whether*) each packet is forwarded to
-`dpds-core`; see its [README](dpds-core/README.md) for the delay distributions,
-rate-limiter modes (Spacer / Token Bucket Filter), and loss models
-(Random / Gilbert–Elliott).
-
-### Core layouts
-
-DPDS adapts to the number of lcores it is given (1 main/monitor core + 1–3
-worker cores). Fewer cores fuse stages onto a single thread to save context;
-more cores isolate each stage for maximum throughput:
-
-| lcores | Layout                                          |
-| ------ | ----------------------------------------------- |
-| 2      | RX + Worker + TX combined on one core           |
-| 3      | RX on one core; Worker + TX combined on another |
-| 4      | RX, Worker, and TX each on a dedicated core      |
-
-### Topology
-
-- **Two NICs** — packets received on one port are emulated and sent out the
-  other (the worker flips the port). This is the typical inline / bump-in-the-wire setup.
-- **One NIC** — single-port loopback; packets are emulated and sent back out the
-  same port.
-
-## Requirements
-
-- **DPDK 26.03** (and a DPDK-bound NIC; tested on Mellanox ConnectX)
-- **Rust** (stable toolchain) — builds `dpds-core`
-- **Meson** + **Ninja**
-- A C compiler with `-march=native` support
-- Linux with hugepages configured
-
-A ready-to-use [dev container](.devcontainer/) is included that installs DPDK,
-Rust, and the build tooling. Building the app works anywhere; *running* it
-requires a Linux host with hugepages and a bound NIC (see the commented
-`runArgs` / hugepage mount in `.devcontainer/devcontainer.json`).
-
-## Building
-
-Clone with the `dpds-core` submodule:
-
-```bash
-git clone --recurse-submodules <repo-url>
-cd dpds
-# (or, if already cloned)  git submodule update --init --recursive
-```
-
-Configure and build with Meson:
-
-```bash
+```sh
+git submodule update --init --recursive
 meson setup build
 meson compile -C build
+meson test -C build --print-errorlogs
 ```
 
-This builds `dpds-core` (via Cargo) and the `dpds` executable into `build/`, and
-copies `config.json` alongside it.
+The Meson tests use real mbufs, an injected TX callback, and null PMDs.
+They need no PCI devices, hugepages, or root privileges. The test EAL uses
+logical CPU 0. The process tests also use CPUs 1–3.
 
-## Running
+The tests cover four independent queues, VLAN classification, sparse ports,
+the RX frontier, delayed ordinary packets, partial TX, and ownership at shutdown.
+Null-PMD checks exercise all layouts with zero RX and zero-filled RX packets.
+Those packets exercise classifier rejection. Direct mbuf fixtures cover valid traffic.
 
-DPDS uses DPDK's standard EAL command line. Arguments before `--` configure the
-EAL (cores, NIC PCI addresses); arguments after `--` are application options.
+## Run with software ports
 
-```bash
-# From the build directory (config.json is read from the working directory)
+```sh
 cd build
-
-# 4-core example, two NICs, writing a CSV stats summary on exit:
-sudo ./dpds -l 0-3 -a 0000:17:00.0 -a 0000:17:00.1 -- -o stats.csv
+./dpds -l 0-3 --no-pci --no-huge --no-telemetry \
+  --vdev=net_null0,no-rx=1 --vdev=net_null1,no-rx=1 \
+  -- -c config.json -o stats.txt
 ```
 
-- `-l 0-3` — lcores to use (here cores 0–3 → 4-core layout).
-- `-a <PCI>` — NIC PCI address(es); pass one for loopback, two for inline.
-- `-o <file>` — *(optional)* write a final CSV stats summary on shutdown.
+Use `Ctrl-C` to stop RX and drain the pipeline. The optional output file must
+not exist. The host prints final text counters and pool ownership counts.
+It exits with failure if a resource failure, terminal TX failure, or conservation
+failure makes the run invalid.
 
-While running, DPDS prints a live per-second dashboard (RX/TX packet rates, burst
-histograms, emulator/ring drops, and per-NIC hardware counters). Stop it with
-`Ctrl-C`; it drains the buffer and prints cumulative statistics.
+Classifier rejection has a separate counter.
+`DRAINED` identifies software custody completion. It does not identify a G2 pass.
 
-## Configuration
+| lcores | Layout |
+| --- | --- |
+| 2 | RX, worker, and TX share one worker core |
+| 3 | RX has one core; worker and TX share another core |
+| 4 | RX, worker, and TX each have one core |
 
-The emulation behaviour is controlled by `config.json`, read from the working
-directory at startup. The full schema — delay distributions, limiter modes, and
-loss models — is documented in
-[`dpds-core/README.md`](dpds-core/README.md#configuration), with a complete
-example in [`dpds-core/config.example.json`](dpds-core/config.example.json). The
-`config.json` in this repository is a working default.
+The main lcore waits for completion. It reads counters after the worker cores exit.
 
-## Performance tuning
+## Configuration and packet contract
 
-For line-rate operation, isolate the emulator's cores from the OS and tune the
-NIC. These steps are host-specific and re-applied per boot.
+Use [config.json](config.json) for a small software example. Use
+[HNG-DESIGN.md](dpds-core/docs/HNG-DESIGN.md) for the full contract.
+The Rust constructor validates the model and storage envelope before RX starts.
+The host also validates port availability before port initialization.
+Legacy JSON fields do not select HNG parameters.
 
-### CPU isolation
+The baseline accepts one retained 802.1Q tag and one mbuf segment, with an MTU
+of 1500 bytes. It rejects unknown VLAN IDs, untagged frames, stacked tags,
+stripped tags, and unsupported lengths. It preserves VLAN bytes.
+RX and TX use one queue per port, with offloads disabled.
+Q charges `max(pkt_len + 4, 64)` L2 bytes. C charges another 20 wire bytes.
 
-Cores 1–4 are isolated from the OS scheduler and used exclusively by the
-emulator. Isolation is configured via the kernel boot parameter:
+RX captures an integer timestamp relative to the run epoch and a physical-port
+sequence before handoff. Each line has a separate selection sequence in Rust.
+The worker uses a producer frontier only after it consumes all earlier handoff
+records. An empty RX poll can advance the software frontier. This clock describes
+software RX observation. It cannot establish hardware wire time.
 
-```
-isolcpus=1-4
-```
+The worker merges line heads by `(release_ns, ingress_seq)` on each egress.
+TX preserves an unsent suffix and checks the actual-time trace gate on every
+attempt. A held LEO line permits safe cable output on the same port.
+The host records actual submit lateness against the original model deadline.
+A missed-deadline outage discard is a non-model failure.
 
-Because these cores are isolated, `irqbalance` cannot migrate interrupts onto
-them — stopping `irqbalance` is therefore not required.
+## Resource and shutdown bounds
 
-### NIC tuning (one-time, per host)
+Each ingress port has a pool on its NIC NUMA node, or the current node for a
+software port. Its object count includes all configured storage slots on that
+port, plus descriptor, ring, cache, burst, and TX reserves. Startup prints the
+actual object footprint and NUMA node. It does not reserve a fixed 32 GiB.
+Cross-NUMA egress DMA remains possible.
 
-The following improve throughput on Mellanox ConnectX NICs and must be
-re-applied after a reboot.
+The RX producer waits for handoff space before another burst. An unexpected
+short ring enqueue invalidates the run and counts its discarded suffix.
+The TX backlog permits 256 packets per line. An exhausted backlog invalidates
+the run.
 
-#### PCIe MaxReadReq → 1024 B
+The one-second TX retry bound starts after the first unsuccessful admission.
+Outage holds and scheduler shutdown have a five-second bound.
+These bounds are software defaults, not model Q loss.
 
-Increasing the PCIe Maximum Read Request Size reduces the number of round-trips
-the NIC needs to fetch TX packet data from system memory.
+Shutdown closes RX first, then drains RX handoffs, the core, TX handoffs, and
+TX suffixes. A timeout counts every reclaimed packet under a terminal reason.
+Port cleanup precedes the final pool ownership check. The host reports packet
+and byte conservation, per-line core counters, and raw NIC counters separately.
+A TX-accepted count does not prove receiver delivery.
 
-```bash
-# Read the current value (requires root; returns 4 hex digits ABCD)
-sudo setpci -s <PCI_ADDRESS> 68.w
-
-# Set to 1024 B: replace the first digit with 3, keep the rest (BCD)
-sudo setpci -s <PCI_ADDRESS> 68.w=3BCD
-
-# Verify
-sudo setpci -s <PCI_ADDRESS> 68.w   # should now start with 3
-```
-
-Example — address `0000:17:00.0` with original value `2934`:
-
-```bash
-sudo setpci -s 0000:17:00.0 68.w=3934
-```
-
-## Repository layout
-
-```
-dpds.c            Application entry point: EAL init, port setup, pipeline launch, stats
-core/             Pipeline stages (receive, worker, transmit, combined fused modes)
-common/           Shared port init, signal handling, config constants, stats structs
-dpds-core/        Rust emulation library (git submodule, C FFI)
-config.json       Default emulation configuration
-meson.build       Build definition (also drives the Cargo build of dpds-core)
-.devcontainer/    Dev container with DPDK + Rust preinstalled
-```
+Software checks do not qualify 10G/100G throughput, G2 timing, NIC timestamps,
+physical outage boundaries, or full receiver/oracle evidence. Pcap replay and
+hardware checks remain separate acceptance work.
 
 ## License
 
