@@ -115,3 +115,20 @@ hardware checks remain separate acceptance work.
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+## Required pre-push checks
+
+After cloning (and initializing the host submodule), install the versioned hook:
+
+```sh
+./scripts/install-hooks.sh
+```
+
+The hook runs `meson compile -C build` and `meson test -C build --print-errorlogs`
+(initializing `build` when absent, including the pinned core build).
+It checks a clean checkout of the exact commit being pushed. Check out each
+commit before pushing another branch. Deletions need no build. A check failure
+blocks the push; fix the failure or report missing tools to the lead. Never
+bypass hooks. The installer refuses to replace a different existing hook.
+Keep the build environment (Cargo, Meson, DPDK pkg-config and runtime library
+paths) available in the shell that performs the push.
