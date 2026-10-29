@@ -11,19 +11,22 @@
 #include <rte_ethdev.h>
 #include <rte_eth_ring.h>
 #include <rte_launch.h>
+#include "../core/receive.h"
 #include "../core/worker.h"
 #include "../core/transmit.h"
 #include "io_oracle.h"
 
 static pthread_barrier_t barrier;
-static struct rte_ring *rx_handoff[2],*tx_handoff;
+static struct rte_ring *rx_handoff[2],*tx_handoff[2];
 static struct rte_mempool *pool;
 static struct pipeline_stats stats;
-static _Atomic bool tx_done;
+static _Atomic unsigned tx_done;
 static _Atomic unsigned workers_done;
 static unsigned seed,epoch,epochs,owners=1;
-/* split: one production scheduler owner per ingress port, each with its own RX handoff. */
-static bool ring_mode,stepped,split;
+/* split: one production scheduler owner per ingress port, each with its own RX handoff.
+ * io_split: also one RX owner and one TX owner (own TX handoff and TX state) per direction. */
+static bool ring_mode,stepped,split,io_split;
+static unsigned stages(void) { return 3+(unsigned)split+2*(unsigned)io_split; }
 /* Stepped mode: shared fixture clock and backpressure evidence. */
 static _Atomic uint64_t clock_ns;
 static _Atomic uint64_t rx_full[2];
@@ -42,12 +45,14 @@ static void enqueue(struct rte_ring *r,struct rte_mbuf **m,unsigned n)
     }
 }
 static void clock_advance(uint64_t t) { uint64_t c=atomic_load(&clock_ns); while(c<t && !atomic_compare_exchange_weak(&clock_ns,&c,t)) {} }
-static int receive_owner(void *unused)
+static int receive_owner(void *arg)
 {
-    (void)unused;
+    unsigned k=(unsigned)(uintptr_t)arg; /* io_split: this owner polls only port k */
+    struct rx_stats *rx=io_split?&stats.rx_owners[k]:&stats.rx;
     for(unsigned run=0;run<epochs;++run) {
         pthread_barrier_wait(&barrier); unsigned received[2]={0};
-        while(received[0]+received[1]<2*IO_BATCH) for(unsigned p=0;p<2;++p) {
+        while(received[0]+received[1]<(io_split?1:2)*IO_BATCH) for(unsigned p=0;p<2;++p) {
+            if(io_split && p!=k) continue;
             struct rte_mbuf *batch[MAX_BURST_SIZE];
             unsigned n=rte_eth_rx_burst(p,0,batch,MAX_BURST_SIZE);
             for(unsigned i=0;i<n;++i) {
@@ -55,9 +60,9 @@ static int receive_owner(void *unused)
                 assert(m->pkt_len>=76 && received[p]<IO_BATCH);
                 assert(decode(d+34)==(uint64_t)seed_epoch()*IO_BATCH+received[p] && decode(d+18)==base+p*IO_BATCH+received[p]);
                 *packet_meta(m)=(struct packet_meta){.ingress_port=p,.ingress_seq=decode(d+34),.arrival_ns=decode(d+26)};
-                stats.rx.received++; stats.rx.received_bytes+=m->pkt_len; received[p]++;
+                rx->received++; rx->received_bytes+=m->pkt_len; received[p]++;
             }
-            enqueue(rx_handoff[split?p:0],batch,n); stats.rx.enqueued+=n;
+            enqueue(rx_handoff[split?p:0],batch,n); rx->enqueued+=n;
         }
         pthread_barrier_wait(&barrier);
     }
@@ -102,7 +107,7 @@ static int scheduler_owner(void *arg)
                     if(held.storage_packets) { partial[k]++; break; } /* some due, some not yet */
                 }
             }
-            enqueue(tx_handoff,out,emitted);
+            enqueue(tx_handoff[io_split?k:0],out,emitted);
         }
         bool final=!ring_mode || seed_epoch()==152;
         if(final) worker_end_input(&worker);
@@ -111,7 +116,7 @@ static int scheduler_owner(void *arg)
         while(final?worker_has_backlog(&worker):worker.stats->sent<expected_count[k]) {
             struct rte_mbuf *out[MAX_BURST_SIZE];
             unsigned n=worker_step_at(&worker,NULL,0,out,fixture_now());
-            enqueue(tx_handoff,out,n);
+            enqueue(tx_handoff[io_split?k:0],out,n);
         }
         if(final) worker_state_cleanup(&worker);
         else for(unsigned line=0;line<host.line_count;++line) if(worker.owned[line]) assert(hng_line_stats(worker.line[line],&worker.stats->lines[line]));
@@ -120,21 +125,22 @@ static int scheduler_owner(void *arg)
     }
     return 0;
 }
-static int transmit_owner(void *unused)
+static int transmit_owner(void *arg)
 {
-    (void)unused;
+    unsigned k=(unsigned)(uintptr_t)arg; struct rte_ring *ring=tx_handoff[io_split?k:0];
     for(unsigned run=0;run<epochs;++run) {
         pthread_barrier_wait(&barrier);
         struct tx_state tx; tx_state_init(&tx,&stats);
+        if(io_split) tx.stats=&stats.tx_owners[k];
         do {
             struct rte_mbuf *in[MAX_BURST_SIZE];
             bool room=true; /* Stepped: stop dequeuing before the bounded TX backlog fills. */
             for(unsigned line=0;stepped && line<HNG_MAX_LINES;++line) if(tx.pending[line].len>TX_PENDING_PER_LINE-MAX_BURST_SIZE) room=false;
             if(!room) tx_hold++;
-            unsigned n=room?rte_ring_dequeue_burst(tx_handoff,(void **)in,MAX_BURST_SIZE,NULL):0;
+            unsigned n=room?rte_ring_dequeue_burst(ring,(void **)in,MAX_BURST_SIZE,NULL):0;
             tx_step_at(&tx,in,n,stepped?atomic_load(&clock_ns):fixture_now());
-        } while(atomic_load(&workers_done)<owners || !rte_ring_empty(tx_handoff) || tx_has_backlog(&tx));
-        tx_state_cleanup(&tx); atomic_store(&tx_done,true);
+        } while(atomic_load(&workers_done)<owners || !rte_ring_empty(ring) || tx_has_backlog(&tx));
+        tx_state_cleanup(&tx); atomic_fetch_add(&tx_done,1);
         pthread_barrier_wait(&barrier);
     }
     return 0;
@@ -178,10 +184,10 @@ static void check_pcap(const char *dir,struct io_record *expected,size_t count)
 int main(int argc,char **argv)
 {
     const char *dir=getenv("IO_DIR"),*mode=getenv("IO_MODE"); assert(dir && mode);
-    split=strstr(mode,"-split")!=NULL; owners=split?2:1;
+    split=strstr(mode,"-split")!=NULL; io_split=strstr(mode,"-io-split")!=NULL; owners=split?2:1;
     stepped=strncmp(mode,"ring-stepped",12)==0; ring_mode=stepped || strncmp(mode,"ring",4)==0;
     unsigned ring_size=stepped?64:4096; /* Small rings make every producer block. */ epochs=ring_mode?32*153:1;
-    assert(rte_eal_init(argc,argv)>=0 && rte_lcore_count()==4+(unsigned)split);
+    assert(rte_eal_init(argc,argv)>=0 && rte_lcore_count()==1+stages());
     if(ring_mode) for(unsigned p=0;p<2;++p) {
         char a[32],b[32],port[32]; snprintf(a,sizeof(a),"source%u",p); snprintf(b,sizeof(b),"sink%u",p);
         struct rte_ring *rx=rte_ring_create(a,ring_size,rte_socket_id(),RING_F_SP_ENQ|RING_F_SC_DEQ);
@@ -200,13 +206,16 @@ int main(int argc,char **argv)
     assert(pool);
     for(unsigned k=0;k<owners;++k) { char name[32]; snprintf(name,sizeof(name),"io_rx%u",k);
         rx_handoff[k]=rte_ring_create(name,ring_size,rte_socket_id(),RING_F_SP_ENQ|RING_F_SC_DEQ); assert(rx_handoff[k]); }
-    /* Split: both scheduler owners produce into the TX handoff. */
-    tx_handoff=rte_ring_create("io_tx",ring_size,rte_socket_id(),(split?0:RING_F_SP_ENQ)|RING_F_SC_DEQ); assert(tx_handoff);
-    pthread_barrier_init(&barrier,NULL,4+split); unsigned cores[4],ncores=0,id;
+    /* Split: both scheduler owners produce into the TX handoff. io_split: one SP/SC ring per direction. */
+    unsigned directions=io_split?2:1;
+    for(unsigned k=0;k<directions;++k) { char name[32]; snprintf(name,sizeof(name),"io_tx%u",k);
+        tx_handoff[k]=rte_ring_create(name,ring_size,rte_socket_id(),(split && !io_split?0:RING_F_SP_ENQ)|RING_F_SC_DEQ); assert(tx_handoff[k]); }
+    pthread_barrier_init(&barrier,NULL,1+stages()); unsigned cores[6],ncores=0,id;
     RTE_LCORE_FOREACH_WORKER(id) cores[ncores++]=id;
-    assert(ncores==3+(unsigned)split); assert(!rte_eal_remote_launch(receive_owner,NULL,cores[0]));
-    for(unsigned k=0;k<owners;++k) assert(!rte_eal_remote_launch(scheduler_owner,(void *)(uintptr_t)k,cores[1+k]));
-    assert(!rte_eal_remote_launch(transmit_owner,NULL,cores[1+owners]));
+    assert(ncores==stages()); unsigned c=0;
+    for(unsigned k=0;k<directions;++k) assert(!rte_eal_remote_launch(receive_owner,(void *)(uintptr_t)k,cores[c++]));
+    for(unsigned k=0;k<owners;++k) assert(!rte_eal_remote_launch(scheduler_owner,(void *)(uintptr_t)k,cores[c++]));
+    for(unsigned k=0;k<directions;++k) assert(!rte_eal_remote_launch(transmit_owner,(void *)(uintptr_t)k,cores[c++]));
     uint64_t total_in=0,total_out=0,total_drop=0;
     for(epoch=0;epoch<epochs;++epoch) {
         seed=ring_mode?epoch/153:(unsigned)strtoul(getenv("IO_SEED"),NULL,10);
@@ -214,7 +223,7 @@ int main(int argc,char **argv)
         /* Owners wait at the barrier here; they take handles copied by host_load. */
         if(seed_epoch()==0) { assert(host_load(config) && (!split || host_split_valid())); host_mark_launched(); atomic_store(&clock_ns,0); }
         struct HngStats previous[4]; for(unsigned line=0;line<4;++line) assert(hng_engine_stats(host.engine,line,previous+line));
-        memset(&stats,0,sizeof(stats)); atomic_store(&workers_done,0); atomic_store(&tx_done,false);
+        memset(&stats,0,sizeof(stats)); atomic_store(&workers_done,0); atomic_store(&tx_done,0);
         if(epoch==0) for(unsigned p=0;p<(ring_mode?4:2);++p) assert(initialize_port(p,pool)==0);
         struct rte_eth_stats before[4];
         for(unsigned p=0;p<(ring_mode?4:2);++p) assert(rte_eth_stats_get(p,before+p)==0);
@@ -236,9 +245,12 @@ int main(int argc,char **argv)
                 struct rte_mbuf *packets[MAX_BURST_SIZE]; unsigned n=rte_eth_rx_burst(p+2,0,packets,MAX_BURST_SIZE);
                 for(unsigned i=0;i<n;++i) { check_frame(rte_pktmbuf_mtod(packets[i],const uint8_t *),packets[i]->pkt_len,p,expected,count,next); rte_pktmbuf_free(packets[i]); observed++; }
             }
-        } while(!atomic_load(&tx_done) || observed<count);
+        } while(atomic_load(&tx_done)<directions || observed<count);
         pthread_barrier_wait(&barrier);
         for(unsigned k=0;split && k<2;++k) worker_stats_merge(&stats.worker,&stats.owners[k],(int)k);
+        for(unsigned k=0;io_split && k<2;++k) { rx_stats_merge(&stats.rx,&stats.rx_owners[k]); tx_stats_merge(&stats.tx,&stats.tx_owners[k]);
+            /* Each direction's RX and TX owners saw only their own port's packets. */
+            assert(stats.rx_owners[k].received==IO_BATCH && stats.tx_owners[k].transmitted==expected_count[k]); }
         assert(!host.invalid && stats.rx.received==2*IO_BATCH && stats.rx.enqueued==stats.rx.received);
         assert(stats.worker.received==stats.rx.enqueued && stats.worker.sent==count && stats.worker.emulator_drops==2*IO_BATCH-count);
         assert(stats.worker.invalid_drops==0 && stats.worker.storage_drops==0 && stats.worker.shutdown_drops==0 && stats.worker.tx_ring_drops==0);
@@ -284,6 +296,6 @@ int main(int argc,char **argv)
             snprintf(name,sizeof(name),"sink%u",p); rte_ring_free(rte_ring_lookup(name));
         }
     }
-    assert(rte_mempool_avail_count(pool)==8191); rte_mempool_free(pool); for(unsigned k=0;k<owners;++k) rte_ring_free(rx_handoff[k]); rte_ring_free(tx_handoff);
+    assert(rte_mempool_avail_count(pool)==8191); rte_mempool_free(pool); for(unsigned k=0;k<owners;++k) rte_ring_free(rx_handoff[k]); for(unsigned k=0;k<directions;++k) rte_ring_free(tx_handoff[k]);
     assert(rte_eal_cleanup()==0); return 0;
 }
