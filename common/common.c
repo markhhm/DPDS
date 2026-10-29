@@ -153,6 +153,18 @@ unsigned host_pool_objects(uint16_t port, unsigned lcores)
     return (unsigned)count;
 }
 
+struct rte_mempool *host_create_pool(uint16_t port, unsigned lcores, int *socket)
+{
+    unsigned count = host_pool_objects(port, lcores);
+    if (!count) return NULL;
+    char name[32];
+    snprintf(name, sizeof(name), "ingress_pool_%u", port);
+    *socket = rte_eth_dev_socket_id(port);
+    if (*socket < 0) *socket = rte_socket_id();
+    return rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
+        RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, *socket);
+}
+
 // -------------------------------------------
 // Initialization of ports
 // -------------------------------------------

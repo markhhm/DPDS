@@ -115,13 +115,8 @@ int main(int argc, char **argv)
         port = host.ports[i];
         uint64_t count = host_pool_objects(port, rte_lcore_count());
         if (!count) rte_exit(EXIT_FAILURE, "Port %u has an invalid pool envelope\n", port);
-        char name[32];
-        snprintf(name, sizeof(name), "ingress_pool_%u", port);
-        int socket = rte_eth_dev_socket_id(port);
-        if (socket < 0) socket = rte_socket_id();
-        pools[port] = rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
-            RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN),
-            RTE_MBUF_DEFAULT_BUF_SIZE, socket);
+        int socket;
+        pools[port] = host_create_pool(port, rte_lcore_count(), &socket);
         if (!pools[port]) rte_exit(EXIT_FAILURE, "Cannot allocate port %u pool: %s\n", port, rte_strerror(rte_errno));
         struct rte_mempool_objsz size;
         rte_mempool_calc_obj_size(pools[port]->elt_size, pools[port]->flags, &size);

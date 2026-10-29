@@ -27,6 +27,9 @@ struct params {
     unsigned lines, lcores, rx_desc, tx_desc;
     double p[8];
     unsigned p_count;
+    /* Trace mode: storage covers the largest trace delay plus the longest outage hold. */
+    bool trace;
+    uint64_t trace_delay_ns, trace_hold_ns;
 };
 
 struct plan {
@@ -56,7 +59,8 @@ static struct plan make_plan(const struct params *x)
 {
     struct plan r = {0};
     r.q_bytes = (uint64_t)((__uint128_t)x->c_bps * x->q_ns / 8000000000u);
-    __uint128_t n = (__uint128_t)x->c_bps * (x->t_ns + x->delta_ns);
+    uint64_t delay = x->trace ? x->trace_delay_ns + x->trace_hold_ns : x->t_ns + x->delta_ns;
+    __uint128_t n = (__uint128_t)x->c_bps * delay;
     __uint128_t d = (__uint128_t)8000000000u * (x->min_q + 20);
     r.slots_per_line = (uint64_t)(r.q_bytes / x->min_q + x->burst + n / d + (n % d != 0));
     r.objects = x->rx_desc + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ + MBUF_CACHE_SIZE * x->lcores +
@@ -73,10 +77,14 @@ static void print_plan(const struct params *x, const struct plan *r)
 {
     uint64_t wire = x->min_q + 20;
     double pps = (double)x->c_bps / (8.0 * (double)wire);
+    if (x->trace) printf("mode=trace max_trace_delay_ns=%"PRIu64" max_outage_hold_ns=%"PRIu64"\n",
+        x->trace_delay_ns, x->trace_hold_ns);
+    else printf("mode=fixed\n");
     printf("inputs c_bps=%"PRIu64" t_ns=%"PRIu64" delta_ns=%"PRIu64" q_ns=%"PRIu64" q_l2_bytes=%"PRIu64
         " min_frame_l2=%"PRIu64" max_frame_l2=%"PRIu64" burst_bound=%"PRIu64" lines_per_port=%u lcores=%u"
-        " rx_desc=%u tx_desc=%u page_bytes=%"PRIu64"\n", x->c_bps, x->t_ns, x->delta_ns, x->q_ns, r->q_bytes, x->min_q, x->max_q,
-        x->burst, x->lines, x->lcores, x->rx_desc, x->tx_desc, x->page);
+        " rx_desc=%u tx_desc=%u page_bytes=%"PRIu64"%s\n", x->c_bps, x->t_ns, x->delta_ns, x->q_ns, r->q_bytes, x->min_q, x->max_q,
+        x->burst, x->lines, x->lcores, x->rx_desc, x->tx_desc, x->page,
+        x->page == 2097152 ? " (unverified)" : "");
     printf("per_packet mbuf_element_bytes=%zu mbuf_stride_bytes=%"PRIu64" core_metadata_bytes_per_slot=%zu"
         " bytes_per_slot=%"PRIu64"\n", mbuf_element_bytes(), r->stride, hng_slot_metadata_bytes(),
         r->stride + hng_slot_metadata_bytes());
@@ -85,7 +93,7 @@ static void print_plan(const struct params *x, const struct plan *r)
         r->slots_per_line, r->objects, r->mempool_bytes / GIB, r->metadata_bytes / GIB,
         (r->mempool_bytes + r->metadata_bytes) / GIB);
     printf("both_nodes envelope total_gib=%.3f\n", 2 * (r->mempool_bytes + r->metadata_bytes) / GIB);
-    for (unsigned i = 0; i < x->p_count; ++i) {
+    for (unsigned i = 0; !x->trace && i < x->p_count; ++i) {
         /* Mean occupancy only; not a bound, and the engine does not accept it as an envelope. */
         double mean = x->lines * (pps * ((double)x->t_ns + x->p[i] * (double)x->delta_ns) / 1e9 +
             (double)(r->q_bytes / x->min_q));
@@ -136,17 +144,14 @@ static int verify(const struct params *given)
     double predicted_total = 0, measured_total = 0;
     for (uint16_t i = 0; i < 2; ++i) if (host_prepare_port(i) != 0) return 1;
     for (uint16_t i = 0; i < 2; ++i) {
-        unsigned objects = host_pool_objects(i, x->lcores);
         int socket = rte_eth_dev_socket_id(i);
         if (socket < 0) socket = rte_socket_id();
         size_t before = dpdk_heap_bytes(socket);
-        char name[32];
-        snprintf(name, sizeof(name), "verify_pool_%u", i);
-        /* Same arguments as the production pool in dpds.c. */
-        struct rte_mempool *pool = rte_pktmbuf_pool_create(name, objects, MBUF_CACHE_SIZE,
-            RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, socket);
+        /* The production pool function; its object count comes from the real mempool below. */
+        struct rte_mempool *pool = host_create_pool(i, x->lcores, &socket);
         if (!pool) return fprintf(stderr, "verify: pool allocation failed: %s\n", rte_strerror(rte_errno)), 1;
         size_t measured = dpdk_heap_bytes(socket) - before;
+        unsigned objects = rte_mempool_avail_count(pool);
         const struct rte_memseg_list *msl = rte_mem_virt2memseg_list(pool);
         if (!msl) return fputs("verify: cannot find the pool's page size\n", stderr), 1;
         if (msl->page_sz != x->page) {
@@ -155,11 +160,12 @@ static int verify(const struct params *given)
             plan = make_plan(x);
             printf("verify page_bytes=%"PRIu64" (from the EAL memory segment list)\n", x->page);
         }
-        printf("verify port=%u objects_calc=%"PRIu64" objects_host=%u stride_calc=%"PRIu64" stride_real=%u"
-            " mempool_bytes_calc=%"PRIu64" mempool_bytes_real=%zu error=%.4f\n", i, r->objects, objects,
+        bool match = objects == r->objects && pool->size == r->objects && pool->populated_size == r->objects;
+        printf("verify port=%u objects_calc=%"PRIu64" objects_mempool=%u objects_match=%s stride_calc=%"PRIu64" stride_real=%u"
+            " mempool_bytes_calc=%"PRIu64" mempool_bytes_real=%zu error=%.4f\n", i, r->objects, objects, match ? "PASS" : "FAIL",
             r->stride, pool->header_size + pool->elt_size + pool->trailer_size, r->mempool_bytes, measured,
             error((double)r->mempool_bytes, (double)measured));
-        if (objects != r->objects || r->stride != pool->header_size + pool->elt_size + pool->trailer_size)
+        if (!match || r->stride != pool->header_size + pool->elt_size + pool->trailer_size)
             status = 1;
         predicted_total += (double)r->mempool_bytes;
         measured_total += (double)measured;
@@ -181,13 +187,14 @@ static int verify(const struct params *given)
 int main(int argc, char **argv)
 {
     struct params x = {100000000000ull, 142000000, 320000000, 50000000, 1522, 1522, 1024,
-        2097152, 1, 4, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2};
+        2097152, 1, 5, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2, false, 0, 0};
     bool do_verify = false, p_given = false;
     static const struct option options[] = {
         {"c-bps", 1, 0, 'c'}, {"t-ms", 1, 0, 't'}, {"delta-ms", 1, 0, 'd'}, {"q-ms", 1, 0, 'q'},
         {"p", 1, 0, 'p'}, {"min-frame", 1, 0, 'm'}, {"max-frame", 1, 0, 'M'}, {"burst", 1, 0, 'b'},
         {"lines-per-port", 1, 0, 'k'}, {"lcores", 1, 0, 'l'}, {"rx-desc", 1, 0, 'r'},
-        {"tx-desc", 1, 0, 'x'}, {"page-bytes", 1, 0, 'g'}, {"verify", 0, 0, 'v'}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+        {"tx-desc", 1, 0, 'x'}, {"page-bytes", 1, 0, 'g'},
+        {"trace-max-delay-ms", 1, 0, 'T'}, {"trace-max-hold-ms", 1, 0, 'H'}, {"verify", 0, 0, 'v'}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
     /* EAL arguments, if any, come first and end with "--". */
     int split = 0;
     for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], "--")) { split = i; break; }
@@ -212,12 +219,14 @@ int main(int argc, char **argv)
         case 'l': x.lcores = (unsigned)strtoul(optarg, NULL, 10); break;
         case 'r': x.rx_desc = (unsigned)strtoul(optarg, NULL, 10); break;
         case 'x': x.tx_desc = (unsigned)strtoul(optarg, NULL, 10); break;
+        case 'T': x.trace = true; x.trace_delay_ns = ms_to_ns(optarg); break;
+        case 'H': x.trace = true; x.trace_hold_ns = ms_to_ns(optarg); break;
         case 'g': x.page = strtoull(optarg, NULL, 10); break;
         case 'v': do_verify = true; break;
         default:
             fprintf(stderr, "usage: hng-pool-calc [EAL_ARGS --] [--c-bps C] [--t-ms T] [--delta-ms D]"
                 " [--q-ms Q] [--p P]... [--min-frame L2] [--max-frame L2] [--burst N]"
-                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--verify]\n");
+                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--trace-max-delay-ms D --trace-max-hold-ms H] [--verify]\n");
             return 2;
         }
     }
@@ -229,6 +238,7 @@ int main(int argc, char **argv)
     struct plan r = make_plan(&x);
     print_plan(&x, &r);
     if (!do_verify) return 0;
+    if (x.trace) return fputs("--verify supports fixed mode only\n", stderr), 2;
     if (!split) return fputs("--verify needs EAL arguments before \"--\"\n", stderr), 2;
     if (rte_eal_init(split, argv) < 0) return fputs("EAL initialization failed\n", stderr), 1;
     int status = verify(&x);

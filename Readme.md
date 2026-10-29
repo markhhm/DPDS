@@ -225,6 +225,10 @@ lines of one direction. Without `--verify` it needs no EAL:
 ./build/hng-pool-calc --help
 ```
 
+Defaults: 5 lcores (the per-ingress-port scheduler layout). For trace lines,
+`--trace-max-delay-ms D --trace-max-hold-ms H` sizes storage for the largest
+trace delay plus the longest outage hold, as the engine does. The 2 MiB page
+result is marked unverified: only 4 KiB pages were checked.
 It mirrors the engine's startup storage check, which assumes that every packet
 is late, so the required size does not depend on p. The `mean_occupancy` lines
 use t + p*delta and are estimates, not sizing bounds. `--min-frame` is the
@@ -236,7 +240,7 @@ uses `hng_slot_metadata_bytes()` from the core and lives in the process heap,
 not in hugepages.
 
 `--verify` builds the same configuration on two `net_null` ports and compares
-the prediction with the real allocation: DPDK heap growth for each pool, and
+the prediction with the real allocation made by the production pool function: the object count reported by the mempool, DPDK heap growth for each pool, and
 process heap growth across engine load. It uses the page size the EAL really
 uses (4 KiB under `--no-huge`) and fails above 5% error:
 
