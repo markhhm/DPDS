@@ -137,8 +137,53 @@ packet. The 5-lcore layout shows the same pattern for its single TX lcore
 (about 900 frames in the shared TX ring at 1023). On this machine 10.2 Mpps
 per direction is above the 8.127 Mpps that 100G needs at 1538-byte frames
 (*estimate*), but these are WSL2 numbers under load, not a NIC measurement.
-Not tried: sending several frames per TX burst across lines (would need the
-merge to emit a mixed burst), and a scheduler burst dequeue.
+This limit is superseded by the merged TX burst below.
+
+## Merged TX burst across lines
+
+TX used to end a burst at the first frame of another line that comes earlier
+in release order. With two interleaved lines per egress every call carried
+one frame. TX now merges the pending frames of all eligible lines of one
+egress port in global release order (release, then ingress sequence) into one
+burst of up to 16 and calls `rte_eth_tx_burst` once. On a partial accept the
+accepted prefix of the merge is a prefix of each line, so each line removes
+only its accepted frames; the refused ones stay at its head in FIFO order and
+are marked for retry. `tests/tx_burst.c` checks a 16-frame two-line burst and
+every partial-accept point (0-15); the split golden and all oracle runs still
+pass.
+
+The rate fixture's Q was 64 KiB (43 MTU frames per line). With the merged
+burst and 2046 frames it dropped 40-83 frames per run, so Q is now 1.5 MiB
+(1033 MTU frames, more than one direction's 1023): the fixture cannot drop
+in Q, and `ring_rate.py` fails on a Q drop. All runs below had q_drop=0.
+
+Before (17ed333 plus the histogram print) and after, same rounds: 1518-byte
+mbufs, one lcore per physical core, three rounds each running all eight
+cases back to back, one-minute load average 3.4-6.4. Total Mpps, median
+(range); TX burst histogram of one run, calls with 1, 2-3, 4-7, 8-15 and 16
+frames:
+
+| Layout, population | before | after | TX bursts before | TX bursts after |
+|---|---|---|---|---|
+| 4 lcores, 1023 | 11.67 (11.52-11.92) | 14.51 (14.23-14.56) | 40,803,354 / 12,713 / 0 / 0 / 0 | 1,822 / 4,927 / 158,555 / 6,154,952 / 5,000 |
+| 5 lcores, 1023 | 11.36 (11.23-11.37) | 17.43 (17.43-17.84) | 39,782,122 / 2,331 / 0 / 0 / 0 | 259,906 / 521,095 / 961,378 / 1,986,067 / 1,956,816 |
+| 7 lcores, 1023 | 20.27 (20.22-20.72) | 25.87 (25.51-27.02) | 70,433,974 / 0 / 0 / 0 / 0 | 124 / 127 / 204 / 1,179 / 5,627,303 |
+| 7 lcores, 2046 | 20.36 (19.85-20.45) | 25.68 (24.76-26.85) | 69,510,207 / 36,472 / 0 / 0 / 0 | 34 / 22 / 48 / 408 / 5,860,687 |
+
+Mean frames per TX call: 1.00 before in every layout; after 8.0 (4 lcores),
+10.8 (5 lcores) and 16.0 (7 lcores). In the 4-lcore layout one scheduler
+alternates egress ports, so each TX call sees about 8 frames per port.
+
+**Measured: the 7-lcore layout reaches about 25.9 Mpps total (12.9 Mpps per
+direction) on this machine, the same at 1023 and 2046 frames.** The limit
+is now the scheduler (diagnostic counters, not committed; load average about
+5): RX bursts are almost all 16 frames, the frames queue in the owner rings
+(mean 699 at 1023, 1646 at 2046 over both directions) and the TX rings hold
+175-244. Each scheduler owner runs at about 77 ns per packet. With 2046 frames
+the owner rings are close to full, so more population adds no rate.
+Not tried: a scheduler burst dequeue. These are WSL2 numbers under load, not
+a NIC measurement; the 8.127 Mpps per direction for 100G at 1538-byte frames
+is an *estimate*.
 
 ## Pool calculator
 

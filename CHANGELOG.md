@@ -31,6 +31,8 @@ fork has been released yet.
 - 7-lcore layout: one RX, scheduler and TX lcore per direction, with the
   `split` equivalence test, `io-ring-io-split` and `io-ring-stepped-io-split`
   oracle runs, and `ring_rate.py --io-split`.
+- TX sends one burst per egress port merged across lines in release order,
+  instead of one frame per call when lines interleave (`tx_burst` test).
 
 ### Changed
 
