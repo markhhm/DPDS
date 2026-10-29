@@ -14,7 +14,7 @@ threads = dependency('threads')
 common_sources = ['common/observer.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'observer']
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'observer', 'observer_split']
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
@@ -44,7 +44,6 @@ test('g2-software', python,
          'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
-threads = dependency('threads')
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
 io_oracle = executable('io-oracle-test', ['tests/io_oracle_test.c', 'tests/io_oracle.c'], c_args: ['-UNDEBUG'])
 test('io-oracle', io_oracle)
@@ -78,3 +77,8 @@ sched_bench = executable('hng-sched-bench', ['perf/sched_bench.c'] + common_sour
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-sched-bench', python, args: [meson.project_source_root() / 'perf/sched_bench.py', sched_bench,
   '--', '-n', '50000', '-w', '0', '-r', '1'], workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
+
+test('observer-export', python, args: [meson.project_source_root() / 'tests/observer_export.py', dpds_exe],
+  timeout: 90, is_parallel: false)
+test('observer-adapter', python, args: [meson.project_source_root() / 'tests/observer_adapter.py'],
+  timeout: 30, is_parallel: false)

@@ -21,10 +21,12 @@ uint16_t rx_step(struct rx_state *s, struct rte_mbuf **batch, uint16_t max_batch
         struct packet_meta *m = packet_meta(batch[i]);
         memset(m, 0, sizeof(*m));
         m->arrival_ns = host_now_ns();
+        s->last_arrival[port] = m->arrival_ns;
         m->ingress_seq = s->sequence[port]++;
         m->ingress_port = port;
         batch[i]->port = port;
         if (s->sequence[port] == 0) host_invalidate("physical ingress sequence wrapped");
+        observer_input(batch[i]);
         s->stats->received_bytes += batch[i]->pkt_len;
     }
     s->last_watermark = host_now_ns();
@@ -38,6 +40,11 @@ void rx_publish(struct rx_state *s, uint16_t enqueued)
     unsigned ring = s->split ? s->last_index : 0;
     s->enqueued[ring] += enqueued;
     host_publish(s->last_port, s->enqueued[ring], s->last_watermark);
+    if (observer_enabled() && enqueued && s->last_watermark > s->last_arrival[s->last_port]) {
+        struct observer_record r = {.kind = OBS_FRONTIER, .port = s->last_port,
+            .at_ns = s->last_watermark - 1, .actual_selection_seq = s->sequence[s->last_port]};
+        observer_emit(OBS_RX, &r);
+    }
 }
 
 uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, struct rte_mbuf **batch)
@@ -57,6 +64,7 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
         for (uint16_t i = sent; i < count; ++i) {
             s->stats->rx_ring_drops++;
             s->stats->rx_ring_drop_bytes += batch[i]->pkt_len;
+            observer_terminal(OBS_RX, batch[i], OBS_HANDOFF, host_now_ns());
             rte_pktmbuf_free(batch[i]);
         }
     }
@@ -72,6 +80,7 @@ int lcore_receive(struct lcore_parameters *parameters)
     rx.split = parameters->split;
     while (!quit_signal_receive)
         if (!rx_iteration(&rx, parameters, batch)) rte_pause();
+    for (unsigned p = 0; p < host.port_count; ++p) observer_input_end(host.ports[p], rx.sequence[host.ports[p]]);
     /* Completion follows the final enqueue and frontier publication. */
     quit_signal_worker = 1;
     rte_free(parameters);

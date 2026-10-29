@@ -2,6 +2,10 @@
 #define WORKER_H
 #include "../common/common.h"
 struct worker_state {
+    struct observer_snapshot snapshot;
+    uint64_t actual_selection[HNG_MAX_LINES], handoff_next;
+    enum observer_producer producer;
+    uint16_t handoff_queue;
     struct Engine *engine;
     struct Line *line[HNG_MAX_LINES];
     struct worker_stats *stats;
@@ -18,6 +22,9 @@ void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats,
 /* Add an owner's counters to dst; line counters come from the lines it owned. */
 void worker_stats_merge(struct worker_stats *dst, const struct worker_stats *src, int ingress_port);
 void worker_state_cleanup(struct worker_state *s);
+void worker_dispatch_prepare(struct worker_state *s, struct rte_mbuf **batch, uint16_t count,
+    struct observer_record **reservations, uint64_t at_ns);
+void worker_dispatch_done(struct worker_state *s, struct observer_record **reservations, uint16_t count, uint16_t sent);
 void worker_end_input(struct worker_state *s);
 uint16_t worker_step(struct worker_state *s, struct rte_mbuf **in_batch,
     uint16_t in_count, struct rte_mbuf **out_batch);

@@ -93,7 +93,7 @@ struct lcore_parameters {
     /* Split layout: one scheduler per ingress port host.ports[owner_index]. */
     bool split;
     uint16_t owner_index;
-    struct rte_ring *owner_rings[2];
+    struct rte_ring *owner_rings[2], *tx_owner_rings[2];
 };
 void signal_handler(int signum);
 int host_prepare_port(uint16_t port);

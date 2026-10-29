@@ -5,15 +5,15 @@
 #include <stdint.h>
 #include "config.h"
 #define OBS_PORTS 2
-#define OBS_PRODUCERS 4
+#define OBS_PRODUCERS 5
 #define OBS_QUEUES 2
-enum observer_producer { OBS_RX, OBS_WORKER0, OBS_WORKER1, OBS_TX };
+enum observer_producer { OBS_RX, OBS_WORKER0, OBS_WORKER1, OBS_TX, OBS_CONTROL };
 enum observer_identity_policy { OBS_ID_STAGE1, OBS_ID_SOFTWARE_L2 };
-enum observer_kind { OBS_PACKET, OBS_OFFER, OBS_TERMINAL, OBS_FRONTIER, OBS_END, OBS_DISPATCH, OBS_ATTEMPT };
+enum observer_kind { OBS_PACKET, OBS_OFFER, OBS_TERMINAL, OBS_FRONTIER, OBS_END, OBS_DISPATCH, OBS_ATTEMPT, OBS_RESOURCES };
 enum observer_reason { OBS_Q_DROP, OBS_TRACE_LOSS, OBS_TRACE_OUTAGE, OBS_STORAGE, OBS_INVALID_INPUT,
     OBS_HANDOFF, OBS_TERMINAL_TX, OBS_MISSED_OUTAGE, OBS_SHUTDOWN };
 struct observer_packet {
-    uint64_t identity, ingress_seq, selection_seq, arrival_ns, handoff_seq, gate_ns;
+    uint64_t identity, ingress_seq, selection_seq, arrival_ns, handoff_seq, gate_ns, rx_flags;
     uint32_t source, destination, length;
     uint16_t source_port, destination_port, ingress_port, line, vlan_id, segments, handoff_queue;
     uint8_t identity_kind, selected_late, input_error;
@@ -26,6 +26,7 @@ struct observer_snapshot {
 };
 struct observer_record {
     uint64_t producer_seq, order, at_ns, gate_ns, submit_before_ns, submit_after_ns;
+    uint64_t resources[10];
     uint64_t actual_selection_seq, attempt_id, consumed_dispatch[OBS_QUEUES], first_handoff_seq;
     struct observer_snapshot snapshot;
     struct observer_packet items[MAX_BURST_SIZE];
@@ -35,7 +36,7 @@ struct observer_record {
 };
 struct observer_health {
     uint64_t records_attempted, records_emitted, records_dropped, capture_drops;
-    uint64_t queue_high_water, queue_capacity, identity_errors;
+    uint64_t queue_high_water, queue_capacity, identity_errors, malformed_records;
 };
 struct rte_mbuf;
 /* Setup/teardown run on the control thread; fd must be a pipe or socket. */
@@ -44,10 +45,19 @@ bool observer_start(void);
 bool observer_close(bool complete);
 bool observer_enabled(void);
 bool observer_emit(enum observer_producer producer, const struct observer_record *record);
+/* Reserve before publishing a handoff; commit after its successful prefix is known. */
+struct observer_record *observer_reserve(enum observer_producer producer);
+void observer_commit(enum observer_producer producer);
+void observer_publish_snapshot(unsigned owner, const struct observer_snapshot *snapshot);
+/* One bounded read, before arbitration; an unstable publication latches invalidity. */
+bool observer_load_snapshot(struct observer_snapshot *snapshot);
 struct observer_health observer_health(enum observer_producer producer);
 struct observer_packet observer_packet(const struct rte_mbuf *packet);
 void observer_input(struct rte_mbuf *packet);
 void observer_terminal(enum observer_producer producer, const struct rte_mbuf *packet,
     enum observer_reason reason, uint64_t at_ns);
 void observer_input_end(uint16_t port, uint64_t next);
+/* Control-thread resource snapshots, before launch and after port close. */
+void observer_resources(uint16_t port, bool end, uint64_t total, uint64_t free_count,
+    const struct rte_eth_stats *nic);
 #endif
