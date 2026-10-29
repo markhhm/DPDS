@@ -1,6 +1,21 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Draft M2 software measurement tools
 
+The v1 stream boundary is available independently of the remaining reporter
+migration. `python3 -m tools.g2.protocol STREAM.jsonl` validates the header,
+all-record sequence, canonical content hash, separate file hash, end markers and
+terminal seal. Missing sequence records or seals produce INCONCLUSIVE even
+without a producer loss counter; corrupt data or markers produce INVALID.
+It makes no network connections and never qualifies hardware. Receiver wire
+order is the explicit `receive_seq`, independent of JSONL export order; the
+receiver join performs its complete permutation checks.
+
+Normal storage must use the registered streaming oracle and 1/1024 main sample.
+Complete streams are a transport into that oracle, not a default disk archive.
+Full persistence is an explicit bounded debug option. The provisional reporter
+below remains limited to bounded software fixtures until the v1 integration
+and online retention checks are complete.
+
 These tools implement the independent reference/reporting portion of the
 measurement implementation task. **Software-only, not G2.** They cannot qualify a
 hardware run. Observer wiring, final event/payload format and actual-time
