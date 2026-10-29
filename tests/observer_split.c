@@ -60,6 +60,8 @@ int main(int argc, char **argv)
     assert(delivered == 2 && stats.tx.transmitted == 2 && stats.tx.retries == 1);
     assert(tx.consumed_dispatch[0] == 1 && tx.consumed_dispatch[1] == 1);
     for (unsigned k = 0; k < 2; ++k) worker_state_cleanup(&workers[k]);
+    host_invalidate("observed software handoff loss");
+    assert(host.invalid);
     host_cleanup(); assert(observer_close(true)); close(fd[0]);
     char raw[32768]; ssize_t n = read(fd[1], raw, sizeof(raw)-1); assert(n > 0); raw[n] = 0; close(fd[1]);
     assert(strstr(raw, "\"consumed_dispatch\":[1,1]"));

@@ -20,7 +20,7 @@ class NativeBoundary(unittest.TestCase):
                    port=0, accepted_count=0, reason=0, snapshot=[], items=[item], resources=[0]*10)
         end = dict(row, producer_seq=2, order=1, kind=4, items=[], actual_selection_seq=1)
         header = dict(schema='hng-native-v1', identity_policy=1, probe_port=9000, capacity=16, record_bytes=2048)
-        health = dict(kind='health', complete=not dropped, producers=[dict(attempted=2+dropped, emitted=2,
+        health = dict(kind='health', complete=not dropped, abort_reasons=0, producers=[dict(attempted=2+dropped, emitted=2,
                       dropped=dropped, capture_drops=0, high_water=2, identity_errors=0, malformed_records=0)]+[
                       dict(attempted=0, emitted=0, dropped=0, capture_drops=0, high_water=0, identity_errors=0, malformed_records=0)
                       for _ in range(4)])
@@ -45,11 +45,24 @@ class NativeBoundary(unittest.TestCase):
         self.assertTrue(any(r.get('phase') == 'start' for r in streams[2]))
         self.assertTrue(any(r.get('phase') == 'end' for r in streams[2]))
 
+    def test_logical_stream_health_counts_match_normalized_records(self):
+        result, streams = self.normalize(self.fixture())
+        counters = {r['scope_id']: r for r in streams[2] if r.get('scope') == 'observer' and r.get('phase') == 'end'}
+        for stream in streams[:2]:
+            stream_id = stream[0]['stream_id']
+            self.assertIn(stream_id, counters)
+            self.assertEqual(counters[stream_id]['values']['records_emitted'], len(stream)-2)
+            self.assertEqual(counters[stream_id]['values']['records_attempted'], len(stream)-2)
+
     def test_trailing_native_loss_remains_incomplete_without_sequence_gap(self):
         result, streams = self.normalize(self.fixture(dropped=1))
         self.assertFalse(result['complete'])
         self.assertTrue(all(not s[-1]['complete'] for s in streams))
-        self.assertTrue(all(s[-1]['dropped_records'] >= 1 for s in streams))
+        self.assertTrue(all(s[-1]['dropped_records'] == 1 for s in streams))
+        logical = [r for r in streams[2] if r.get('scope_id') in ('native-ingress', 'native-host') and r.get('phase') == 'end']
+        self.assertTrue(all(r['values']['records_attempted'] is None for r in logical))
+        native = next(r for r in streams[2] if r.get('scope_id') == 'native-producer-0' and r.get('phase') == 'end')
+        self.assertEqual(native['values']['records_dropped'], 1)
 
     def test_missing_native_health_is_incomplete(self):
         result, streams = self.normalize(self.fixture(sealed=False))

@@ -75,14 +75,32 @@ never waits for a slow reader. A failed or partial write permanently stops outpu
 rows, preventing a partial JSON line from being followed by apparently valid
 records. The thread blocks SIGPIPE locally. On shutdown, producers have stopped;
 the consumer visits only the finite remaining queue records, then emits final
-health when possible. Missing final health, truncation, native sequence gaps,
+health when possible. An abort between reservation and publication counts the
+unpublished record and any blocked suffix as exact capture losses; shutdown does
+not wait for a missing global ordinal. Missing final health, truncation, native sequence gaps,
 queue loss, identity errors or incomplete drain make normalized seals incomplete.
-Capture failure does not become DUT packet loss.
+Capture failure does not become DUT packet loss. Fully observed DUT terminal
+loss does not make capture incomplete. Failed ownership drain, a failed producer,
+forced timeout or an explicit capture abort latches an `abort_reasons` bit mask in
+final native health and makes normalized seals incomplete. Normal requested
+SIGINT can still complete after all inputs and ownership drain.
+
+Each normalized event preserves its actor in
+`extensions.native_observer_v1={producer,producer_seq,order}`. Actor-local
+snapshots can regress between different native producers in a combined host
+stream. A native sequence need not be contiguous within a single normalized
+role: RX also produces host terminal events. The adapter checks the complete
+native sequence before separating logical roles.
 
 Start/end counter records cover observer health, software PMD counters, pool
 ownership and per-ingress software terminal conservation. Queue high-water is a
 conservative sum of each producer's measured peak, not a simultaneous aggregate
-occupancy. Periodic snapshots and hardware counter qualification are not provided.
+occupancy. Logical ingress/host health scope IDs match their actual stream IDs, and emitted
+counts equal the full logical data record count. Native per-producer diagnostics
+preserve exact raw loss. When a lost native record cannot be assigned to a logical
+role, affected logical counters are explicitly unavailable and capture remains
+incomplete; zero is never substituted. Periodic snapshots and hardware counter
+qualification are not provided.
 
 ## Adapter-private raw format
 

@@ -119,6 +119,20 @@ int main(int argc, char **argv)
     assert(observer_emit(OBS_RX, &r)); assert(observer_start());
     assert(!observer_close(true)); close(fd[1]);
     assert(observer_health(OBS_RX).capture_drops == 1);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+    assert(observer_open(fd[0], OBS_ID_SOFTWARE_L2, 9000, 2));
+    assert(observer_reserve(OBS_WORKER0)); /* Producer abort before publish. */
+    assert(observer_emit(OBS_TX, &r)); /* A later producer must not prevent shutdown. */
+    assert(observer_start()); assert(!observer_close(false));
+    assert(observer_health(OBS_WORKER0).capture_drops == 1);
+    assert(observer_health(OBS_TX).capture_drops == 1);
+    close(fd[0]); close(fd[1]);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+    assert(observer_open(fd[0], OBS_ID_SOFTWARE_L2, 9000, 2));
+    observer_abort(OBS_ABORT_DRAIN);
+    assert(observer_start()); assert(!observer_close(true));
+    close(fd[0]); n = read(fd[1], data, sizeof(data)-1); assert(n > 0); data[n] = 0;
+    assert(strstr(data, "\"abort_reasons\":1")); close(fd[1]);
     assert(rte_eal_cleanup() == 0);
     puts("observer bounded queue, exact loss and stalled-consumer shutdown: PASS");
 }

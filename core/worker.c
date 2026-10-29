@@ -226,6 +226,7 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
 uint16_t worker_step(struct worker_state *s, struct rte_mbuf **in, uint16_t count, struct rte_mbuf **out)
 {
     if (s->ended && !s->aborted && host_now_ns() - s->shutdown_start > SHUTDOWN_TIMEOUT_NS) {
+        observer_abort(OBS_ABORT_DRAIN);
         host_invalidate("scheduler shutdown drain timeout");
         s->aborted = true;
         for (uint16_t k = 0; k < s->owned_count; ++k) {
@@ -262,6 +263,7 @@ void worker_state_cleanup(struct worker_state *s)
             observer_terminal(s->producer, p.packet_ptr, OBS_SHUTDOWN, host_now_ns());
             rte_pktmbuf_free(p.packet_ptr);
             s->aborted = true;
+            observer_abort(OBS_ABORT_DRAIN);
             host_invalidate("forced scheduler cleanup");
         }
         hng_line_stats(s->line[line], &s->stats->lines[line]);

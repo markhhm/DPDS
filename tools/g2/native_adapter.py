@@ -13,7 +13,7 @@ import os
 import stat
 import sys
 
-from .protocol import StreamWriter
+from .protocol import StreamWriter, identifier
 from .reference import U64, fields, load_config, strict_json, uint
 
 # hng-native-v1 item-vector order. Raw indices are adapter-private, not interchange.
@@ -33,6 +33,15 @@ PRODUCERS = 5
 
 class NativeAdapter:
     def __init__(self, source, ingress, host, counters, *, run, lines, clock_id='engine', producer_commit='software'):
+        if not isinstance(lines, list) or not 1 <= len(lines) <= 4:
+            raise ValueError('native capture requires one to four lines')
+        ports = set()
+        for line in lines:
+            identifier(line['name'], 'line name')
+            for key in ('ingress_port', 'egress_port'):
+                ports.add(uint(line[key], key, 65535))
+        if len(ports) > 2:
+            raise ValueError('native capture supports one or two ports')
         self.source, self.lines, self.clock = source, lines, clock_id
         self.writers = [StreamWriter(target, run, f'native-{role}', role, clock_id,
                         producer='native-adapter', producer_commit=producer_commit)
@@ -43,12 +52,24 @@ class NativeAdapter:
         self.errors = Counter()
         self.raw_hash = hashlib.sha256()
         self.custody = {}
+        self.resources = {}
+        self.provenance = None
+        self.logical_emitted = [0, 0, 0]
+        self.logical_dropped = [0, 0]
+        self.logical_identity_errors = [0, 0]
         self.native_missing = 0
         self.normalization_drops = 0
         self.health = None
         self.header = None
         self.ends = set()
         self.input_ports = {line['ingress_port'] for line in lines}
+
+    def _emit(self, index, kind, **values):
+        if self.provenance is not None:
+            values.setdefault('extensions', {})['native_observer_v1'] = dict(self.provenance)
+        result = self.writers[index].emit(kind, **values)
+        self.logical_emitted[index] += 1
+        return result
 
     def _fault(self, reason, count=1):
         self.errors[reason] += count
@@ -68,11 +89,15 @@ class NativeAdapter:
         for name, value in values.items():
             descriptors[name] = dict(unit=(units or {}).get(name, 'events'), semantics=semantics, source=source,
                                      status='measured' if value is not None else 'missing')
-            if name in ('queue_high_water', 'queue_capacity'):
+            if name in ('queue_high_water', 'queue_capacity', 'still_owned'):
                 descriptors[name]['semantics'] = 'gauge'
+            if name.startswith('nic_') or name == 'rx_returned':
+                descriptors[name]['semantics'] = 'overlapping_diagnostic'
+            if name.startswith('nic_'):
+                descriptors[name]['source'] = 'software-pmd'
             if value is None:
-                descriptors[name]['reason'] = 'native-resource-counter-unavailable'
-        self.writers[2].emit('counter', scope=scope, scope_id=scope_id, phase=phase, at_ns=at_ns,
+                descriptors[name]['reason'] = 'native-evidence-unavailable'
+        self._emit(2, 'counter', scope=scope, scope_id=scope_id, phase=phase, at_ns=at_ns,
             clock_id=self.clock, reset_generation=0, values=values, descriptors=descriptors)
 
     def _observer_health(self, phase):
@@ -86,8 +111,71 @@ class NativeAdapter:
             identity_errors=sum(p['identity_errors'] for p in h['producers']) if h else 0,
             malformed_records=self.errors['malformed_native_record']+(sum(p['malformed_records'] for p in h['producers']) if h else 0), timestamp_missing=0, clock_invalid=0)
         if not h and phase == 'end':
-            values['capture_drops'] = None
+            for name in values:
+                if name != 'queue_capacity':
+                    values[name] = None
         self._counter('observer', 'native', phase, self.at_ns if phase == 'end' else 0, values)
+        for producer in range(PRODUCERS):
+            native = h['producers'][producer] if h else {}
+            values = dict(records_attempted=native.get('attempted', 0), records_emitted=native.get('emitted', 0),
+                records_dropped=native.get('dropped', 0), capture_drops=native.get('capture_drops', 0),
+                queue_high_water=native.get('high_water', 0), queue_capacity=self.header['capacity'],
+                identity_errors=native.get('identity_errors', 0), malformed_records=native.get('malformed_records', 0),
+                timestamp_missing=0, clock_invalid=0)
+            if not h and phase == 'end':
+                values = {name: value if name == 'queue_capacity' else None for name, value in values.items()}
+            self._counter('observer', f'native-producer-{producer}', phase, self.at_ns if phase == 'end' else 0,
+                          values, source=f'native-producer-{producer}')
+
+    def _logical_health(self, phase):
+        h = self.health
+        unknown = phase == 'end' and (h is None or self.errors['malformed_native_record'])
+        for index, role in enumerate(('ingress', 'host')):
+            producers = (0,) if index == 0 else (0, 1, 2, 3)
+            raw_loss = unknown or (h and any(h['producers'][p]['dropped'] or h['producers'][p]['capture_drops'] for p in producers))
+            values = dict(records_attempted=self.logical_emitted[index]+self.logical_dropped[index],
+                records_emitted=self.logical_emitted[index], records_dropped=self.logical_dropped[index],
+                capture_drops=0, queue_high_water=sum(h['producers'][p]['high_water'] for p in producers) if h else 0,
+                queue_capacity=self.header['capacity']*len(producers), malformed_records=0,
+                identity_errors=self.logical_identity_errors[index], timestamp_missing=0, clock_invalid=0)
+            if phase == 'start':
+                values.update(records_attempted=0, records_emitted=0, records_dropped=0, identity_errors=0)
+            elif raw_loss:
+                for name in ('records_attempted', 'records_dropped', 'capture_drops'):
+                    values[name] = None
+            if unknown:
+                values['malformed_records'] = values['queue_high_water'] = values['identity_errors'] = None
+            elif h and index == 1:
+                values['malformed_records'] = sum(h['producers'][p]['malformed_records'] for p in producers)
+            self._counter('observer', self.writers[index].header['stream_id'], phase,
+                          self.at_ns if phase == 'end' else 0, values, source=f'native-normalized-{role}')
+
+    def _port_counters(self):
+        ports = self.input_ports | set(self.custody) | {port for port, _ in self.resources}
+        incomplete = self.health is None or self.errors['malformed_native_record'] or any(
+            p['dropped'] or p['capture_drops'] for p in (self.health or {}).get('producers', []))
+        names = ('rx_returned', 'tx_accepted')+REASONS+('still_owned',)
+        for port in sorted(ports):
+            counts = self.custody.get(port, Counter())
+            final = {name: counts[name] for name in names}
+            final['still_owned'] = max(0, final['rx_returned']-final['tx_accepted']-sum(final[r] for r in REASONS))
+            for phase in ('start', 'end'):
+                values = dict.fromkeys(names, 0) if phase == 'start' else dict(final)
+                if phase == 'end' and incomplete:
+                    values = dict.fromkeys(names)
+                self.provenance = None
+                raw = self.resources.get((port, phase))
+                if raw:
+                    nic = raw['resources']
+                    values.update(dict(zip(('nic_ipackets', 'nic_opackets', 'nic_imissed', 'nic_ierrors',
+                                           'nic_oerrors', 'nic_rx_nombuf'), nic[4:] if nic[3] else [None]*6)))
+                    at_ns = raw['at_ns']
+                    self.provenance = {k: raw[k] for k in ('producer', 'producer_seq', 'order')}
+                else:
+                    at_ns = self.at_ns if phase == 'end' else 0
+                self._counter('port', str(port), phase, at_ns, values, source='native-ingress-custody',
+                              semantics='terminal_disjoint', units=dict.fromkeys(values, 'packets'))
+        self.provenance = None
 
     def _item(self, raw):
         if not isinstance(raw, list) or len(raw) != len(ITEM_FIELDS):
@@ -106,6 +194,9 @@ class NativeAdapter:
         uint(item['identity_kind'], 'identity kind', 2)
         uint(item['selected_late'], 'payload flag', 2)
         uint(item['handoff_queue'], 'handoff queue', 1)
+        uint(item['input_error'], 'input error', 2)
+        if item['identity_kind'] and item['identity_kind'] != self.header['identity_policy']+1:
+            raise ValueError('identity policy differs from native header')
         if item['classified']:
             uint(item['line'], 'line index', len(self.lines)-1)
         return item
@@ -146,11 +237,12 @@ class NativeAdapter:
         uint(phase, 'resource phase', 1); uint(valid, 'NIC validity', 1)
         if free_count > total:
             raise ValueError('pool free count exceeds size')
-        values = dict(zip(('nic_ipackets', 'nic_opackets', 'nic_imissed', 'nic_ierrors', 'nic_oerrors', 'nic_rx_nombuf'), nic))
-        if not valid:
-            values = dict.fromkeys(values)
-        self._counter('port', str(row['port']), 'end' if phase else 'start', row['at_ns'], values,
-                      source='software-pmd', units=dict.fromkeys(values, 'packets'))
+        if row['port'] not in {line[p] for line in self.lines for p in ('ingress_port', 'egress_port')}:
+            raise ValueError('resource snapshot for unregistered port')
+        key = row['port'], 'end' if phase else 'start'
+        if key in self.resources:
+            raise ValueError('duplicate raw resource endpoint')
+        self.resources[key] = row
         self._counter('pool', str(row['port']), 'end' if phase else 'start', row['at_ns'],
                       dict(pool_total=total, pool_free=free_count, pool_owned=total-free_count),
                       semantics='gauge', units=dict.fromkeys(('pool_total', 'pool_free', 'pool_owned'), 'mbufs'))
@@ -162,10 +254,11 @@ class NativeAdapter:
                 uint(row[name], name)
         p = uint(row['producer'], 'producer', PRODUCERS-1)
         uint(row['kind'], 'kind', 7)
+        self.provenance = {k: row[k] for k in ('producer', 'producer_seq', 'order')}
         if row['producer_seq'] != self.seen[p]+1:
             self._fault('native_producer_sequence_gap')
             self.native_missing += max(0, row['producer_seq']-self.seen[p]-1)
-            self.writers[0].emit('gap', first_missing_seq=self.seen[p]+1,
+            self._emit(0, 'gap', first_missing_seq=self.seen[p]+1,
                 last_missing_seq=max(self.seen[p]+1, row['producer_seq']-1), reason='native-producer-sequence-gap')
         if row['order'] != self.order:
             self._fault('native_global_order_gap')
@@ -186,11 +279,13 @@ class NativeAdapter:
         self.at_ns = max(self.at_ns, row['at_ns'], row['submit_after_ns'], *(i['arrival_ns'] for i in items))
         if kind == 0:
             x = items[0]; identity, flow = self._identity(x)
+            if identity is None:
+                self.logical_identity_errors[0] += 1
             error = None if not x['input_error'] else ('invalid-input-profile' if x['input_error'] == 1 else 'unsupported-packet-occurrence-identity')
             vlan = x['vlan_id']
             if vlan > 4094 or x['stripped']:
                 error = 'unsupported-raw-vlan-profile'; self._fault('unrepresentable_raw_vlan')
-            self.writers[0].emit('packet', ingress_port=x['ingress_port'], ingress_seq=x['ingress_seq'],
+            self._emit(0, 'packet', ingress_port=x['ingress_port'], ingress_seq=x['ingress_seq'],
                 line=self.lines[x['line']]['name'] if x['classified'] else None,
                 selection_seq=x['selection_seq'] if x['classified'] else None, external_identity=identity,
                 flow_id=flow, arrival_ns=x['arrival_ns'], length=x['length'], vlan_id=vlan if vlan <= 4094 else 0,
@@ -200,36 +295,41 @@ class NativeAdapter:
                 extensions=dict(raw_vlan_id=vlan, raw_vlan_stripped=x['stripped'], rx_flags=x['rx_flags']))
             self.custody.setdefault(x['ingress_port'], Counter())['rx_returned'] += 1
         elif kind in (3, 4):
-            self.writers[0].emit('frontier' if kind == 3 else 'end', ingress_port=row['port'],
+            self._emit(0, 'frontier' if kind == 3 else 'end', ingress_port=row['port'],
                 next_ingress_seq=row['actual_selection_seq'], **(dict(through_ns=row['at_ns']) if kind == 3 else {}))
             if kind == 4:
                 self.ends.add(row['port'])
         elif kind in (1, 2):
             x = items[0]
+            if kind == 2:
+                reason = REASONS[uint(row['reason'], 'terminal reason', len(REASONS)-1)]
+                self.custody.setdefault(x['ingress_port'], Counter())[reason] += 1
             try:
                 key = self._key(x)
             except ValueError:
                 self.normalization_drops += 1
+                self.logical_dropped[1] += 1
+                if not x['identity_kind']:
+                    self.logical_identity_errors[1] += 1
                 self._fault('unrepresentable_native_terminal_identity')
-                self.writers[1].emit('gap', first_missing_seq=row['producer_seq'],
+                self._emit(1, 'gap', first_missing_seq=row['producer_seq'],
                     last_missing_seq=row['producer_seq'], reason='unrepresentable-native-terminal-identity')
                 return
             if kind == 1:
-                self.writers[1].emit('offer', **key, at_ns=row['at_ns'], actual_selection_seq=row['actual_selection_seq'])
+                self._emit(1, 'offer', **key, at_ns=row['at_ns'], actual_selection_seq=row['actual_selection_seq'])
             else:
                 reason = REASONS[uint(row['reason'], 'terminal reason', len(REASONS)-1)]
-                self.writers[1].emit('terminal', **key, at_ns=row['at_ns'], reason=reason)
-                self.custody.setdefault(x['ingress_port'], Counter())[reason] += 1
+                self._emit(1, 'terminal', **key, at_ns=row['at_ns'], reason=reason)
         elif kind == 5:
             if items:
-                self.writers[1].emit('dispatch', egress_port=row['port'], at_ns=row['at_ns'],
+                self._emit(1, 'dispatch', egress_port=row['port'], at_ns=row['at_ns'],
                     handoff_queue_id=f"handoff-{uint(row['handoff_queue'], 'handoff queue', 1)}",
                     first_handoff_seq=row['first_handoff_seq'], identities=[self._key(x) for x in items],
                     **self._snapshot(row['snapshot']))
         elif kind == 6:
             offered = [dict(self._key(x), gate_ns=x['gate_ns'], handoff_queue_id=f"handoff-{x['handoff_queue']}",
                             handoff_seq=x['handoff_seq']) for x in items]
-            self.writers[1].emit('attempt', egress_port=row['port'], queue_id=0, attempt_id=row['attempt_id'],
+            self._emit(1, 'attempt', egress_port=row['port'], queue_id=0, attempt_id=row['attempt_id'],
                 gate_ns=row['gate_ns'], submit_before_ns=row['submit_before_ns'], submit_after_ns=row['submit_after_ns'],
                 consumed_dispatch={f'handoff-{i}': n for i, n in enumerate(row['consumed_dispatch'])}, offered=offered,
                 accepted_count=row['accepted_count'], **self._snapshot(row['snapshot']))
@@ -249,14 +349,18 @@ class NativeAdapter:
             if not uint(self.header['capacity'], 'queue capacity', 65536) or not uint(self.header['record_bytes'], 'record size', 65536):
                 raise ValueError('native capacity/record width must be positive')
             self._observer_health('start')
+            self._logical_health('start')
             while True:
+                self.provenance = None
                 row = self._read()
                 if row is None:
                     self._fault('missing_native_health'); break
                 if row.get('kind') == 'health':
-                    fields(row, ('kind', 'complete', 'producers'))
+                    fields(row, ('kind', 'complete', 'abort_reasons', 'producers'))
                     if type(row['complete']) is not bool or not isinstance(row['producers'], list) or len(row['producers']) != PRODUCERS:
                         raise ValueError('invalid native health')
+                    if uint(row['abort_reasons'], 'native abort reasons', 15):
+                        self._fault('native_capture_aborted')
                     for p, health in enumerate(row['producers']):
                         fields(health, HEALTH_FIELDS)
                         for name in HEALTH_FIELDS:
@@ -277,16 +381,12 @@ class NativeAdapter:
             self._fault('malformed_native_record')
             self.normalization_drops += 1
         if self.header and self.header.get('schema') == 'hng-native-v1' and type(self.header.get('capacity')) is int:
+            self.provenance = None
             self._observer_health('end')
+            self._logical_health('end')
         if self.input_ports - self.ends:
             self._fault('missing_native_input_end')
-        for port, counts in self.custody.items():
-            values = {name: counts[name] for name in ('rx_returned', 'tx_accepted')+REASONS}
-            values['still_owned'] = max(0, values['rx_returned']-values['tx_accepted']-sum(values[r] for r in REASONS))
-            self._counter('port', f'ingress-custody-{port}', 'start', 0, dict.fromkeys(values, 0),
-                          source='native-ingress-custody', semantics='terminal_disjoint', units=dict.fromkeys(values, 'packets'))
-            self._counter('port', f'ingress-custody-{port}', 'end', self.at_ns, values,
-                          source='native-ingress-custody', semantics='terminal_disjoint', units=dict.fromkeys(values, 'packets'))
+        self._port_counters()
         complete = not self.errors and self.health is not None
         dropped = self.normalization_drops + (sum(p['dropped']+p['capture_drops'] for p in self.health['producers'])
                                                if self.health else self.native_missing)

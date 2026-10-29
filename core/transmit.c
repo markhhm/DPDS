@@ -93,6 +93,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             uint32_t gate = host.policies[line] ? hng_tx_policy_gate(host.policies[line], now) : 0;
             if (gate == 1) {
                 if (now - packet_meta(m)->pending_since_ns > SHUTDOWN_TIMEOUT_NS) {
+                    observer_abort(OBS_ABORT_DRAIN);
                     host_invalidate("TX outage hold exceeded bounded backlog time");
                     terminal_drop(s, line, now);
                 }
@@ -207,12 +208,15 @@ int lcore_transmit(struct lcore_parameters *parameters)
 {
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
+    bool owner_queues = parameters->tx_owner_rings[0] && parameters->tx_owner_rings[1];
+    if (observer_enabled() && parameters->split && !owner_queues)
+        { observer_abort(OBS_ABORT_RESOURCE); host_invalidate("observation requires single-producer TX queues"); }
     tx_state_init(&tx, parameters->stats);
     while (!quit_signal_transmit ||
-        (parameters->split ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :
+        (owner_queues ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :
             !rte_ring_empty(parameters->worker_transmit_ring)) || tx_has_backlog(&tx)) {
         uint16_t count = 0;
-        if (parameters->split) {
+        if (owner_queues) {
             for (unsigned q = 0; q < 2 && count < MAX_BURST_SIZE; ++q)
                 count += rte_ring_dequeue_burst(parameters->tx_owner_rings[q], (void **)(batch + count), MAX_BURST_SIZE - count, NULL);
         } else count = rte_ring_dequeue_burst(parameters->worker_transmit_ring,

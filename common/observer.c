@@ -30,6 +30,9 @@ static struct {
     struct queue queues[OBS_PRODUCERS];
     _Atomic uint64_t order;
     _Atomic bool stop;
+    _Atomic unsigned abort_reasons;
+    uint16_t ports[OBS_PORTS], port_count;
+    bool input_ended[OBS_PORTS];
     pthread_t thread;
     int fd;
     unsigned capacity, probe_port;
@@ -65,6 +68,9 @@ bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_
     if (flags < 0 || (flags & O_ACCMODE) == O_RDONLY) goto fail;
     capture.fd = dup(fd);
     if (capture.fd < 0 || fcntl(capture.fd, F_SETFL, fcntl(capture.fd, F_GETFL) | O_NONBLOCK) < 0) goto fail;
+    if (host.port_count > OBS_PORTS) goto fail;
+    capture.port_count = host.port_count;
+    for (unsigned i = 0; i < host.port_count; ++i) capture.ports[i] = host.ports[i];
     capture.enabled = true;
     return true;
 fail:
@@ -179,16 +185,25 @@ static void *consumer(void *unused)
             next_order++; emitted = true;
         }
         if (atomic_load_explicit(&capture.stop, memory_order_acquire) && !pending) break;
+        if (!emitted && pending && atomic_load_explicit(&capture.stop, memory_order_acquire)) {
+            /* An aborted reservation can leave a global-order hole; discard its blocked suffix. */
+            for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
+                struct queue *q = &capture.queues[p];
+                uint64_t head = atomic_load(&q->head), tail = atomic_load(&q->tail);
+                atomic_fetch_add(&q->capture_drops, tail - head);
+                atomic_store(&q->head, tail);
+            }
+        }
         if (!emitted) { struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL); }
     }
     char *data = NULL; size_t length = 0; FILE *f = open_memstream(&data, &length);
     if (f) {
-        bool complete = capture.complete && !capture.write_failed;
+        bool complete = capture.complete && !capture.write_failed && !atomic_load(&capture.abort_reasons);
         for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
             struct observer_health h = observer_health(p);
             if (h.records_dropped || h.capture_drops || h.identity_errors || h.malformed_records) complete = false;
         }
-        fprintf(f, "{\"kind\":\"health\",\"complete\":%s,\"producers\":[", complete ? "true" : "false");
+        fprintf(f, "{\"kind\":\"health\",\"complete\":%s,\"abort_reasons\":%u,\"producers\":[", complete ? "true" : "false", atomic_load(&capture.abort_reasons));
         for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
             struct observer_health h = observer_health(p);
             fprintf(f, "%s{\"attempted\":%"PRIu64",\"emitted\":%"PRIu64",\"dropped\":%"PRIu64",\"capture_drops\":%"PRIu64
@@ -208,10 +223,19 @@ bool observer_start(void)
 bool observer_close(bool complete)
 {
     if (!capture.enabled) return true;
+    if (!complete) observer_abort(OBS_ABORT_REQUESTED);
+    for (unsigned i = 0; i < capture.port_count; ++i)
+        if (!capture.input_ended[i]) observer_abort(OBS_ABORT_DRAIN);
     capture.complete = complete;
+    /* Producers have stopped. Unpublished reservations are known losses, not drain work. */
+    for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
+        struct queue *q = &capture.queues[p];
+        uint64_t unused = q->reserved - atomic_load(capture.started ? &q->tail : &q->head);
+        atomic_fetch_add(&q->capture_drops, unused);
+    }
     atomic_store_explicit(&capture.stop, true, memory_order_release);
     if (capture.started) pthread_join(capture.thread, NULL);
-    bool ok = complete && capture.started && !capture.write_failed;
+    bool ok = complete && capture.started && !capture.write_failed && !atomic_load(&capture.abort_reasons);
     for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
         last_health[p] = observer_health(p);
         if (last_health[p].records_dropped || last_health[p].capture_drops || last_health[p].identity_errors || last_health[p].malformed_records) ok = false;
@@ -278,6 +302,12 @@ void observer_terminal(enum observer_producer producer, const struct rte_mbuf *m
 void observer_input_end(uint16_t port, uint64_t next)
 {
     if (!capture.enabled) return;
+    unsigned i = 0; while (i < capture.port_count && capture.ports[i] != port) ++i;
+    if (i == capture.port_count) {
+        if (i == OBS_PORTS) { observer_abort(OBS_ABORT_RESOURCE); return; }
+        capture.ports[capture.port_count++] = port;
+    }
+    capture.input_ended[i] = true;
     struct observer_record r = {.kind = OBS_END, .port = port, .actual_selection_seq = next}; observer_emit(OBS_RX, &r);
 }
 
@@ -331,4 +361,9 @@ bool observer_load_snapshot(struct observer_snapshot *snapshot)
 unstable:
     atomic_fetch_add(&capture.queues[OBS_TX].malformed_records, 1);
     return false;
+}
+
+void observer_abort(enum observer_abort_reason reason)
+{
+    if (capture.enabled) atomic_fetch_or(&capture.abort_reasons, reason);
 }

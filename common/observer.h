@@ -8,6 +8,7 @@
 #define OBS_PRODUCERS 5
 #define OBS_QUEUES 2
 enum observer_producer { OBS_RX, OBS_WORKER0, OBS_WORKER1, OBS_TX, OBS_CONTROL };
+enum observer_abort_reason { OBS_ABORT_DRAIN = 1, OBS_ABORT_PRODUCER = 2, OBS_ABORT_RESOURCE = 4, OBS_ABORT_REQUESTED = 8 };
 enum observer_identity_policy { OBS_ID_STAGE1, OBS_ID_SOFTWARE_L2 };
 enum observer_kind { OBS_PACKET, OBS_OFFER, OBS_TERMINAL, OBS_FRONTIER, OBS_END, OBS_DISPATCH, OBS_ATTEMPT, OBS_RESOURCES };
 enum observer_reason { OBS_Q_DROP, OBS_TRACE_LOSS, OBS_TRACE_OUTAGE, OBS_STORAGE, OBS_INVALID_INPUT,
@@ -43,6 +44,7 @@ struct rte_mbuf;
 bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity);
 bool observer_start(void);
 bool observer_close(bool complete);
+void observer_abort(enum observer_abort_reason reason);
 bool observer_enabled(void);
 bool observer_emit(enum observer_producer producer, const struct observer_record *record);
 /* Reserve before publishing a handoff; commit after its successful prefix is known. */

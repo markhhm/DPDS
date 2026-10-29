@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.g2.native_adapter import NativeAdapter
 from tools.g2.protocol import StreamReader
 from tools.g2.reference import Reference
+from tools.g2.counters import normalize_counters
 
 
 def pcap(path, frames):
@@ -126,6 +127,12 @@ def run(binary, cores, enabled, directory):
         expected = [decision for event in validated[0] if (decision := oracle.consume(event)) is not None]
         assert len(expected) == 8 and all(x['outcome'] == 'accepted' for x in expected)
         assert oracle.finish()['input_complete']
+        manifest = dict(run='software-pmd', scope='software-only',
+            capacity=dict(max_unresolved=64), ports=[dict(ingress_port=p) for p in (0, 1)],
+            streams=[dict(stream_id=f'native-{role}', role=role) for role in ('ingress', 'host', 'counters')])
+        counter_result = normalize_counters(validated[2], manifest)
+        assert counter_result['measurement_status'] == 'PASS', counter_result
+        assert all('native_observer_v1' in r.get('extensions', {}) for r in validated[1])
         print(f'native export {cores} lcores complete custody and preserved frame bytes: PASS')
     else:
         assert rows == []

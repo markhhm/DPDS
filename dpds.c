@@ -241,7 +241,7 @@ int main(int argc, char **argv)
     printf("layout=%u-lcore%s\n", workers + 1, split ? " schedulers=per-ingress-port" : "");
     fflush(stdout);
     RTE_LCORE_FOREACH_WORKER(core) {
-        if (rte_eal_wait_lcore(core) < 0) host_invalidate("lcore failed");
+        if (rte_eal_wait_lcore(core) < 0) { observer_abort(OBS_ABORT_PRODUCER); host_invalidate("lcore failed"); }
     }
     for (unsigned k = 0; split && k < 2; ++k) worker_stats_merge(&stats->worker, &stats->owners[k], host.ports[k]);
     report(stdout, stats);
@@ -253,16 +253,16 @@ int main(int argc, char **argv)
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
         struct rte_eth_stats nic; bool nic_valid = rte_eth_stats_get(port, &nic) == 0;
-        if (close_port(port) != 0) host_invalidate("port cleanup failed");
+        if (close_port(port) != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
         unsigned free_count = rte_mempool_avail_count(pools[port]);
         printf("pool port=%u free=%u total=%u owned=%u\n", port, free_count,
             pools[port]->size, pools[port]->size - free_count);
-        if (free_count != pools[port]->size) host_invalidate("mbuf ownership not fully reclaimed");
+        if (free_count != pools[port]->size) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("mbuf ownership not fully reclaimed"); }
         observer_resources(port, true, pools[port]->size, free_count, nic_valid ? &nic : NULL);
         rte_mempool_free(pools[port]);
     }
     host_cleanup();
-    if (!observer_close(!host.invalid)) host_invalidate("native observation incomplete");
+    if (!observer_close(true)) host_invalidate("native observation incomplete");
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
     rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
     rte_ring_free(tx_owner_rings[0]); rte_ring_free(tx_owner_rings[1]);
