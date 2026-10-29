@@ -193,16 +193,21 @@ python3 perf/ring_rate.py build/hng-ring-rate -- -b 1518 -d 3 -w 0.5
 ```
 
 The main lcore is a closed-loop generator. It recycles each frame that leaves
-an egress ring into the same port's ingress ring and refills the population
-after drops. The population (`-n`, default and maximum 1023) never exceeds the
-TX handoff ring, because the production scheduler invalidates a run instead
-of waiting for TX handoff space. `perf/ring_rate.json` sets C = 400 Gbit/s
+an egress ring into the ingress ring it came from and refills the population
+after drops; each direction has its own pool, so its frames stay in that
+direction (every line must go from port q to port 1-q). The frames that can
+reach one TX handoff ring never exceed it, because the production scheduler
+invalidates a run instead of waiting for TX handoff space. So the population
+(`-n`) defaults to and is at most 1023 with one shared TX ring (4 and 5
+lcores) and 2046, split evenly, with one TX ring per direction (7 lcores). `perf/ring_rate.json` sets C = 400 Gbit/s
 and t = 2 us per line, so the model does not limit the rate. The tool prints
 egress packets per second over the window `-d` after a warmup `-w`, and fails
 unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
 `ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port;
 `ring_rate.py --io-split` runs the 7-lcore layout with RX, scheduler and TX per direction.
+`--cpus A,B,...` pins lcore i to the i-th CPU (main first), for example one
+lcore per physical core; otherwise lcores take the allowed CPUs in order.
 
 `hng-sched-bench` times the production `worker_step_at()` per packet with real
 mbufs and a fixture clock: 1518-byte frames back to back, cable and LEO VLANs

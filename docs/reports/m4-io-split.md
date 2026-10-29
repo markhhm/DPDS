@@ -71,28 +71,64 @@ paths are the same code per direction.
 ## net_ring rate
 
 ```sh
-python3 perf/ring_rate.py [--split|--io-split] build/hng-ring-rate -- -b 1518 -d 3 -w 0.5
+python3 perf/ring_rate.py [--split|--io-split] [--cpus 0,2,4,6,8,10,12,14] \
+  build/hng-ring-rate -- -b 1518 -d 3 -w 0.5 -n N
 ```
 
-Three rounds, each running all six cases back to back, so every layout saw the
-same machine state. One-minute load average 3.1-5.3 during the runs.
+The first measurement of this layout capped the generator population at 1023
+frames for all layouts. With one TX ring per direction that cap limited the
+rate: it still rose with the population. The generator now gives each
+direction its own pool and recycles a frame into the ingress port it came
+from, so each direction holds at most 1023 frames and the 7-lcore layout can
+use 2046 (`-n` default). Rates from that first round are superseded.
 
-| Layout | mbuf bytes | total Mpps, 3 runs | median | per direction (median) |
-|---|---:|---|---:|---:|
-| 4 lcores, one scheduler | 1518 | 12.06 / 11.17 / 11.89 | 11.89 | 5.95 |
-| 4 lcores, one scheduler | 60 | 11.83 / 11.19 / 11.22 | 11.22 | 5.61 |
-| 5 lcores, scheduler per ingress port | 1518 | 11.14 / 10.68 / 11.40 | 11.14 | 5.57 |
-| 5 lcores, scheduler per ingress port | 60 | 11.35 / 10.80 / 10.78 | 10.80 | 5.40 |
-| 7 lcores, RX/scheduler/TX per direction | 1518 | 17.96 / 16.10 / 17.02 | 17.02 | 8.51 |
-| 7 lcores, RX/scheduler/TX per direction | 60 | 17.44 / 17.40 / 18.36 | 17.44 | 8.72 |
+Sweep, 1518-byte mbufs: three rounds, each running every case below back to
+back, so all layouts saw the same machine state. One-minute load average
+1.5-6.9 during the sweep. "SMT" maps lcore i to CPU i (8 lcores on 4 physical
+cores, two per core); "physical" pins one lcore per physical core
+(`--cpus 0,2,...,14`). Total Mpps, median of 3 (range):
 
-Every run was conserved and drained (`pending_peak` 8-9). The 7-lcore layout
-is about 1.5x the 5-lcore layout and above the 16.25 Mpps total that two
-directions at 8.127 Mpps need (*estimate*, 100G at 1538-byte untagged frames)
-in 5 of 6 runs; the lowest run (16.10 M) is just below it. The closed-loop
-generator is one main lcore serving both ports with at most 1023 frames in
-flight, so it may now limit the measurement; the rate is not a bound on the
-host.
+| Layout | population | SMT | physical |
+|---|---:|---|---|
+| 4 lcores | 256 | 11.42 (10.54-11.59) | 11.27 (11.23-11.50) |
+| 4 lcores | 512 | 11.86 (11.67-11.95) | 11.91 (11.75-11.91) |
+| 4 lcores | 1023 | 11.76 (11.58-11.86) | 11.89 (11.83-12.04) |
+| 5 lcores | 256 | 10.42 (10.11-10.82) | 10.46 (10.02-10.86) |
+| 5 lcores | 512 | 11.27 (10.50-11.37) | 11.06 (10.98-11.13) |
+| 5 lcores | 1023 | 11.32 (11.11-11.51) | 11.41 (11.20-11.55) |
+| 7 lcores | 256 | 17.41 (17.28-18.82) | 17.22 (16.84-20.11) |
+| 7 lcores | 512 | 19.33 (18.94-20.43) | 19.40 (18.71-19.63) |
+| 7 lcores | 1023 | 20.33 (20.30-20.51) | 20.35 (20.33-20.91) |
+| 7 lcores | 2046 | 20.62 (19.75-20.92) | 20.31 (20.27-20.50) |
+
+Every run was conserved and drained. **Measured: the 7-lcore layout reaches
+about 20.3 Mpps total (10.2 Mpps per direction) on this machine and levels
+off from a population of 1023.** The 4- and 5-lcore layouts level off at about
+11-12 Mpps from 512. Placement on separate physical cores does not change
+the plateau.
+
+What limits it (diagnostic counters, not committed; 7 lcores, physical
+placement, load average about 4-5):
+
+| population | total Mpps | mean frames in sink rings | source rings | owner rings | TX rings |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 20.4 | 1.7 | 6.1 | 91 | 335 |
+| 1023 | 20.0 | 5.0 | 24.0 | 318 | 534 |
+| 2046 | 20.5 | 5.7 | 26.6 | 667 | 1199 |
+
+The generator is not the limit: the sink rings it drains are almost empty
+and RX bursts are mostly 1-3 frames. Added frames queue in the owner rings
+and, most, in the TX rings, so the scheduler and TX lcores of each direction
+are both at capacity, about 10.2 Mpps each (about 98 ns per packet). Every TX
+burst carried one frame: with two lines per egress whose heads alternate in
+release order, the release-order merge cuts each burst at the other line's
+head, so TX pays one `rte_eth_tx_burst` call and one arbitration pass per
+packet. The 5-lcore layout shows the same pattern for its single TX lcore
+(about 900 frames in the shared TX ring at 1023). On this machine 10.2 Mpps
+per direction is above the 8.127 Mpps that 100G needs at 1538-byte frames
+(*estimate*), but these are WSL2 numbers under load, not a NIC measurement.
+Not tried: sending several frames per TX burst across lines (would need the
+merge to emit a mixed burst), and a scheduler burst dequeue.
 
 ## Pool calculator
 

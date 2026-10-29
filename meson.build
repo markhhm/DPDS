@@ -57,7 +57,8 @@ test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_r
   timeout: 60, is_parallel: false)
 test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--split', ring_rate],
   timeout: 60, is_parallel: false)
-test('perf-ring-rate-io-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--io-split', ring_rate],
+test('perf-ring-rate-io-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--io-split', ring_rate,
+  '--', '-d', '0.2', '-w', '0.05', '-n', '2046'],
   timeout: 60, is_parallel: false)
 pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c'],
   dependencies: [dpdk, core], link_args: ['-lm'],
