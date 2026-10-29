@@ -58,6 +58,16 @@ paths are the same code per direction.
   totals and per-line TX counts match. TX burst histograms and `pending_peak`
   depend on how the scheduler batches its output, so the 7-lcore layout matches
   the 5-lcore layout on every TX field, and the single owner on all but these.
+- `split` also has a second pass with a fake TX that refuses the first offer
+  of every fifth sequence number. TX retries at the same tick, so records stay
+  equal to the golden output; retries, port blocking and arbitration after a
+  partial send run in all three layouts, and the 7-lcore layout matches the
+  5-lcore layout on every TX counter (including `late_submit_max_ns`).
+- `io-ring-io-split-lcores`: the production `lcore_receive` (fixed port) and
+  `lcore_transmit` per direction, with a fixture-clock scheduler owner between
+  them, 32 seeds x 1 epoch (65,536 inputs). Shutdown goes through the real
+  chain: `quit_signal_receive`, `receivers_running`, the schedulers, then
+  `quit_signal_transmit`. Every frame is checked against the oracle.
 - `rx_split`: a per-direction RX state polls only its port, a full owner ring
   skips only that port, and the merged counters add up.
 - `io-ring-io-split` and `io-ring-stepped-io-split`: the PMD integrity oracle

@@ -178,7 +178,8 @@ enough: an egress port is fed by one scheduler, so only one TX lcore sends on
 it. The `split` test
 compares this layout with the other two (records, departures and TX counters),
 and `io-ring-io-split` and `io-ring-stepped-io-split` run the oracle with one
-RX, scheduler and TX owner per direction.
+RX, scheduler and TX owner per direction. `io-ring-io-split-lcores` runs it through the
+production RX and TX lcore functions and their shutdown chain.
 
 ## Performance tools
 
