@@ -42,3 +42,10 @@ foreach mode: ['pcap', 'ring', 'ring-stepped']
 endforeach
 test('io-af-packet', python, args: [meson.project_source_root() / 'tests/io_pmd.py', 'af_packet', dpds_exe],
   timeout: 30, is_parallel: false)
+
+# Host packet-rate benchmark over net_ring; the test is a short smoke run.
+ring_rate = executable('hng-ring-rate', ['perf/ring_rate.c', 'core/receive.c'] + common_sources,
+  dependencies: [dpdk, core, ring_pmd],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_rate.py', ring_rate],
+  timeout: 60, is_parallel: false)

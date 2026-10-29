@@ -157,6 +157,29 @@ Classifier rejection has a separate counter.
 
 The main lcore waits for completion. It reads counters after the worker cores exit.
 
+## Performance tools
+
+These tools need no NIC, hugepages or root. Their numbers describe the machine
+they ran on; software rings are not evidence of NIC or 100 Gbit/s performance.
+
+`hng-ring-rate` measures the maximum host packet rate through the production
+RX, scheduler and TX lcore functions over two `net_ring` ports:
+
+```sh
+python3 perf/ring_rate.py build/hng-ring-rate -- -b 1518 -d 3 -w 0.5
+```
+
+The main lcore is a closed-loop generator. It recycles each frame that leaves
+an egress ring into the same port's ingress ring and refills the population
+after drops. The population (`-n`, default and maximum 1023) never exceeds the
+TX handoff ring, because the production scheduler invalidates a run instead
+of waiting for TX handoff space. `perf/ring_rate.json` sets C = 400 Gbit/s
+and t = 2 us per line, so the model does not limit the rate. The tool prints
+egress packets per second over the window `-d` after a warmup `-w`, and fails
+unless the run is conserved, drained and every mbuf is reclaimed. Without
+options after `--` it runs the short smoke check used by `meson test`.
+The scheduling-core microbenchmark is in the core README.
+
 ## Configuration and packet contract
 
 Use [config.json](config.json) for a small software example. Use
