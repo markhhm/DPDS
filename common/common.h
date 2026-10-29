@@ -61,14 +61,16 @@ struct rx_stats {
     uint64_t ring_full_skips[2];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
-_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
+_Static_assert(_Alignof(struct rx_stats) == 64 && sizeof(struct rx_stats) % 64 == 0,
+    "rx_stats owners write different cache lines");
 struct worker_stats {
     uint64_t received, received_bytes, sent, sent_bytes, emulator_drops, tx_ring_drops;
     uint64_t invalid_drops, invalid_drop_bytes, storage_drops, storage_drop_bytes;
     uint64_t shutdown_drops, shutdown_drop_bytes, tx_ring_drop_bytes;
     struct HngStats lines[HNG_MAX_LINES];
 } __attribute__((aligned(64)));
-_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
+_Static_assert(_Alignof(struct worker_stats) == 64 && sizeof(struct worker_stats) % 64 == 0,
+    "worker_stats owners write different cache lines");
 struct tx_stats {
     uint64_t received, received_bytes, transmitted, transmitted_bytes, tx_drops, tx_drop_bytes;
     uint64_t retries, pending_peak, trace_outage_drops, trace_outage_bytes;
@@ -77,7 +79,8 @@ struct tx_stats {
     uint64_t line_transmitted[HNG_MAX_LINES], line_transmitted_bytes[HNG_MAX_LINES];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
-_Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
+_Static_assert(_Alignof(struct tx_stats) == 64 && sizeof(struct tx_stats) % 64 == 0,
+    "tx_stats owners write different cache lines");
 /* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts. */
 struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2]; };
 struct lcore_parameters {
