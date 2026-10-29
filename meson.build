@@ -56,3 +56,10 @@ pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
   timeout: 60, is_parallel: false)
+configure_file(input: 'perf/sched_bench.json', output: 'sched_bench.json', copy: true)
+sched_bench = executable('hng-sched-bench', ['perf/sched_bench.c'] + common_sources,
+  dependencies: [dpdk, core],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('perf-sched-bench', python, args: [meson.project_source_root() / 'tests/eal_args.py', sched_bench,
+  '--no-pci', '--no-huge', '--no-telemetry', '-m', '512', '--file-prefix=hng-sched', '--',
+  '-n', '100000', '-w', '0', '-r', '1'], workdir: meson.project_build_root(), timeout: 60, is_parallel: false)

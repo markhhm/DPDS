@@ -1,0 +1,93 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "cable-0",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 100000000000,
+        "q_bytes": 625000,
+        "t_ns": 1000000,
+        "delta_ns": 2000000,
+        "p": "0.01",
+        "seed": 1,
+        "storage_capacity_packets": 40000,
+        "storage_capacity_bytes": 60720000
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1024
+      },
+      "trace": null
+    },
+    {
+      "name": "leo-0",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 100000000000,
+        "q_bytes": 625000,
+        "t_ns": 1500000,
+        "delta_ns": 2000000,
+        "p": "0.01",
+        "seed": 1,
+        "storage_capacity_packets": 40000,
+        "storage_capacity_bytes": 60720000
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1024
+      },
+      "trace": null
+    },
+    {
+      "name": "cable-1",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 100000000000,
+        "q_bytes": 625000,
+        "t_ns": 1000000,
+        "delta_ns": 2000000,
+        "p": "0.01",
+        "seed": 2,
+        "storage_capacity_packets": 40000,
+        "storage_capacity_bytes": 60720000
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1024
+      },
+      "trace": null
+    },
+    {
+      "name": "leo-1",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 100000000000,
+        "q_bytes": 625000,
+        "t_ns": 1500000,
+        "delta_ns": 2000000,
+        "p": "0.01",
+        "seed": 2,
+        "storage_capacity_packets": 40000,
+        "storage_capacity_bytes": 60720000
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1024
+      },
+      "trace": null
+    }
+  ]
+}

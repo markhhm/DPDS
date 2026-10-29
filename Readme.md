@@ -188,6 +188,18 @@ egress packets per second over the window `-d` after a warmup `-w`, and fails
 unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
 `ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port.
+
+`hng-sched-bench` times the production `worker_step_at()` per packet on one
+lcore with real mbufs and a fixture clock: 1518-byte frames back to back at
+100 Gbit/s per direction, cable and LEO VLANs alternating, p = 0.01. It reports
+p50/p99 ns per packet for one owner of all four lines and for each
+per-ingress-port owner. The owners run one after another on one core, so the
+numbers exclude cross-core effects. Run it from the build directory:
+
+```sh
+cd build && python3 ../tests/eal_args.py ./hng-sched-bench --no-pci --no-huge \
+  --no-telemetry -m 512 --file-prefix=hng-sched -- -n 4000000 -r 3
+```
 The scheduling-core microbenchmark is in the core README.
 
 `hng-pool-calc` sizes the mbuf pool and core metadata per NUMA node. The host
