@@ -1,10 +1,14 @@
 #ifndef TRANSMIT_H
 #define TRANSMIT_H
 #include "../common/common.h"
+/* Live entries are m_table[head .. head+len). Removal advances head; an append
+ * that reaches the end of the 2x buffer compacts once, after at least
+ * TX_PENDING_PER_LINE removals, so every operation is amortized O(1). */
 struct mbuf_table {
-    uint16_t len;
-    struct rte_mbuf *m_table[TX_PENDING_PER_LINE];
+    uint16_t head, len;
+    struct rte_mbuf *m_table[2 * TX_PENDING_PER_LINE];
 };
+static inline struct rte_mbuf **pending_at(struct mbuf_table *t) { return t->m_table + t->head; }
 struct tx_state {
     struct mbuf_table pending[HNG_MAX_LINES];
     struct tx_stats *stats;
