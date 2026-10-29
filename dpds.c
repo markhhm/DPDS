@@ -89,6 +89,11 @@ static void report(FILE *out, struct pipeline_stats *s)
 
 int main(int argc, char **argv)
 {
+    /* Install the handlers first: a SIGINT during EAL init, engine load or port
+     * setup must request a clean drain, not kill the process with the default action. */
+    signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler);
+    /* Line-buffer stdout so counters already printed survive any abnormal exit. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     int eal_args = rte_eal_init(argc, argv);
     if (eal_args < 0) rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
     argc -= eal_args; argv += eal_args;
@@ -151,7 +156,6 @@ int main(int argc, char **argv)
     /* Two schedulers share the TX handoff ring as producers. */
     if (workers >= 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
     if ((workers >= 2 && !split && !rx_ring) || (workers >= 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
-    signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler);
     unsigned cores[4], index = 0, core;
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
     lcore_function_t *functions[4];
