@@ -10,6 +10,21 @@ It makes no network connections and never qualifies hardware. Receiver wire
 order is the explicit `receive_seq`, independent of JSONL export order; the
 receiver join performs its complete permutation checks.
 
+`calibration.Calibration` verifies exact rational raw-to-observation-clock
+mappings with half-even rounding, mapping validity intervals, reset/step checks,
+per-direction clock pairs and conservative offset/uncertainty bounds. Before
+time remains distinct from engine arrival; corrected and raw physical OWD are
+both returned. Fake clocks are accepted only as software evidence. These
+offline checks do not measure or certify the actual apparatus.
+
+`custody.audit_host` is a bounded, disk-backed replay for **explicit full-mode
+software fixtures only**. It reconciles intended versus actual offer ordinals,
+terminal reasons per identity, dispatch queue item ordinals, consumed handoff
+prefixes and actual TX selection/gate evidence. It checks zero/partial/full TX,
+retry suffix ownership and cable bypass during a LEO outage. It refuses normal
+stream mode and physical scope; a complete online custody join remains required
+before deployment. Full fixture history is not the default recording path.
+
 `online.OnlineCells` consumes independent model decisions and verified physical
 OWD pairs. It evaluates registered line/direction/phase cells separately, keeps
 main errors for exact quantiles, and updates bounded 1-microsecond signed/absolute
