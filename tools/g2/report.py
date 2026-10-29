@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Draft software G2 gate reporter. Full receiver identities; separately sampled timing."""
 import argparse
 import csv

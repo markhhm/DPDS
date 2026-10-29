@@ -1,9 +1,10 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # Draft M2 software measurement tools
 
 These tools implement the independent reference/reporting portion of the
-2026-10-29 observation worker task. **Software-only, not G2.** They cannot qualify a
+measurement implementation task. **Software-only, not G2.** They cannot qualify a
 hardware run. Observer wiring, final event/payload format and actual-time
-cross-line TX attempt evidence await worker's specification.
+cross-line TX attempt evidence await the design owner’s specification.
 
 ## Run and check
 
@@ -25,7 +26,7 @@ selection/service/deadline/release/clamp/byte fields, and full output order.
 Cases cover fixed two-point delay, p=0/1/0.1, fractional C, finite Q, trace
 UP/DOWN, interval loss and outage hold/drop. There is no Rust model import in
 the Python reference. The Rust adapter contains no reference formulas.
-`G2_CORE_REPLAY=/absolute/path/to/m2_replay` selects an already built adapter.
+`G2_CORE_REPLAY=PATH_TO_REPLAY` selects an already built adapter.
 
 ```sh
 python3 -m tools.g2.reference config.json RUN ingress.jsonl > expected.jsonl
@@ -133,7 +134,7 @@ serialization and residual-error distributions are diagnostics. Gate errors
 continue to use the original model deadlines, including collision error.
 
 Status/exit codes are provisionally `PASS/0`, `FAIL/1`, `INVALID/2`,
-`INCONCLUSIVE/2`, and always `g2_qualified=false`. Stage 1 source was fetched after experiment coordinator pushed it:
+`INCONCLUSIVE/2`, and always `g2_qualified=false`. Stage 1 source was fetched after the source maintainer pushed it:
 `the Stage 1 harness de035a63f5d0135ee70b0bceb27d5051897b85a1` (36d54a2 + de035a6),
 **not second-reviewed**. Read sources: `C2/docs/vm126-target-check.md`,
 `C2/scripts/vm126_target_check.py`, `C2/harness/target_rate_check.py`,

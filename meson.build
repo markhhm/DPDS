@@ -8,6 +8,8 @@ cargo_build = custom_target('dpds-core', output: 'libdpds_core.stamp',
 core = declare_dependency(
   link_args: ['-L' + meson.project_source_root() / 'dpds-core/target/release', '-ldpds_core'],
   compile_args: ['-I' + meson.project_source_root() / 'dpds-core/target'], sources: cargo_build)
+python = find_program('python3')
+test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
 common_sources = ['common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
@@ -15,15 +17,14 @@ foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'ri
   runner = executable(name + '-test', ['tests/' + name + '.c'] + common_sources,
     dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
-  args = ['-l', '0', '--no-pci', '--no-huge', '--no-telemetry', '--file-prefix=hng-' + name]
+  args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--file-prefix=hng-' + name]
   if name == 'rings'
     args += ['--vdev=net_null0,no-rx=1', '--vdev=net_null1,no-rx=1']
   endif
-  test(name, runner, args: args,
+  test(name, python, args: args, depends: runner,
     workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
 endforeach
 
-python = find_program('python3')
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
 
@@ -31,3 +32,17 @@ test('g2-software', python,
   args: ['-m', 'unittest', 'tools.g2.tests.test_reference',
          'tools.g2.tests.test_report', 'tools.g2.tests.test_probe', 'tools.g2.tests.test_differential'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
+# Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
+threads = dependency('threads')
+ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
+io_oracle = executable('io-oracle-test', ['tests/io_oracle_test.c', 'tests/io_oracle.c'], c_args: ['-UNDEBUG'])
+test('io-oracle', io_oracle)
+io_pmd = executable('io-pmd-test', ['tests/io_pmd.c', 'tests/io_oracle.c'] + common_sources,
+  dependencies: [dpdk, core, threads, ring_pmd], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+foreach mode: ['pcap', 'ring', 'ring-stepped']
+  test('io-' + mode, python, args: [meson.project_source_root() / 'tests/io_pmd.py', mode, io_pmd],
+    timeout: 300, is_parallel: false)
+endforeach
+test('io-af-packet', python, args: [meson.project_source_root() / 'tests/io_pmd.py', 'af_packet', dpds_exe],
+  timeout: 30, is_parallel: false)

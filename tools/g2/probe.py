@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Stage 1 probe payload at the Stage 1 harness de035a6 (not second-reviewed)."""
 import struct
 

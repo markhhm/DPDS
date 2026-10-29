@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Independent event-time Fraction oracle; no Rust imports or computed deadlines as input."""
 import argparse
 from bisect import bisect_right

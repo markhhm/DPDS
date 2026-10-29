@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare every admission and emitted record with the real core replay adapter."""
 import argparse
 import hashlib

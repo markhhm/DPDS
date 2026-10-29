@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# Allowed check-policy.sh OS2 hits, one "path:fixed text" per line. Keep minimal.
+# Upstream devcontainer: the generic rustup default location, not a personal path.
+.devcontainer/post-create.sh:"${CARGO_HOME:-$HOME/.cargo}/bin"

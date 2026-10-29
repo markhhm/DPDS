@@ -3,7 +3,7 @@
 
 **Goal:** Finish software M2 against DPDS-Core `fd4ed12`, tip `158814e`,
 `docs/HNG-OBSERVER.md` (`hng-observer-v1`). Existing delivery is host20433e1,
-core4ae06c5. All work stays on own clones / hng/m2-obs; no testbed.
+core4ae06c5. All work stays on the measurement branch; no hardware access.
 
 **Architecture:** A strict sealed interchange surrounds the existing independent
 Fraction reference. Bounded SQLite joins reconcile complete ingress, external
@@ -104,7 +104,7 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
   1% observation gap, partial TX/outage, calibration faults and capture overflow.
 - [ ] Run core fmt/clippy/test, host compile/Meson/pre-push; fresh independent
   review, fix real findings RED->GREEN, update core reports and KS notebook.
-- [ ] Push only own hng/m2-obs branches, report SHAs/results/limits to integration lead.
+- [ ] Push only own hng/m2-obs branches, report SHAs/results/limits to the project maintainer.
 
 ## Format rulings / ledger
 
