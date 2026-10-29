@@ -105,8 +105,8 @@ int main(int argc, char **argv)
         else if (option == 'o') stats_path = optarg;
         else rte_exit(EXIT_FAILURE, "Usage: ... -- [-c config.json] [-o stats.txt]\n");
     }
-    if (rte_lcore_count() < 2 || rte_lcore_count() > 5)
-        rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4 or 5 lcores\n");
+    if (rte_lcore_count() < 2 || rte_lcore_count() == 6 || rte_lcore_count() > 7)
+        rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4, 5 or 7 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "HNG configuration rejected before RX\n");
     uint16_t port;
     RTE_ETH_FOREACH_DEV(port) host.ports[host.port_count++] = port;
@@ -142,10 +142,13 @@ int main(int argc, char **argv)
     struct pipeline_stats *stats = rte_zmalloc("stats", sizeof(*stats), 64);
     if (!stats) rte_exit(EXIT_FAILURE, "Cannot allocate counters\n");
     unsigned workers = rte_lcore_count() - 1;
-    bool split = workers == 4;
+    /* 7 lcores: per direction one RX, one scheduler and one TX lcore. */
+    bool io_split = workers == 6, split = workers == 4 || io_split;
     if (split && (host.port_count != 2 || !host_split_valid()))
-        rte_exit(EXIT_FAILURE, "5 lcores need two ports, each egress fed by one ingress port\n");
-    struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0};
+        rte_exit(EXIT_FAILURE, "5 and 7 lcores need two ports, each egress fed by one ingress port\n");
+    if (io_split && !host_io_split_valid())
+        rte_exit(EXIT_FAILURE, "7 lcores need each ingress port's lines to share one egress port\n");
+    struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0}, *tx_rings[2] = {0};
     if (workers >= 2 && !split) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     for (unsigned k = 0; split && k < 2; ++k) {
         char name[32];
@@ -153,12 +156,19 @@ int main(int argc, char **argv)
         owner_rings[k] = rte_ring_create(name, SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
         if (!owner_rings[k]) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
     }
+    /* One scheduler feeds each direction's TX ring; one TX lcore drains it. */
+    for (unsigned k = 0; io_split && k < 2; ++k) {
+        char name[32];
+        snprintf(name, sizeof(name), "tx_ring%u", k);
+        tx_rings[k] = rte_ring_create(name, SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+        if (!tx_rings[k]) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
+    }
     /* Two schedulers share the TX handoff ring as producers. */
-    if (workers >= 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
-    if ((workers >= 2 && !split && !rx_ring) || (workers >= 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
-    unsigned cores[4], index = 0, core;
+    if (workers >= 3 && !io_split) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
+    if ((workers >= 2 && !split && !rx_ring) || (workers >= 3 && !io_split && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
+    unsigned cores[6], index = 0, core;
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
-    lcore_function_t *functions[4];
+    lcore_function_t *functions[6];
     if (workers == 1) functions[0] = (lcore_function_t *)lcore_receive_worker_transmit;
     else if (workers == 2) {
         functions[0] = (lcore_function_t *)lcore_worker_transmit;
@@ -167,21 +177,36 @@ int main(int argc, char **argv)
         functions[0] = (lcore_function_t *)lcore_transmit;
         functions[1] = (lcore_function_t *)lcore_worker;
         functions[2] = (lcore_function_t *)lcore_receive;
-    } else {
+    } else if (workers == 4) {
         functions[0] = (lcore_function_t *)lcore_transmit;
         functions[1] = functions[2] = (lcore_function_t *)lcore_worker;
         functions[3] = (lcore_function_t *)lcore_receive;
         host.schedulers_running = 2;
+    } else {
+        /* Pairs per direction k: TX k, scheduler k, RX k. */
+        functions[0] = functions[1] = (lcore_function_t *)lcore_transmit;
+        functions[2] = functions[3] = (lcore_function_t *)lcore_worker;
+        functions[4] = functions[5] = (lcore_function_t *)lcore_receive;
+        host.schedulers_running = host.receivers_running = 2;
     }
     host.epoch_cycles = rte_get_timer_cycles();
     host_mark_launched();
-    printf("layout=%u-lcore%s\n", workers + 1, split ? " schedulers=per-ingress-port" : "");
+    printf("layout=%u-lcore%s\n", workers + 1, io_split ? " rx_scheduler_tx=per-direction" :
+        split ? " schedulers=per-ingress-port" : "");
     for (unsigned i = 0; i < workers; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
         if (!parameters) rte_exit(EXIT_FAILURE, "Cannot allocate core parameters\n");
         *parameters = (struct lcore_parameters){.worker_id = i, .receive_worker_ring = rx_ring,
             .worker_transmit_ring = tx_ring, .stats = stats, .num_ports = host.port_count};
-        if (split) {
+        if (io_split) {
+            unsigned k = i % 2;
+            parameters->split = parameters->io_split = true;
+            parameters->owner_rings[0] = owner_rings[0];
+            parameters->owner_rings[1] = owner_rings[1];
+            parameters->owner_index = (uint16_t)k;
+            parameters->receive_worker_ring = owner_rings[k];
+            parameters->worker_transmit_ring = tx_rings[k];
+        } else if (split) {
             parameters->split = true;
             parameters->owner_rings[0] = owner_rings[0];
             parameters->owner_rings[1] = owner_rings[1];
@@ -195,6 +220,10 @@ int main(int argc, char **argv)
         if (rte_eal_wait_lcore(core) < 0) host_invalidate("lcore failed");
     }
     for (unsigned k = 0; split && k < 2; ++k) worker_stats_merge(&stats->worker, &stats->owners[k], host.ports[k]);
+    for (unsigned k = 0; io_split && k < 2; ++k) {
+        rx_stats_merge(&stats->rx, &stats->rx_owners[k]);
+        tx_stats_merge(&stats->tx, &stats->tx_owners[k]);
+    }
     report(stdout, stats);
     if (stats_path) {
         FILE *out = fopen(stats_path, "wx");
@@ -213,6 +242,7 @@ int main(int argc, char **argv)
     host_cleanup();
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
     rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
+    rte_ring_free(tx_rings[0]); rte_ring_free(tx_rings[1]);
     bool invalid = host.invalid;
     rte_eal_cleanup();
     return invalid ? EXIT_FAILURE : EXIT_SUCCESS;

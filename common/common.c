@@ -70,6 +70,16 @@ bool host_split_valid(void)
     return true;
 }
 
+bool host_io_split_valid(void)
+{
+    if (!host_split_valid()) return false;
+    for (size_t i = 0; i < host.line_count; ++i)
+        for (size_t j = 0; j < host.line_count; ++j)
+            if (host.lines[i].ingress_port == host.lines[j].ingress_port &&
+                host.lines[i].egress_port != host.lines[j].egress_port) return false;
+    return true;
+}
+
 void host_cleanup(void)
 {
     for (size_t i = 0; i < host.line_count; ++i) hng_tx_policy_destroy(host.policies[i]);
@@ -134,7 +144,7 @@ int host_prepare_port(uint16_t port)
 
 unsigned host_pool_objects(uint16_t port, unsigned lcores)
 {
-    if (port >= RTE_MAX_ETHPORTS || !host.resources[port].prepared || lcores < 1 || lcores > 5) return 0;
+    if (port >= RTE_MAX_ETHPORTS || !host.resources[port].prepared || lcores < 1 || lcores > 7) return 0;
     uint64_t count = host.resources[port].rx_descriptors + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ +
         MBUF_CACHE_SIZE * lcores + HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE;
     bool reserved_egress[RTE_MAX_ETHPORTS] = {0};

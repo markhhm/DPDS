@@ -40,12 +40,16 @@ struct host_context {
     _Atomic bool invalid;
     /* The last scheduler to finish releases TX; 0 or 1 means a single scheduler. */
     _Atomic int schedulers_running;
+    /* The last RX lcore to finish releases the schedulers; 0 or 1 means a single RX lcore. */
+    _Atomic int receivers_running;
 };
 extern struct host_context host;
 uint64_t host_now_ns(void);
 bool host_load(const char *path);
 /* Per-direction owners need every egress port fed by lines of one ingress port. */
 bool host_split_valid(void);
+/* Per-direction RX/TX lcores also need each ingress port's lines to share one egress port. */
+bool host_io_split_valid(void);
 /* Take every line handle; fails and invalidates once owners may run (host_mark_launched). */
 bool host_take_line_handles(void);
 /* Call on the main lcore immediately before launching pipeline lcores. */
@@ -92,8 +96,9 @@ struct lcore_parameters {
     struct rte_ring *receive_worker_ring, *worker_transmit_ring;
     struct pipeline_stats *stats;
     uint16_t num_ports;
-    /* Split layout: one scheduler per ingress port host.ports[owner_index]. */
-    bool split;
+    /* Split layout: one scheduler per ingress port host.ports[owner_index].
+     * io_split (7 lcores): RX and TX lcores are per direction owner_index too. */
+    bool split, io_split;
     uint16_t owner_index;
     struct rte_ring *owner_rings[2];
 };

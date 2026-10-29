@@ -262,6 +262,14 @@ int main(int argc, char **argv)
     }
     /* Handles are taken in host_load before launch; taking one after launch fails the run. */
     assert(host_load("split.json") && !host.invalid);
+    /* Each ingress port feeds one egress port, as the 7-lcore layout requires. */
+    assert(host_split_valid() && host_io_split_valid());
+    /* One ingress port feeding both egress ports passes the 5-lcore check only. */
+    struct LineInfo saved[HNG_MAX_LINES];
+    memcpy(saved, host.lines, sizeof(saved));
+    for (size_t i = 0; i < host.line_count; ++i) { host.lines[i].ingress_port = 0; host.lines[i].egress_port = i == 0 ? 0 : 1; }
+    assert(host_split_valid() && !host_io_split_valid());
+    memcpy(host.lines, saved, sizeof(saved));
     host_mark_launched();
     assert(!host_take_line_handles() && host.invalid);
     host_cleanup();

@@ -78,10 +78,16 @@ int lcore_receive(struct lcore_parameters *parameters)
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     rx_state_init(&rx, parameters->stats);
     rx.split = parameters->split;
+    if (parameters->io_split) {
+        rx.fixed = true;
+        rx.next_port = parameters->owner_index;
+        rx.stats = &parameters->stats->rx_owners[parameters->owner_index];
+    }
     while (!quit_signal_receive)
         if (!rx_iteration(&rx, parameters, batch)) rte_pause();
-    /* Completion follows the final enqueue and frontier publication. */
-    quit_signal_worker = 1;
+    /* Completion follows the final enqueue and frontier publication of every RX lcore:
+     * a scheduler must not end its input while another direction's RX still runs. */
+    if (atomic_fetch_sub(&host.receivers_running, 1) <= 1) quit_signal_worker = 1;
     rte_free(parameters);
     return 0;
 }

@@ -194,6 +194,8 @@ int lcore_transmit(struct lcore_parameters *parameters)
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     tx_state_init(&tx, parameters->stats);
+    if (parameters->io_split) tx.stats = &parameters->stats->tx_owners[parameters->owner_index];
+    /* quit_signal_transmit follows the last scheduler's final enqueue. */
     while (!quit_signal_transmit || !rte_ring_empty(parameters->worker_transmit_ring) || tx_has_backlog(&tx)) {
         uint16_t count = rte_ring_dequeue_burst(parameters->worker_transmit_ring,
             (void **)batch, MAX_BURST_SIZE, NULL);
