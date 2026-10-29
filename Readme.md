@@ -38,9 +38,12 @@ Those packets exercise classifier rejection. Direct mbuf fixtures cover valid tr
 ## Zero-NIC integrity quickstart
 
 No physical NIC, PCI access, hugepages, or host network changes are needed.
-Install DPDK in any user-writable prefix with these drivers enabled:
+Clone with the core submodule, then install DPDK in any user-writable prefix
+with these drivers enabled:
 
 ```sh
+git clone --recursive https://github.com/markhhm/DPDS.git dpds && cd dpds
+curl -fsSLO https://fast.dpdk.org/rel/dpdk-26.03.tar.xz && tar -xf dpdk-26.03.tar.xz
 meson setup dpdk-build dpdk-26.03 --prefix="$PWD/dpdk-local" --libdir=lib \
   -Dexamples= -Dtests=false \
   -Denable_drivers=net/null,net/pcap,net/ring,net/af_packet,mempool/ring,bus/vdev
@@ -50,8 +53,11 @@ export PKG_CONFIG_PATH="$PWD/dpdk-local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CO
 export LD_LIBRARY_PATH="$PWD/dpdk-local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 meson setup build
 meson compile -C build
-meson test -C build io-oracle io-pcap io-ring io-af-packet --print-errorlogs
+meson test -C build io-oracle io-pcap io-ring io-ring-stepped io-af-packet --print-errorlogs
 ```
+
+The first emulator run on two `net_null` software ports is shown under
+[Run with software ports](#run-with-software-ports).
 
 The `dpdk-26.03` source directory must be extracted from the official DPDK
 release archive. DPDK's build also needs its standard development prerequisites,
@@ -69,6 +75,7 @@ Public test commands, also available individually:
 ./build/io-oracle-test
 python3 tests/io_pmd.py pcap ./build/io-pmd-test
 python3 tests/io_pmd.py ring ./build/io-pmd-test
+python3 tests/io_pmd.py ring-stepped ./build/io-pmd-test
 python3 tests/io_pmd.py af_packet ./build/dpds
 ```
 
@@ -86,6 +93,14 @@ per-line selector draw advance throughout the seed. The one-millisecond epoch
 gaps empty payload storage and bound memory. Only the final epoch seals input
 and drains the service ledger before resetting for the next seed. IDs stay
 unique across all epochs. This is an integrity check, not a sustained-load benchmark.
+
+In `ring`, each epoch admits all input before the fixture clock advances, so every
+packet is due at once. `ring-stepped` runs the same seeds, epochs and oracle with
+the clock trailing the newest consumed arrival by 0-4 us: departures interleave
+with arrivals, the scheduler chooses among partially due line heads under the
+input watermark, and 64-entry source and RX handoff rings are filled until their
+producers block before each epoch drains. Its PASS lines add per-seed counts of
+interleaved and partially due steps and of full-ring events.
 
 The independent C oracle uses a finite L2-byte service ledger, exact rational
 wire serialization, deterministic selector, and a global stable sort by release
@@ -203,19 +218,28 @@ checks below establish software integrity only.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
-## Required pre-push checks
+## Checks, pre-push hook and CI
 
-After cloning (and initializing the host submodule), install the versioned hook:
+`scripts/check.sh` is the complete check suite; the pre-push hook and GitHub
+Actions (`.github/workflows/ci.yml`) run this same script. It runs the core's
+open-source policy scan on this repository (SPDX headers; no lab hostnames,
+personal paths or private IP addresses; upstream exemptions in
+`scripts/spdx-exempt.txt`, accepted hits in `scripts/env-allow.txt`), then the
+pinned core's own `scripts/check.sh` (policy, fmt, clippy, tests), then the
+complete Meson suite. `scripts/check-skips.py` prints every Meson SKIP and fails
+unless that test is listed in `DPDS_ALLOW_SKIP`; CI allows only `io-af-packet`,
+which skips on runners without unprivileged user namespaces, and reports such a
+skip as a warning, never as a pass. The script fails if a check modified the
+working tree. It locates cargo from `CARGO`, then `PATH`, then the rustup default.
+
+Install the versioned hook after cloning with the submodule:
 
 ```sh
 ./scripts/install-hooks.sh
 ```
 
-The hook runs `meson compile -C build` and `meson test -C build --print-errorlogs`
-(initializing `build` when absent, including the pinned core build).
-It checks a clean checkout of the exact commit being pushed. Check out each
+The hook checks a clean checkout of the exact commit being pushed. Check out each
 commit before pushing another branch. Deletions need no build. A check failure
-blocks the push; fix the failure or report missing tools to the lead. Never
-bypass hooks. The installer refuses to replace a different existing hook.
-Keep the build environment (Cargo, Meson, DPDK pkg-config and runtime library
-paths) available in the shell that performs the push.
+blocks the push; fix the failure or the missing tool. Never bypass hooks. The
+installer refuses to replace a different existing hook. Keep the DPDK pkg-config
+and runtime library paths available in the shell that performs the push.
