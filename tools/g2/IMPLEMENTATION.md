@@ -137,3 +137,6 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
 - Registration preflight verifies topology/queue layout, sources and calibration,
   required-cell sample planning, pool declarations and bounded debug retention.
   It is explicitly separate from captured-stream integrity and data-path gates.
+- Typed counter normalization verifies complete source seals, start/end deltas,
+  descriptor semantics, latched periodic resets, drain and observer accounting.
+  It retains bounded scope state and preserves unavailable values as null.

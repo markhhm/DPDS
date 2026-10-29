@@ -90,7 +90,24 @@ Capacity registration includes active-join and main-sample bounds, maximum join
 lag, ring/record widths, explicit processing/storage qualification booleans and
 named handoff queues. Offload registration covers FCS/VLAN retention, segments,
 segmentation/coalescing flags, CQE compression and timestamp mode. Full capture
-and counter validation remain part of the pending online report integration.
+and counter-to-identity reconciliation remain part of online report integration.
+
+`python3 -m tools.g2.counters manifest.json > counters.json` reads only registered
+counter streams, verifies their seals and file hashes, and emits
+`hng-g2-counters-v1`. Each scope needs explicit `phase=start` and `phase=end`
+snapshots; optional periodic snapshots can expose an intermediate reset even
+when the final generation returns to its starting value. Deltas exclude
+pre-run counts. Gauges retain final values and queue high-water maxima. The
+artifact retains endpoint clocks/times/generations, descriptors and stream
+integrity. It keeps bounded per-scope state, not a full snapshot history.
+
+Every configured ingress direction needs software port counters. Observer
+scope IDs match the registered ingress/before/receiver/host stream IDs. Missing
+or reset required counters stay null and make evidence inconclusive. Overlap
+diagnostics are retained separately from disjoint terminal accounting. An
+evidence PASS means counter normalization succeeded; packet gates still need
+the complete identity pipeline. The bounded draft reporter accepts the
+normalized port view, preserving INCONCLUSIVE as compatibility INVALID.
 
 Meson builds the pinned core's `examples/m2_replay.rs` adapter and includes all
 Python checks in `g2-software`. The million-event test compares **1,048,576**

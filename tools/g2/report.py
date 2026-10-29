@@ -13,7 +13,7 @@ import re
 import sys
 
 from .reference import Reference, canonical, load_config, strict_json, uint
-from .protocol import StreamReader
+from .protocol import StreamError, StreamReader
 
 DROP_FIELDS = ("q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_drop",
                "invalid_input_drop", "handoff_drop", "terminal_tx_drop",
@@ -86,6 +86,15 @@ def timing_gate(stats, name, threshold, uncertainty):
 def build_report(expected, summary, received, counters, config, manifest, traces=None):
     if not all(isinstance(value, dict) for value in (summary, counters, config, manifest)):
         raise ValueError("summary, counters, config and manifest must be JSON objects")
+    if counters.get("schema") == "hng-g2-counters-v1":
+        if counters.get("run") != summary.get("run"):
+            raise StreamError("COUNTER_RUN", "normalized counters have a mixed run")
+        if counters.get("measurement_status") != "PASS":
+            raise StreamError("COUNTER_EVIDENCE_INCOMPLETE", "normalized counter evidence is incomplete",
+                              "INCONCLUSIVE" if counters.get("measurement_status") == "INCONCLUSIVE" else "INVALID")
+        counters = counters["ports"]
+        if not isinstance(counters, dict):
+            raise ValueError("normalized counter ports must be an object")
     if (summary.get("schema") not in {"hng-g2-reference-draft-v1", "hng-g2-reference-v1"} or summary.get("kind") != "summary"
             or not isinstance(summary.get("run"), str) or not summary["run"]):
         raise ValueError("unsupported reference summary schema/kind/run")
@@ -404,7 +413,9 @@ def main():
                       f"{row['error_median_ms']}/{row['error_p99_ms']}ms {row['reasons']}" for row in result["rows"]]
             (destination / "summary.txt").write_text("\n".join(lines) + "\n")
     except (ValueError, KeyError, TypeError, OSError) as exc:
-        result = dict(status="INVALID", reason=str(exc), scope="software-only, not G2", g2_qualified=False)
+        result = dict(status="INVALID", measurement_status=getattr(exc, "measurement_status", "INVALID"),
+                      reason_codes=[getattr(exc, "code", "REPORT_INVALID")], reason=str(exc),
+                      scope="software-only, not G2", g2_qualified=False)
     print(json.dumps(result, allow_nan=False, sort_keys=True))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}[result["status"]]
 

@@ -76,6 +76,32 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["error_p99_ms"], 0)
         self.assertEqual(result["stage1_source_commit"], "de035a63f5d0135ee70b0bceb27d5051897b85a1")
 
+    def test_normalized_counter_view_requires_matching_run_and_complete_evidence(self):
+        counters = dict(schema="hng-g2-counters-v1", run="fixture", measurement_status="PASS",
+                        ports=self.counters, reason_codes=[])
+        self.assertEqual(self.run_report(counters=counters)["status"], "PASS")
+        for change in [dict(run="other"), dict(measurement_status="INCONCLUSIVE")]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.run_report(counters=dict(counters, **change))
+
+    def test_incomplete_typed_counters_keep_detailed_inconclusive_status(self):
+        counters = dict(schema="hng-g2-counters-v1", run="fixture", measurement_status="INCONCLUSIVE",
+                        ports=self.counters, reason_codes=["counter_reset"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = dict(config=self.cfg, counters=counters, manifest=self.manifest)
+            for name, value in inputs.items():
+                (root / f"{name}.json").write_text(json.dumps(value))
+            (root / "expected.jsonl").write_text("".join(json.dumps(row)+"\n" for row in self.expected+[self.summary]))
+            (root / "receiver.jsonl").write_text("".join(json.dumps(row)+"\n" for row in self.received))
+            result = subprocess.run([sys.executable, "-m", "tools.g2.report", str(root/"config.json"),
+                str(root/"expected.jsonl"), str(root/"receiver.jsonl"), str(root/"counters.json"),
+                str(root/"manifest.json")], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            output = json.loads(result.stdout)
+            self.assertEqual(output.get("measurement_status"), "INCONCLUSIVE")
+            self.assertIn("COUNTER_EVIDENCE_INCOMPLETE", output["reason_codes"])
+
     def test_point_quantiles_follow_stage1_linear_interpolation(self):
         stats = timing_stats([0, 10, 20, 30])
         self.assertEqual(stats["median_abs_error_ns"], 15)
