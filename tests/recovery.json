@@ -1,0 +1,52 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "cable",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 120,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
+    },
+    {
+      "name": "leo-hold",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 0,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": {
+        "path": "fixtures/trace-recovery.json",
+        "sha256": "6c632814729845e7a68bb9d960f5f073776af11cfc634a77784da2349235b334"
+      }
+    }
+  ]
+}

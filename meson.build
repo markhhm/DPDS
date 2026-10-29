@@ -11,7 +11,7 @@ core = declare_dependency(
 common_sources = ['common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings']
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery']
   runner = executable(name + '-test', ['tests/' + name + '.c'] + common_sources,
     dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
