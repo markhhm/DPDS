@@ -19,6 +19,31 @@ DROP_FIELDS = ("q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_
                "invalid_input_drop", "handoff_drop", "terminal_tx_drop",
                "missed_deadline_outage_drop", "shutdown_drop")
 STAGE1_SHA = "de035a63f5d0135ee70b0bceb27d5051897b85a1"
+CSV_COLUMNS = ("condition_id", "repeat", "direction", "line", "phase", "status", "measurement_status",
+    "g2_pass", "g2_qualified", "error_median_ms", "error_p99_ms", "delay_storage_drops", "capture_drops",
+    "nic_drops", "shared_q_status", "shared_q_drops", "trace_loss_drops", "trace_outage_drops", "probe_sent",
+    "probe_received", "probe_lost", "probe_selected_late", "probe_actual_ooo", "probe_selected_late_ooo",
+    "probe_unexpected_ooo", "timing_samples", "reasons")
+
+
+def write_outputs(result, destination):
+    (destination / "report.json").write_text(json.dumps(result, allow_nan=False, indent=2) + "\n")
+    with (destination / "results.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        for row in result.get("rows", []):
+            values = {name:row.get(name) for name in CSV_COLUMNS}
+            values["reasons"] = ";".join(row.get("reason_codes", [])) if "reason_codes" in row else row.get("reasons", "")
+            writer.writerow(values)
+    rows = [row for row in result.get("rows", []) if row.get("required", True)]
+    lines = [f"{result.get('scope', 'unknown')}: {result['status']}",
+             f"Passed cells: {sum(row['status']=='PASS' for row in rows)}/{len(rows)}",
+             "Thresholds: median 100000 ns; p99 500000 ns; order 0; storage 0",
+             "Report: report.json"]
+    lines += [f"{row.get('direction')} {row.get('line')} {row.get('phase')}: {row['status']} "
+              + ";".join(row.get("reason_codes", [])[:3]) for row in rows if row["status"]!="PASS"]
+    lines += result.get("reason_codes", [])[:3]
+    (destination / "summary.txt").write_text("\n".join(lines) + "\n")
 
 
 def identity(row):
@@ -382,40 +407,51 @@ def main():
         parser.add_argument(argument)
     parser.add_argument("--out", help="new directory for report.json, results.csv and summary.txt")
     args = parser.parse_args()
+    destination = None
     try:
-        config, traces = load_config(args.config)
-        # shortcut: full joins use RAM; replace with a bounded external join before hardware-length runs.
-        with open(args.expected_jsonl) as source:
-            first = strict_json(source.readline())
-            if first.get("kind") != "header":
-                rows = [first] + [strict_json(line) for line in source]
-            else:
-                rows = list(StreamReader(args.expected_jsonl, role="expected"))
-        if not rows or rows[-1].get("kind") != "summary":
-            raise ValueError("reference stream lacks terminal summary")
-        with open(args.receiver_jsonl) as source:
-            received = [strict_json(line) for line in source]
-        with open(args.counters_json) as source:
-            counters = strict_json(source.read())
-        with open(args.manifest_json) as source:
-            manifest = strict_json(source.read())
-        result = build_report(rows[:-1], rows[-1], received, counters, config, manifest, traces)
         if args.out:
             destination = Path(args.out)
             destination.mkdir(parents=True, exist_ok=False)
-            (destination / "report.json").write_text(json.dumps(result, allow_nan=False, indent=2) + "\n")
-            with (destination / "results.csv").open("w", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=list(result["rows"][0]))
-                writer.writeheader()
-                writer.writerows(result["rows"])
-            lines = [f"P1 software check: {result['status']} (software-only, not G2)"]
-            lines += [f"  {row['condition_id']} {row['direction']}: {row['status']} median/p99="
-                      f"{row['error_median_ms']}/{row['error_p99_ms']}ms {row['reasons']}" for row in result["rows"]]
-            (destination / "summary.txt").write_text("\n".join(lines) + "\n")
+        with open(args.manifest_json) as source:
+            manifest = strict_json(source.read())
+        config, traces = load_config(args.config)
+        if manifest.get("schema")=="hng-g2-manifest-v1":
+            from .bundle import build_bundle_report
+            from .validate import preflight
+            preflight(args.manifest_json)
+            if hashlib.sha256(Path(args.config).read_bytes()).hexdigest()!=manifest["config"]["sha256"]:
+                raise StreamError("SOURCE_HASH_MISMATCH", "positional config differs from registration")
+            root = Path(args.manifest_json).parent
+            paths = {stream["stream_id"]:root/stream["path"] for stream in manifest["streams"]}
+            for role, path in (("expected", args.expected_jsonl), ("receiver", args.receiver_jsonl),
+                               ("counters", args.counters_json)):
+                streams = [stream for stream in manifest["streams"] if stream["role"]==role]
+                if len(streams)!=1:
+                    raise StreamError("POSITIONAL_PARTITION_UNSUPPORTED", "positional stream requires one registered partition")
+                paths[streams[0]["stream_id"]] = path
+            result = build_bundle_report(config, traces, manifest, paths,
+                strict_json((root/manifest["calibration_path"]).read_bytes()), destination)
+        else:
+            # Legacy draft input remains restricted to explicit software fixtures.
+            with open(args.expected_jsonl) as source:
+                first = strict_json(source.readline())
+                rows = ([first]+[strict_json(line) for line in source] if first.get("kind")!="header"
+                        else list(StreamReader(args.expected_jsonl, role="expected")))
+            if not rows or rows[-1].get("kind")!="summary":
+                raise ValueError("reference stream lacks terminal summary")
+            with open(args.receiver_jsonl) as source:
+                received = [strict_json(line) for line in source]
+            with open(args.counters_json) as source:
+                counters = strict_json(source.read())
+            result = build_report(rows[:-1], rows[-1], received, counters, config, manifest, traces)
     except (ValueError, KeyError, TypeError, OSError) as exc:
-        result = dict(status="INVALID", measurement_status=getattr(exc, "measurement_status", "INVALID"),
+        result = dict(schema="hng-g2-report-v1", status="INVALID", measurement_status=getattr(exc, "measurement_status", "INVALID"),
                       reason_codes=[getattr(exc, "code", "REPORT_INVALID")], reason=str(exc),
-                      scope="software-only, not G2", g2_qualified=False)
+                      scope="software-only", g2_qualified=False, rows=[])
+        if isinstance(exc, FileExistsError):
+            destination = None
+    if destination is not None:
+        write_outputs(result, destination)
     print(json.dumps(result, allow_nan=False, sort_keys=True))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}[result["status"]]
 

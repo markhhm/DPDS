@@ -178,7 +178,7 @@ class OnlineCells:
         if row["outcome"]=="accepted":
             cell["populations"].update(self._strata(row,cell))
 
-    def delivery(self,row,owd_ns,uncertainty_ns,expected_ns=None):
+    def delivery(self,row,owd_ns,uncertainty_ns,expected_ns=None,raw_owd_ns=None):
         cell=self._cell(row)
         if cell is None:
             return
@@ -206,9 +206,11 @@ class OnlineCells:
         cell["uncertainty"]=max(cell["uncertainty"],uncertainty_ns)
         main=self._main(row,cell)
         for name in names:
-            group=cell["groups"].setdefault(name,(Histogram(),Histogram()))
+            group=cell["groups"].setdefault(name,(Histogram(),Histogram(),Histogram(),Histogram()))
             group[0].add(error)
             group[1].add(abs(error))
+            group[2].add(owd_ns if raw_owd_ns is None else raw_owd_ns)
+            group[3].add(owd_ns)
         if main:
             if len(cell["errors"])>=self.sample_capacity:
                 cell["incomplete"].add("timing_sample_capacity")
@@ -282,8 +284,9 @@ class OnlineCells:
             failures=list(cell["failures"])+[name for name,gate in gates.items() if gate["status"]=="FAIL"]
             incomplete=sorted(cell["incomplete"])
             state="INCONCLUSIVE" if incomplete else "FAIL" if failures else "INCONCLUSIVE" if any(gate["status"]=="INCONCLUSIVE" for gate in gates.values()) else "PASS"
-            groups={name:dict(n=signed.n,signed_error=signed.snapshot(),absolute_error=absolute.snapshot())
-                    for name,(signed,absolute) in cell["groups"].items()}
+            groups={name:dict(n=signed.n,signed_error=signed.snapshot(),absolute_error=absolute.snapshot(),
+                             raw_owd=raw.snapshot(),corrected_owd=corrected.snapshot())
+                    for name,(signed,absolute,raw,corrected) in cell["groups"].items()}
             for name,population in cell["populations"].items():
                 group=groups.setdefault(name,dict(n=0))
                 group.update(population=population,datapath_lost=cell["lost_groups"][name],
