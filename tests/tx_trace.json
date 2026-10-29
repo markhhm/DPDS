@@ -1,0 +1,77 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "cable",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 10,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
+    },
+    {
+      "name": "leo-hold",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 0,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": {
+        "path": "fixtures/trace-hold.json",
+        "sha256": "c6e36b656330d6eb9d32bd3a3659a5a7c11913cab2228c9243688bf9e4d2ec80"
+      }
+    },
+    {
+      "name": "leo-drop",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 102,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 0,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": {
+        "path": "fixtures/trace-drop.json",
+        "sha256": "ec11da5432b86686ad75505b328b04fd984d0ab83b62135e3b29a4acce1fe07d"
+      }
+    }
+  ]
+}

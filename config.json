@@ -1,20 +1,93 @@
 {
-    "buffer_capacity": 1000000,
-    "reordering": false,
-    "delayer": {
-        "distribution": "NormalDistribution",
-        "mean_ns": 10000000,
-        "std_ns": 3000000,
-        "activate_correlation": true,
-        "half_life_period_ns": 30000000
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "cable-forward",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 8000000,
+        "q_bytes": 6400,
+        "t_ns": 100000,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 256,
+        "storage_capacity_bytes": 512000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
     },
-    "limiter": {
-        "mode": "Spacer",
-        "activate": false,
-        "rate_bps": 100000000000,
-        "limit_bit": 6152000000
+    {
+      "name": "cable-reverse",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 8000000,
+        "q_bytes": 6400,
+        "t_ns": 100000,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 256,
+        "storage_capacity_bytes": 512000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
     },
-    "loss_model": {
-        "Random": 0.00
+    {
+      "name": "leo-forward",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 8000000,
+        "q_bytes": 6400,
+        "t_ns": 100000,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 256,
+        "storage_capacity_bytes": 512000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
+    },
+    {
+      "name": "leo-reverse",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 101,
+      "model": {
+        "c_bps": 8000000,
+        "q_bytes": 6400,
+        "t_ns": 100000,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 256,
+        "storage_capacity_bytes": 512000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": null
     }
+  ]
 }

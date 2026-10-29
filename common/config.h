@@ -6,12 +6,12 @@
 // -------------------------------------------
 // Static settings
 // -------------------------------------------
-#define RX_RING_SIZE 65535
-#define TX_RING_SIZE 65535
-#define NUM_MBUFS ((1024 * 1024) - 1)
-#define MBUF_CACHE_SIZE 512 // Maximum cache size
-#define SCHED_RX_RING_SZ 65535
-#define SCHED_TX_RING_SZ 65535
+#define RX_RING_SIZE 256
+#define TX_RING_SIZE 256
+
+#define MBUF_CACHE_SIZE 32
+#define SCHED_RX_RING_SZ 1024
+#define SCHED_TX_RING_SZ 1024
 // Same as in config.json
 #define MAX_BURST_SIZE 16
 // Number of histogram buckets for burst size tracking.
@@ -28,16 +28,12 @@
 // Global defaults
 // -------------------------------------------
 // Mostly copied from distributor example application.
+#define TX_PENDING_PER_LINE 256
+#define TERMINAL_TIMEOUT_NS UINT64_C(1000000000)
+#define SHUTDOWN_TIMEOUT_NS UINT64_C(5000000000)
 static const struct rte_eth_conf default_port_configuration = {
-	.rxmode = {
-		.mq_mode = RTE_ETH_MQ_RX_RSS,
-	},
-	.txmode = {
-		.mq_mode = RTE_ETH_MQ_TX_NONE,
-	},
-	.rx_adv_conf = {.rss_conf = {
-						.rss_hf = RTE_ETH_RSS_IP | RTE_ETH_RSS_UDP | RTE_ETH_RSS_TCP | RTE_ETH_RSS_SCTP,
-					}},
+    .rxmode = { .mq_mode = RTE_ETH_MQ_RX_NONE, .offloads = 0 },
+    .txmode = { .mq_mode = RTE_ETH_MQ_TX_NONE, .offloads = 0 },
 };
 
-#endif // CONFIG_H
+#endif

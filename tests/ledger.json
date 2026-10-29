@@ -1,0 +1,30 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "cable-forward",
+      "ingress_port": 7,
+      "egress_port": 13,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 8000000000,
+        "q_bytes": 80,
+        "t_ns": 0,
+        "delta_ns": 0,
+        "p": "0",
+        "seed": 1,
+        "storage_capacity_packets": 32,
+        "storage_capacity_bytes": 64000
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 1
+      },
+      "trace": {
+        "path": "fixtures/trace-loss.json",
+        "sha256": "b0c5a477e0a6ef930d337d0bcd1d16ca541aff4133e2e02ff109ca58699e6162"
+      }
+    }
+  ]
+}

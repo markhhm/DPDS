@@ -1,0 +1,26 @@
+{
+  "schema": "hng-trace-v1",
+  "source_id": "synthetic-delay-and-outage",
+  "direction": "forward",
+  "units": "ns_owd",
+  "conversion": "Hand-written integer fixture; no splice or RTT conversion.",
+  "source_sha256": "517b4d3777995dc7932d6dc1b0c134378108c94c176208e385adcb5efd669cc2",
+  "splice_policy": "natural_hold",
+  "trace_epoch_ns": 0,
+  "time_scale": 1,
+  "profile": {
+    "end_ns": 1000000000000,
+    "terminal": "error",
+    "terminal_horizon_ns": null,
+    "loss_seed": 42,
+    "outage_action": "drop",
+    "rows": [
+      {
+        "at_ns": 0,
+        "t_ns": 0,
+        "loss": "1",
+        "outage": false
+      }
+    ]
+  }
+}

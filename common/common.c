@@ -5,6 +5,8 @@
 
 #include <rte_ethdev.h>
 #include <rte_ether.h>
+#include <rte_cycles.h>
+#include <string.h>
 
 #include "common.h"
 #include "config.h"
@@ -12,9 +14,73 @@
 // -------------------------------------------
 // Global quit signals
 // -------------------------------------------
-volatile uint8_t quit_signal_receive;
-volatile uint8_t quit_signal_worker;
-volatile uint8_t quit_signal_transmit;
+_Atomic uint8_t quit_signal_receive, quit_signal_worker, quit_signal_transmit;
+struct host_context host;
+
+uint64_t host_now_ns(void)
+{
+    return (uint64_t)(((__uint128_t)(rte_get_timer_cycles() - host.epoch_cycles)
+        * UINT64_C(1000000000)) / host.cycles_hz);
+}
+
+void host_invalidate(const char *reason)
+{
+    if (!atomic_exchange(&host.invalid, true)) fprintf(stderr, "INVALID RUN: %s\n", reason);
+    quit_signal_receive = 1;
+}
+
+bool host_load(const char *path)
+{
+    memset(&host, 0, sizeof(host));
+    host.epoch_cycles = rte_get_timer_cycles();
+    host.cycles_hz = rte_get_timer_hz();
+    host.engine = hng_engine_load(path);
+    if (!host.engine) return false;
+    host.line_count = hng_engine_line_count(host.engine);
+    for (size_t i = 0; i < host.line_count; ++i) {
+        if (!hng_engine_line_info(host.engine, i, &host.lines[i])) return false;
+        host.policies[i] = hng_tx_policy_new(host.engine, i);
+        if (!host.policies[i]) return false;
+    }
+    return true;
+}
+
+void host_cleanup(void)
+{
+    for (size_t i = 0; i < host.line_count; ++i) hng_tx_policy_destroy(host.policies[i]);
+    if (!hng_engine_destroy(host.engine)) {
+        host_invalidate("forced service ledger abort at final destroy");
+        for (size_t line = 0; line < host.line_count; ++line) {
+            struct HngStats stats;
+            if (hng_engine_stats(host.engine, line, &stats))
+                fprintf(stderr, "abort line=%zu outstanding_q_l2_bytes=%"PRIu64"\n", line, stats.q_bytes);
+        }
+        if (!hng_engine_abort_destroy(host.engine)) host_invalidate("payload remains at forced destroy");
+    }
+    host.engine = NULL;
+}
+
+/* All fields are atomic: a seqlock alone would leave C data races. */
+void host_publish(uint16_t port, uint64_t enqueued, uint64_t watermark)
+{
+    struct ingress_frontier *f = &host.frontier[port];
+    atomic_fetch_add_explicit(&f->version, 1, memory_order_seq_cst);
+    atomic_store_explicit(&f->enqueued, enqueued, memory_order_seq_cst);
+    atomic_store_explicit(&f->watermark_ns, watermark, memory_order_seq_cst);
+    atomic_fetch_add_explicit(&f->version, 1, memory_order_seq_cst);
+}
+
+bool host_frontier(uint16_t port, uint64_t consumed, uint64_t *watermark)
+{
+    struct ingress_frontier *f = &host.frontier[port];
+    uint64_t v = atomic_load_explicit(&f->version, memory_order_seq_cst);
+    if (v & 1) return false;
+    uint64_t enqueued = atomic_load_explicit(&f->enqueued, memory_order_seq_cst);
+    uint64_t w = atomic_load_explicit(&f->watermark_ns, memory_order_seq_cst);
+    if (v != atomic_load_explicit(&f->version, memory_order_seq_cst) || consumed < enqueued) return false;
+    *watermark = w;
+    return true;
+}
 
 // -------------------------------------------
 // Signal handling
@@ -23,9 +89,6 @@ void signal_handler(int signum)
 {
     if (signum == SIGINT || signum == SIGTERM)
     {
-        // The shutdown process needs to follow the pipeline order:
-        // Receive > Worker > Transmit > main thread
-        // -> Start with the receive core.
         quit_signal_receive = 1;
     }
 }
@@ -62,13 +125,6 @@ int initialize_port(uint16_t port, struct rte_mempool *mbuf_pool)
         printf("Could not get device info for port %u: %s\n", port, rte_strerror(-error_code));
         return error_code;
     }
-
-    // If the port has TX offload capabilities, we want to use them.
-    if (device_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
-        port_configuration.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
-
-    // Store information about RSS hashing capabilities.
-    port_configuration.rx_adv_conf.rss_conf.rss_hf &= device_info.flow_type_rss_offloads;
 
     // Now configure the device based on the accumulated config.
     error_code = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_configuration);
@@ -140,8 +196,6 @@ int close_port(uint16_t port)
         return -1;
 
     error_code = rte_eth_dev_stop(port);
-    if (error_code != 0)
-        return error_code;
-
-    return 0;
+    if (error_code != 0) return error_code;
+    return rte_eth_dev_close(port);
 }
