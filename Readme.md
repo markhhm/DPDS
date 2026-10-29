@@ -189,17 +189,30 @@ unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
 `ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port.
 
-`hng-sched-bench` times the production `worker_step_at()` per packet on one
-lcore with real mbufs and a fixture clock: 1518-byte frames back to back at
-100 Gbit/s per direction, cable and LEO VLANs alternating, p = 0.01. It reports
-p50/p99 ns per packet for one owner of all four lines and for each
-per-ingress-port owner. The owners run one after another on one core, so the
-numbers exclude cross-core effects. Run it from the build directory:
+`hng-sched-bench` times the production `worker_step_at()` per packet with real
+mbufs and a fixture clock: 1518-byte frames back to back, cable and LEO VLANs
+alternating. It runs one owner of all four lines on one lcore, then one owner
+per ingress port on two lcores at the same time, and reports p50/p99 ns per
+packet with the CPU each owner ran on. Each owner generates its input untimed
+and recycles its own mbufs. Two fixtures:
+
+- `sched_bench.json` (default): 100 Gbit/s arrivals, t = 1 / 1.5 ms,
+  delta = 2 ms, p = 0.01; about 10,000 packets in flight per owner.
+- `sched_bench_prod.json`: t = 142 ms, delta = 320 ms, p = 0.01, Q = 50 ms.
+  Arrivals at 25 Gbit/s per direction (`-g 493440`) keep about 294,000 packets
+  in flight per owner, a quarter of 100G, so that the run fits in about 2.1 GB.
 
 ```sh
-cd build && python3 ../tests/eal_args.py ./hng-sched-bench --no-pci --no-huge \
-  --no-telemetry -m 512 --file-prefix=hng-sched -- -n 4000000 -r 3
+cd build
+python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 -- -r 3
+python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 --memory 1800 -- \
+  -c sched_bench_prod.json -g 493440 -n 3000000 -w 470000000 -m 640000 -r 3
 ```
+
+The mbuf pool lets objects straddle pages, so its stride matches a hugepage
+pool. Setting `HNG_BENCH_THP=1` (EAL memory) and
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1` (core heap) asks for transparent huge
+pages, which is closer to a hugepage deployment; both are process hints only.
 The scheduling-core microbenchmark is in the core README.
 
 `hng-pool-calc` sizes the mbuf pool and core metadata per NUMA node. The host
