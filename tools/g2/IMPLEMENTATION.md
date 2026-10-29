@@ -140,3 +140,8 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
 - Typed counter normalization verifies complete source seals, start/end deltas,
   descriptor semantics, latched periodic resets, drain and observer accounting.
   It retains bounded scope state and preserves unavailable values as null.
+- The volatile identity/outcome index follows the Core fe20ae2 proposal: explicit
+  entry cap, no disk fallback/full packet history, teardown on completion/abort,
+  heap formulas and per-cell join_overflow that always prevents a cell PASS.
+  It returns classification facts; source health and active joins remain caller
+  responsibilities. The normal hardware path is still not qualified.

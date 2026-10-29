@@ -223,3 +223,12 @@ class RegistrationTests(unittest.TestCase):
             parsed, traces = load_config(path, contents=checked)
             self.assertEqual(parsed, config())
             self.assertEqual(traces, {})
+
+    def test_proposed_identity_index_limit_is_positive_and_explicit(self):
+        registration = manifest()
+        registration["capacity"]["identity_index_capacity"] = 1_000_000
+        validate_registration(registration, config())
+        for value in (0, True, -1):
+            registration["capacity"]["identity_index_capacity"] = value
+            with self.subTest(value=value):
+                self.assert_invalid(registration)

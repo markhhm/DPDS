@@ -43,6 +43,25 @@ fixtures can explicitly select full retention. `online.ReceiveOrder` reconstruct
 wire order from `receive_seq` within a registered bound, independently of export
 line order. Its gaps remain incomplete evidence.
 
+`identity_index.IdentityIndex` implements the bounded volatile index proposal
+in Core `fe20ae2`. It requires an explicit positive
+`capacity.identity_index_capacity`. It retains only exact identity keys and
+compact outcome/delivery/cell tags in memory. It never writes an index to disk
+or retains a packet dictionary. `finish()` and context-manager teardown release
+all entries, including on abort. The report retains counts and explicit heap
+and capacity formulas, measured object/table widths and runtime version; shared
+objects are conservatively counted more than once. Allocator/RSS qualification
+is separate from this estimate.
+
+The index does not evict known outcomes during a run. At the cap it refuses new
+keys and counts `join_overflow`. Later unknown keys in that direction are
+ambiguous and remain overflow evidence; an unknown original phase affects all
+possible cells. `OnlineCells.finish(identity_index=INDEX_REPORT)` checks run and
+exact cell inventory, records the counts and makes affected cells INCONCLUSIVE,
+even if every numeric gate passes or another numeric failure exists. Receiver
+classification facts still require complete upstream capture evidence before
+the caller can issue a data-path verdict. Full join/host integration remains open.
+
 Normal storage must use the registered streaming oracle and 1/1024 main sample.
 Complete streams are a transport into that oracle, not a default disk archive.
 Full persistence is an explicit bounded debug option. The provisional reporter

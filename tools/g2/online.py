@@ -236,7 +236,26 @@ class OnlineCells:
             else:
                 cell["incomplete"].add(code)
 
-    def finish(self):
+    def finish(self,identity_index=None):
+        if identity_index is not None:
+            if (identity_index.get("schema")!="hng-g2-identity-index-v1"
+                    or identity_index.get("run")!=self.manifest["run"]
+                    or identity_index.get("released") is not True):
+                raise ValueError("identity index report has mixed run/schema or is still active")
+            seen=set()
+            for row in identity_index["cells"]:
+                key=row["direction"],row["line"],row["phase"]
+                if key not in self.cells or key in seen:
+                    raise ValueError("identity index has unregistered/duplicate cell")
+                seen.add(key)
+                count=uint(row["join_overflow"],"join overflow")
+                self.cells[key]["counts"]["join_overflow"]=count
+                if count:
+                    self.cells[key]["incomplete"].add("join_overflow")
+            if seen!=set(self.cells):
+                raise ValueError("identity index report is missing registered cells")
+            if sum(self.cells[key]["counts"]["join_overflow"] for key in seen)<uint(identity_index["join_overflow"],"join overflow"):
+                raise ValueError("identity index overflow has no affected cell")
         rows=[]
         for (direction,line,phase),cell in self.cells.items():
             counts=cell["counts"]
@@ -278,5 +297,5 @@ class OnlineCells:
                 reason_codes=incomplete,observed_failures=failures,
                 q=dict(peak_l2_bytes=cell["q_peak"],peak_drain_ns_at_c=cell["q_drain"])))
         status="FAIL" if any(row["status"]=="FAIL" for row in rows) else "INVALID" if any(row["status"]!="PASS" for row in rows) else "PASS"
-        return dict(status=status,rows=rows,scope=self.manifest["scope"],g2_qualified=False,
+        return dict(status=status,rows=rows,scope=self.manifest["scope"],g2_qualified=False,identity_index=identity_index,
                     banner="software-only, not G2" if self.manifest["scope"]=="software-only" else "requires complete physical evidence")
