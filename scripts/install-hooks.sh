@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 destination=$(git rev-parse --git-path hooks)/pre-push
