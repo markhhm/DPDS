@@ -55,6 +55,8 @@ bool host_frontier(uint16_t port, uint64_t consumed, uint64_t *watermark);
 
 struct rx_stats {
     uint64_t received, received_bytes, enqueued, rx_ring_drops, rx_ring_drop_bytes;
+    /* Polls skipped because that port's scheduler ring had no room; indexed like host.ports. */
+    uint64_t ring_full_skips[2];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
 struct worker_stats {

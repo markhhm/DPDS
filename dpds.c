@@ -59,6 +59,7 @@ static void report(FILE *out, struct pipeline_stats *s)
         s->tx.tx_drop_bytes + s->tx.trace_outage_bytes;
     bool bytes_conserved = s->rx.received_bytes == drop_bytes + s->tx.transmitted_bytes;
     if (!bytes_conserved) host_invalidate("software byte conservation failed");
+    fprintf(out, "rx_ring_full_skips=%"PRIu64",%"PRIu64"\n", s->rx.ring_full_skips[0], s->rx.ring_full_skips[1]);
     fprintf(out, "submit_late_packets=%"PRIu64" submit_late_total_ns=%"PRIu64" submit_late_max_ns=%"PRIu64"\n",
         s->tx.late_submit_packets, s->tx.late_submit_total_ns, s->tx.late_submit_max_ns);
     fprintf(out, "rx=%"PRIu64" rx_bytes=%"PRIu64" tx_accepted=%"PRIu64" tx_bytes=%"PRIu64
