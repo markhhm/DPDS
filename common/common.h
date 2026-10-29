@@ -94,6 +94,8 @@ void signal_handler(int signum);
 int host_prepare_port(uint16_t port);
 unsigned host_pool_objects(uint16_t ingress_port, unsigned lcores);
 /* The production per-ingress-port mbuf pool on the port's NUMA node; NULL on failure. */
+/* NIC-side receive loss (imissed, rx_nombuf) is infrastructure loss: invalidate, return false. */
+bool host_check_nic_loss(uint16_t port, const struct rte_eth_stats *stats);
 struct rte_mempool *host_create_pool(uint16_t ingress_port, unsigned lcores, int *socket);
 int initialize_port(uint16_t port, struct rte_mempool *pool);
 int close_port(uint16_t port);

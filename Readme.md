@@ -287,7 +287,10 @@ for each distinct mapped egress. Port setup uses those same descriptor counts.
 Startup prints the actual object footprint and NUMA node. It does not reserve a fixed 32 GiB.
 Cross-NUMA egress DMA remains possible.
 
-The RX producer waits for handoff space before another burst. An unexpected
+RX skips a port whose scheduler ring lacks room for a burst, so the other
+direction keeps flowing. `rx_ring_full_skips` counts skipped polls, not
+packets: the skipped frames stay in the NIC queue. If that queue overflows the
+NIC counts `imissed`; any nonzero `imissed` or `rx_nombuf` invalidates the run. An unexpected
 short ring enqueue invalidates the run and counts its discarded suffix.
 The TX backlog permits 1024 packets per line (about 126 us at 8.127 Mpps,
 estimate), and each port requests 1024 TX descriptors. An exhausted backlog

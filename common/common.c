@@ -153,6 +153,14 @@ unsigned host_pool_objects(uint16_t port, unsigned lcores)
     return (unsigned)count;
 }
 
+bool host_check_nic_loss(uint16_t port, const struct rte_eth_stats *n)
+{
+    if (!n->imissed && !n->rx_nombuf) return true;
+    fprintf(stderr, "nic=%u imissed=%" PRIu64 " rx_nombuf=%" PRIu64 "\n", port, n->imissed, n->rx_nombuf);
+    host_invalidate("NIC dropped received frames (imissed or rx_nombuf)");
+    return false;
+}
+
 struct rte_mempool *host_create_pool(uint16_t port, unsigned lcores, int *socket)
 {
     unsigned count = host_pool_objects(port, lcores);

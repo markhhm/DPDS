@@ -37,6 +37,15 @@ int main(int argc, char **argv)
     assert(rte_ring_count(rings[1]) >= MAX_BURST_SIZE);
     assert(stats.rx.ring_full_skips[0] == 3 && stats.rx.ring_full_skips[1] == 0);
     assert(rte_ring_full(rings[0]) && stats.rx.rx_ring_drops == 0 && !host.invalid);
+    /* NIC-side loss after a deferred poll (imissed) or a pool shortage (rx_nombuf) invalidates. */
+    struct rte_eth_stats nic = {0};
+    assert(host_check_nic_loss(0, &nic) && !host.invalid);
+    nic.imissed = 1;
+    assert(!host_check_nic_loss(0, &nic) && host.invalid);
+    host.invalid = false;
+    nic = (struct rte_eth_stats){.rx_nombuf = 2};
+    assert(!host_check_nic_loss(1, &nic) && host.invalid);
+    host.invalid = false;
     void *m;
     while (rte_ring_dequeue(rings[1], &m) == 0) rte_pktmbuf_free(m);
     for (uint16_t p = 0; p < 2; ++p) assert(close_port(p) == 0);

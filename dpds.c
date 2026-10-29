@@ -59,6 +59,11 @@ static void report(FILE *out, struct pipeline_stats *s)
         s->tx.tx_drop_bytes + s->tx.trace_outage_bytes;
     bool bytes_conserved = s->rx.received_bytes == drop_bytes + s->tx.transmitted_bytes;
     if (!bytes_conserved) host_invalidate("software byte conservation failed");
+    /* Check NIC loss before the status line, so it is reported as INVALID. */
+    for (uint16_t i = 0; i < host.port_count; ++i) {
+        struct rte_eth_stats n;
+        if (rte_eth_stats_get(host.ports[i], &n) == 0) host_check_nic_loss(host.ports[i], &n);
+    }
     fprintf(out, "rx_ring_full_skips=%"PRIu64",%"PRIu64"\n", s->rx.ring_full_skips[0], s->rx.ring_full_skips[1]);
     fprintf(out, "submit_late_packets=%"PRIu64" submit_late_total_ns=%"PRIu64" submit_late_max_ns=%"PRIu64"\n",
         s->tx.late_submit_packets, s->tx.late_submit_total_ns, s->tx.late_submit_max_ns);
