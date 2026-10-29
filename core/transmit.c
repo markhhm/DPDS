@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
@@ -174,6 +175,18 @@ bool tx_has_backlog(const struct tx_state *s)
 void tx_state_cleanup(struct tx_state *s)
 {
     while (tx_has_backlog(s)) tx_step(s, NULL, 0);
+}
+
+void tx_stats_merge(struct tx_stats *dst, const struct tx_stats *src)
+{
+    /* Every field is a uint64_t counter (the struct is only uint64_t and their arrays). */
+    uint64_t *d = (uint64_t *)dst;
+    const uint64_t *s = (const uint64_t *)src;
+    for (size_t i = 0; i < sizeof(*dst) / sizeof(uint64_t); ++i) {
+        size_t at = i * sizeof(uint64_t);
+        bool peak = at == offsetof(struct tx_stats, pending_peak) || at == offsetof(struct tx_stats, late_submit_max_ns);
+        d[i] = peak ? (d[i] > s[i] ? d[i] : s[i]) : d[i] + s[i];
+    }
 }
 
 int lcore_transmit(struct lcore_parameters *parameters)

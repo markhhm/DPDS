@@ -81,8 +81,12 @@ struct tx_stats {
 } __attribute__((aligned(64)));
 _Static_assert(_Alignof(struct tx_stats) == 64 && sizeof(struct tx_stats) % 64 == 0,
     "tx_stats owners write different cache lines");
-/* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts. */
-struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2]; };
+/* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts;
+ * rx_owners[k] and tx_owners[k] those of direction k's RX and TX lcores (7 lcores). */
+struct pipeline_stats {
+    struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2];
+    struct rx_stats rx_owners[2]; struct tx_stats tx_owners[2];
+};
 struct lcore_parameters {
     unsigned int worker_id;
     struct rte_ring *receive_worker_ring, *worker_transmit_ring;

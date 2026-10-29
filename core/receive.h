@@ -14,5 +14,7 @@ void rx_publish(struct rx_state *s, uint16_t enqueued);
 /* Poll the next port once. A port whose scheduler ring lacks room for a burst is
  * skipped (counted, left in its NIC queue), so it cannot stall the other port. */
 uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, struct rte_mbuf **batch);
+/* Add one RX lcore's counters to dst. */
+void rx_stats_merge(struct rx_stats *dst, const struct rx_stats *src);
 int lcore_receive(struct lcore_parameters *parameters);
 #endif

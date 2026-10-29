@@ -64,6 +64,14 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
     return count;
 }
 
+void rx_stats_merge(struct rx_stats *dst, const struct rx_stats *src)
+{
+    /* Every field is a uint64_t counter. */
+    uint64_t *d = (uint64_t *)dst;
+    const uint64_t *s = (const uint64_t *)src;
+    for (size_t i = 0; i < sizeof(*dst) / sizeof(uint64_t); ++i) d[i] += s[i];
+}
+
 int lcore_receive(struct lcore_parameters *parameters)
 {
     struct rx_state rx;

@@ -20,5 +20,7 @@ void tx_step(struct tx_state *s, struct rte_mbuf **batch, uint16_t count);
 void tx_step_at(struct tx_state *s, struct rte_mbuf **batch, uint16_t count, uint64_t now);
 bool tx_has_backlog(const struct tx_state *s);
 void tx_state_cleanup(struct tx_state *s);
+/* Add one TX lcore's counters to dst; peaks are maxima. */
+void tx_stats_merge(struct tx_stats *dst, const struct tx_stats *src);
 int lcore_transmit(struct lcore_parameters *parameters);
 #endif

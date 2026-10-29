@@ -9,6 +9,14 @@
  * Per egress, both give identical (sequence, VLAN, length, release, deadline,
  * departure) records; line and worker counters also match.
  *
+ * Every owner's output also goes through the production TX step. Layouts 1 and
+ * 2 share one TX state; layout 3 (one RX, scheduler and TX lcore per direction)
+ * gives each owner its own TX state and counters, merged afterwards. A packet's
+ * departure is the tick of the TX burst that sent it; TX must drain every call.
+ * TX totals and per-line counts match across all three layouts; burst sizes
+ * follow the scheduler's call batching, so layout 3 matches layout 2 on every
+ * TX counter.
+ *
  * The single-owner output must also match a golden digest from the pre-M4
  * scheduler (DPDS d75f4fc). Regenerate it by building this file with
  * -DSPLIT_PRE_M4 against that revision and running it with SPLIT_GOLDEN_WRITE=path.
@@ -20,6 +28,9 @@
 #include <string.h>
 #include <rte_eal.h>
 #include "../core/worker.h"
+#ifndef SPLIT_PRE_M4
+#include "../core/transmit.h"
+#endif
 
 #define PACKETS 6000
 #define TICKS (PACKETS / MAX_BURST_SIZE + 64)
@@ -63,6 +74,18 @@ static unsigned collect(struct output *o, struct rte_mbuf **m, unsigned n, uint6
     return n;
 }
 
+#ifndef SPLIT_PRE_M4
+/* The TX burst function records departures at the current tick instead of a NIC. */
+static struct output *tx_out;
+static uint64_t tx_now;
+static uint16_t capture(uint16_t port, uint16_t queue, struct rte_mbuf **m, uint16_t n)
+{
+    (void)queue;
+    assert(n && m[0]->port == port);
+    return (uint16_t)collect(tx_out, m, n, tx_now);
+}
+#endif
+
 static uint64_t digest(const struct output *o)
 {
     uint64_t h = 0xcbf29ce484222325ull; /* FNV-1a over the record fields, in a fixed order */
@@ -77,9 +100,23 @@ static uint64_t digest(const struct output *o)
 
 struct totals { uint64_t sent, emulator_drops, tx_ring_drops; };
 
-/* owners == 1: one worker owns all lines. owners == 2: one worker per ingress port. */
-static void run(unsigned owners, struct output o[2], struct HngStats lines[HNG_MAX_LINES], struct totals *t)
+#ifndef SPLIT_PRE_M4
+/* Hand n scheduler outputs to TX at the same tick; returns n so callers loop until idle. */
+static unsigned to_tx(struct tx_state *tx, struct rte_mbuf **m, unsigned n, uint64_t now)
 {
+    tx_now = now;
+    tx_step_at(tx, m, (uint16_t)n, now);
+    assert(!tx_has_backlog(tx));
+    return n;
+}
+#endif
+
+/* layout 1: one worker owns all lines. 2: one worker per ingress port, shared TX.
+ * 3: one worker and one TX state per ingress port. tx receives the merged TX counters. */
+static void run(unsigned layout, struct output o[2], struct HngStats lines[HNG_MAX_LINES], struct totals *t,
+    struct tx_stats *tx_total)
+{
+    unsigned owners = layout == 1 ? 1 : 2;
     assert(host_load("split.json"));
 #ifdef SPLIT_PRE_M4
     assert(owners == 1);
@@ -96,8 +133,20 @@ static void run(unsigned owners, struct output o[2], struct HngStats lines[HNG_M
     /* Owners hold handles only for their own lines. */
     for (unsigned k = 0; k < owners; ++k)
         for (size_t i = 0; i < host.line_count; ++i) assert((w[k].line[i] != NULL) == w[k].owned[i]);
+    static struct pipeline_stats tx_counters[2];
+    memset(tx_counters, 0, sizeof(tx_counters));
+    struct tx_state tx[2];
+    for (unsigned k = 0; k < 2; ++k) { tx_state_init(tx + k, tx_counters + k); tx[k].burst = capture; }
+    tx_out = o;
 #endif
     uint64_t last[2] = {0}, consumed[2] = {0}, now = 0;
+#ifdef SPLIT_PRE_M4
+#define emit(wk, in, n, out, now) collect(o, out, worker_step_at(wk, in, n, out, now), now)
+#else
+    /* Layout 3: owner k's output goes to TX state k; otherwise to TX state 0. */
+#define emit(wk, in, n, out, now) to_tx(tx + (layout == 3 ? (unsigned)((wk) - w) : 0), \
+    out, worker_step_at(wk, in, n, out, now), now)
+#endif
     struct rte_mbuf *in[2][MAX_BURST_SIZE], *out[MAX_BURST_SIZE];
     for (unsigned b = 0; b < TICKS; ++b) {
         unsigned n[2];
@@ -117,17 +166,24 @@ static void run(unsigned owners, struct output o[2], struct HngStats lines[HNG_M
             /* Each port's frontier certifies its newest arrival once its owner consumes the tick. */
             for (unsigned p = 0; p < 2; ++p)
                 if (owners == 1 || p == k) host_publish((uint16_t)p, consumed[k], last[p]);
-            unsigned e = collect(o, out, worker_step_at(w + k, input, (uint16_t)count, out, now), now);
-            while (e) e = collect(o, out, worker_step_at(w + k, NULL, 0, out, now), now);
+            unsigned e = emit(w + k, input, (uint16_t)count, out, now);
+            while (e) e = emit(w + k, NULL, 0, out, now);
         }
     }
     for (unsigned k = 0; k < owners; ++k) worker_end_input(w + k);
     now += 1000000000;
     for (unsigned k = 0; k < owners; ++k) {
-        while (collect(o, out, worker_step_at(w + k, NULL, 0, out, now), now)) {}
+        while (emit(w + k, NULL, 0, out, now)) {}
         assert(!worker_has_backlog(w + k));
     }
+#undef emit
     *t = (struct totals){0};
+#ifndef SPLIT_PRE_M4
+    memset(tx_total, 0, sizeof(*tx_total));
+    for (unsigned k = 0; k < 2; ++k) { assert(!tx_has_backlog(tx + k)); tx_stats_merge(tx_total, &tx_counters[k].tx); }
+#else
+    (void)tx_total;
+#endif
     for (unsigned k = 0; k < owners; ++k) {
         worker_state_cleanup(w + k);
         assert(stats[k].shutdown_drops == 0 && stats[k].invalid_drops == 0 && stats[k].storage_drops == 0);
@@ -147,7 +203,8 @@ int main(int argc, char **argv)
     static struct output single[2];
     struct HngStats a[HNG_MAX_LINES];
     struct totals ta;
-    run(1, single, a, &ta);
+    static struct tx_stats txa;
+    run(1, single, a, &ta, &txa);
     const char *write = getenv("SPLIT_GOLDEN_WRITE");
     if (write) {
         FILE *f = fopen(write, "w");
@@ -168,30 +225,50 @@ int main(int argc, char **argv)
         assert(single[p].n == count && digest(single + p) == hash);
     }
     fclose(golden);
-    static struct output split[2];
-    struct HngStats b[HNG_MAX_LINES];
-    struct totals tb;
-    run(2, split, b, &tb);
     uint64_t q_drops = 0, late = 0;
-    for (unsigned p = 0; p < 2; ++p) {
-        assert(single[p].n == split[p].n && single[p].n > 0);
-        assert(!memcmp(single[p].r, split[p].r, single[p].n * sizeof(struct record)));
-    }
-    assert(ta.sent == tb.sent && ta.emulator_drops == tb.emulator_drops && ta.tx_ring_drops == tb.tx_ring_drops);
-    for (unsigned i = 0; i < HNG_MAX_LINES; ++i) {
-        assert(a[i].accepted == b[i].accepted && a[i].q_drops == b[i].q_drops && a[i].dequeued == b[i].dequeued);
-        assert(a[i].selected_late == b[i].selected_late && a[i].q_high_water_bytes == b[i].q_high_water_bytes);
-        q_drops += a[i].q_drops; late += a[i].selected_late;
-    }
+    for (unsigned i = 0; i < HNG_MAX_LINES; ++i) { q_drops += a[i].q_drops; late += a[i].selected_late; }
     assert(q_drops > 0 && late > 0 && ta.emulator_drops == q_drops && ta.sent > 0);
+    assert(txa.transmitted == ta.sent && txa.tx_drops == 0 && txa.retries == 0);
+    /* Layout 2: scheduler per ingress port. Layout 3: also RX and TX per direction. */
+    static struct tx_stats txs;
+    for (unsigned layout = 2; layout <= 3; ++layout) {
+        static struct output split[2];
+        struct HngStats b[HNG_MAX_LINES];
+        struct totals tb;
+        static struct tx_stats txb;
+        memset(split, 0, sizeof(split));
+        run(layout, split, b, &tb, &txb);
+        for (unsigned p = 0; p < 2; ++p) {
+            assert(single[p].n == split[p].n && single[p].n > 0);
+            assert(!memcmp(single[p].r, split[p].r, single[p].n * sizeof(struct record)));
+        }
+        assert(ta.sent == tb.sent && ta.emulator_drops == tb.emulator_drops && ta.tx_ring_drops == tb.tx_ring_drops);
+        for (unsigned i = 0; i < HNG_MAX_LINES; ++i) {
+            assert(a[i].accepted == b[i].accepted && a[i].q_drops == b[i].q_drops && a[i].dequeued == b[i].dequeued);
+            assert(a[i].selected_late == b[i].selected_late && a[i].q_high_water_bytes == b[i].q_high_water_bytes);
+        }
+        /* Every TX counter, including per-line counts, peaks and burst histograms. */
+        /* TX counters: totals and per-line counts match the single owner. Burst sizes and
+         * pending_peak depend on how the scheduler calls batch output, so the per-direction
+         * TX layout must match the per-direction scheduler layout (2) on every field. */
+        assert(txa.received == txb.received && txa.received_bytes == txb.received_bytes);
+        assert(txa.transmitted == txb.transmitted && txa.transmitted_bytes == txb.transmitted_bytes);
+        assert(txa.tx_drops == txb.tx_drops && txa.retries == txb.retries && txa.trace_outage_drops == txb.trace_outage_drops);
+        assert(txa.late_submit_packets == txb.late_submit_packets && txa.late_submit_total_ns == txb.late_submit_total_ns);
+        assert(!memcmp(txa.line_transmitted, txb.line_transmitted, sizeof(txa.line_transmitted)));
+        assert(!memcmp(txa.line_transmitted_bytes, txb.line_transmitted_bytes, sizeof(txa.line_transmitted_bytes)));
+        if (layout == 2) txs = txb;
+        else assert(!memcmp(&txs, &txb, sizeof(txs)));
+    }
     /* Handles are taken in host_load before launch; taking one after launch fails the run. */
     assert(host_load("split.json") && !host.invalid);
     host_mark_launched();
     assert(!host_take_line_handles() && host.invalid);
     host_cleanup();
-    printf("single owner vs per-direction owners: egress0=%zu egress1=%zu sent=%" PRIu64 " q_drops=%" PRIu64
-        " late=%" PRIu64 " identical_records_departures_counters=PASS pre_m4_golden=PASS\n",
-        single[0].n, single[1].n, ta.sent, q_drops, late);
+    printf("single owner vs per-direction owners vs per-direction RX/scheduler/TX: egress0=%zu egress1=%zu"
+        " sent=%" PRIu64 " q_drops=%" PRIu64 " late=%" PRIu64 " digest0=%016" PRIx64 " digest1=%016" PRIx64
+        " identical_records_departures_counters=PASS pre_m4_golden=PASS\n",
+        single[0].n, single[1].n, ta.sent, q_drops, late, digest(single), digest(single + 1));
 #endif
     assert(rte_mempool_avail_count(pool) == 4095);
     rte_mempool_free(pool);
