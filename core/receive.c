@@ -14,6 +14,7 @@ uint16_t rx_step(struct rx_state *s, struct rte_mbuf **batch, uint16_t max_batch
 {
     uint16_t port = host.ports[s->next_port];
     s->last_port = port;
+    s->last_index = s->next_port;
     s->next_port = (s->next_port + 1) % host.port_count;
     uint16_t count = rte_eth_rx_burst(port, 0, batch, max_batch);
     for (uint16_t i = 0; i < count; ++i) {
@@ -34,8 +35,9 @@ uint16_t rx_step(struct rx_state *s, struct rte_mbuf **batch, uint16_t max_batch
 
 void rx_publish(struct rx_state *s, uint16_t enqueued)
 {
-    s->enqueued += enqueued;
-    host_publish(s->last_port, s->enqueued, s->last_watermark);
+    unsigned ring = s->split ? s->last_index : 0;
+    s->enqueued[ring] += enqueued;
+    host_publish(s->last_port, s->enqueued[ring], s->last_watermark);
 }
 
 int lcore_receive(struct lcore_parameters *parameters)
@@ -43,13 +45,15 @@ int lcore_receive(struct lcore_parameters *parameters)
     struct rx_state rx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     rx_state_init(&rx, parameters->stats);
+    rx.split = parameters->split;
     while (!quit_signal_receive) {
-        if (rte_ring_free_count(parameters->receive_worker_ring) < MAX_BURST_SIZE) {
+        struct rte_ring *ring = rx.split ? parameters->owner_rings[rx.next_port] : parameters->receive_worker_ring;
+        if (rte_ring_free_count(ring) < MAX_BURST_SIZE) {
             rte_pause();
             continue;
         }
         uint16_t count = rx_step(&rx, batch, MAX_BURST_SIZE);
-        uint16_t sent = rte_ring_enqueue_burst(parameters->receive_worker_ring,
+        uint16_t sent = rte_ring_enqueue_burst(ring,
             (void **)batch, count, NULL);
         rx.stats->enqueued += sent;
         if (sent != count) {

@@ -13,7 +13,7 @@ test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_arg
 common_sources = ['common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery']
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split']
   runner = executable(name + '-test', ['tests/' + name + '.c'] + common_sources,
     dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
@@ -36,7 +36,7 @@ test('io-oracle', io_oracle)
 io_pmd = executable('io-pmd-test', ['tests/io_pmd.c', 'tests/io_oracle.c'] + common_sources,
   dependencies: [dpdk, core, threads, ring_pmd], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
-foreach mode: ['pcap', 'ring', 'ring-stepped']
+foreach mode: ['pcap', 'ring', 'ring-stepped', 'ring-split', 'ring-stepped-split']
   test('io-' + mode, python, args: [meson.project_source_root() / 'tests/io_pmd.py', mode, io_pmd],
     timeout: 300, is_parallel: false)
 endforeach
@@ -48,6 +48,8 @@ ring_rate = executable('hng-ring-rate', ['perf/ring_rate.c', 'core/receive.c'] +
   dependencies: [dpdk, core, ring_pmd],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_rate.py', ring_rate],
+  timeout: 60, is_parallel: false)
+test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--split', ring_rate],
   timeout: 60, is_parallel: false)
 pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c'],
   dependencies: [dpdk, core], link_args: ['-lm'],

@@ -33,10 +33,14 @@ struct host_context {
     struct port_resources resources[RTE_MAX_ETHPORTS];
     uint64_t epoch_cycles, cycles_hz;
     _Atomic bool invalid;
+    /* The last scheduler to finish releases TX; 0 or 1 means a single scheduler. */
+    _Atomic int schedulers_running;
 };
 extern struct host_context host;
 uint64_t host_now_ns(void);
 bool host_load(const char *path);
+/* Per-direction owners need every egress port fed by lines of one ingress port. */
+bool host_split_valid(void);
 void host_cleanup(void);
 void host_invalidate(const char *reason);
 void host_publish(uint16_t port, uint64_t enqueued, uint64_t watermark);
@@ -60,12 +64,17 @@ struct tx_stats {
     uint64_t line_transmitted[HNG_MAX_LINES], line_transmitted_bytes[HNG_MAX_LINES];
     uint64_t burst_hist[BURST_HIST_BUCKETS];
 } __attribute__((aligned(64)));
-struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; };
+/* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts. */
+struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2]; };
 struct lcore_parameters {
     unsigned int worker_id;
     struct rte_ring *receive_worker_ring, *worker_transmit_ring;
     struct pipeline_stats *stats;
     uint16_t num_ports;
+    /* Split layout: one scheduler per ingress port host.ports[owner_index]. */
+    bool split;
+    uint16_t owner_index;
+    struct rte_ring *owner_rings[2];
 };
 void signal_handler(int signum);
 int host_prepare_port(uint16_t port);

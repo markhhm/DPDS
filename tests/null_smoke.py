@@ -9,7 +9,7 @@ import time
 from eal_args import eal_arguments
 
 binary = os.path.abspath(sys.argv[1])
-for cores in (2, 3, 4):
+for cores in (2, 3, 4, 5):
     for no_rx in (True, False):
         suffix = ",no-rx=1" if no_rx else ""
         command = [binary]+eal_arguments(cores)+["--no-pci", "--no-huge",

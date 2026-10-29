@@ -222,8 +222,8 @@ int main(int argc, char **argv)
         }
     }
     if (!x.c_bps || x.min_q < 64 || x.max_q > 1522 || x.min_q > x.max_q || !x.burst || x.lines < 1 ||
-        x.lines > 2 || x.lcores < 1 || x.lcores > 4) {
-        fputs("invalid parameters: need C > 0, 64 <= min <= max <= 1522, burst > 0, 1-2 lines, 1-4 lcores\n", stderr);
+        x.lines > 2 || x.lcores < 1 || x.lcores > 5) {
+        fputs("invalid parameters: need C > 0, 64 <= min <= max <= 1522, burst > 0, 1-2 lines, 1-5 lcores\n", stderr);
         return 2;
     }
     struct plan r = make_plan(&x);

@@ -154,8 +154,17 @@ Classifier rejection has a separate counter.
 | 2 | RX, worker, and TX share one worker core |
 | 3 | RX has one core; worker and TX share another core |
 | 4 | RX, worker, and TX each have one core |
+| 5 | RX and TX each have one core; one scheduler per ingress port |
 
 The main lcore waits for completion. It reads counters after the worker cores exit.
+
+The 5-lcore layout needs two ports, and every egress port must be fed by lines
+of only one ingress port (true for the usual cable/LEO pair in each direction).
+Each scheduler owns the lines of its ingress port through core line handles and
+has its own RX handoff ring; both feed one TX handoff ring. The four line states
+are independent, so per-egress output equals that of one scheduler: the `split`
+test compares both on the same input and clock schedule, and the `io-ring-split`
+and `io-ring-stepped-split` tests run the PMD integrity oracle with two owners.
 
 ## Performance tools
 
@@ -178,6 +187,7 @@ and t = 2 us per line, so the model does not limit the rate. The tool prints
 egress packets per second over the window `-d` after a warmup `-w`, and fails
 unless the run is conserved, drained and every mbuf is reclaimed. Without
 options after `--` it runs the short smoke check used by `meson test`.
+`ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port.
 The scheduling-core microbenchmark is in the core README.
 
 `hng-pool-calc` sizes the mbuf pool and core metadata per NUMA node. The host
