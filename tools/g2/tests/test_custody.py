@@ -153,6 +153,30 @@ class CustodyTests(unittest.TestCase):
         events[-1]["offered"].reverse()
         self.assertIn("tx_wrong_head", self.codes(self.audit(rows, events), "FAIL"))
 
+    def test_one_physical_queue_transfers_both_egresses_and_keeps_partial_suffix(self):
+        self.config["lines"].append(dict(self.config["lines"][0], name="reverse",
+                                         ingress_port=1, egress_port=0))
+        self.manifest["ports"].append(dict(ingress_port=1, egress_port=0,
+                                           link_bps=100_000_000_000, queue_id=0))
+        a, c = expected(), expected(1, release=200)
+        b = dict(expected(line="reverse"), ingress_port=1, egress_port=0, external_identity="r0")
+        events = [offer(a), offer(b), offer(c), dispatch([a], at=190),
+                  dict(dispatch([b], first=1, at=190), egress_port=0),
+                  dispatch([c], first=2, at=200),
+                  dict(attempt([b], handoffs=[1], at=250, consumed=3), egress_port=0),
+                  attempt([a,c], handoffs=[0,2], accepted=1, at=251, consumed=3),
+                  attempt([c], handoffs=[2], aid=1, at=252, consumed=3)]
+        for event in events:
+            if event["kind"] in {"dispatch", "attempt"}:
+                event["seen_next_ingress_seq"] = {"0":2, "1":1}
+                event["frontiers"] = {str(port):dict(through_ns=None, input_complete=True) for port in (0,1)}
+        audit = self.audit([a,b,c], events)
+        self.assertEqual(audit.issues, [])
+        self.assertTrue(audit.was_accepted(1, "r0"))
+        self.assertTrue(audit.was_accepted(0, "p1"))
+        events[-1]["egress_port"] = 0
+        self.assertIn("port_mapping", self.codes(self.audit([a,b,c], events), "INVALID"))
+
     def test_handoff_loss_is_failure_and_selection_gap_is_downstream_failure(self):
         a, b = expected(), expected(1)
         events = [terminal(a, "handoff_drop"), offer(b, actual=0),

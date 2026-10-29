@@ -85,7 +85,7 @@ class _Replay:
             if name in self.queues or not row["producer"] or not row["consumer"]:
                 result.issue("handoff_mapping", "INVALID")
             self.queues[name] = dict(config=row, next=0, consumed=0, producer=None,
-                                     consumer=None, egress=None)
+                                     consumer=None)
         self.attempts = {}
         self.snapshots = {}
         self.live = 0
@@ -299,9 +299,6 @@ class _Replay:
         if queue["producer"] not in {None, event["stream_id"]}:
             self.issue("handoff_multiple_producers", "INCONCLUSIVE", event)
         queue["producer"] = event["stream_id"]
-        if queue["egress"] not in {None, event["egress_port"]}:
-            self.issue("port_mapping", "INVALID", event)
-        queue["egress"] = event["egress_port"]
         if event["first_handoff_seq"] != queue["next"]:
             self.issue("dispatch_sequence", "INCONCLUSIVE", event)
         valid_snapshot = self.snapshot(event)
@@ -355,14 +352,12 @@ class _Replay:
             if queue["consumer"] not in {None, event["stream_id"]}:
                 self.issue("handoff_multiple_consumers", "INCONCLUSIVE", event)
             queue["consumer"] = event["stream_id"]
-            if queue["egress"] is not None and queue["egress"] != event["egress_port"]:
-                self.issue("port_mapping", "INVALID", event)
-                continue
             found = self.db.execute("SELECT COUNT(*) FROM dispatch_items WHERE handoff_queue_id=? AND handoff_seq>=? AND handoff_seq<?",
                                     (name, _number(start), _number(end))).fetchone()[0]
             if end > queue["next"] or found != end - start:
                 self.issue("missing_dispatch", "INCONCLUSIVE", event)
                 continue
+            # A physical FIFO prefix transfers all ports; each attempt arbitrates its own port.
             self.db.execute("UPDATE dispatch_items SET state='pending' WHERE handoff_queue_id=? AND handoff_seq>=? AND handoff_seq<? AND state='dispatched'",
                             (name, _number(start), _number(end)))
             queue["consumed"] = end
