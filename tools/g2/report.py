@@ -8,9 +8,10 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import sys
 
-from .reference import canonical, load_config, strict_json, uint
+from .reference import Reference, canonical, load_config, strict_json, uint
 
 DROP_FIELDS = ("q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_drop",
                "invalid_input_drop", "handoff_drop", "terminal_tx_drop",
@@ -83,6 +84,20 @@ def timing_gate(stats, name, threshold, uncertainty):
 def build_report(expected, summary, received, counters, config, manifest, traces=None):
     if not all(isinstance(value, dict) for value in (summary, counters, config, manifest)):
         raise ValueError("summary, counters, config and manifest must be JSON objects")
+    if (summary.get("schema") != "hng-g2-reference-draft-v1" or summary.get("kind") != "summary"
+            or not isinstance(summary.get("run"), str) or not summary["run"]):
+        raise ValueError("unsupported reference summary schema/kind/run")
+    uint(summary["event_count"], "event count")
+    for name in ("ingress_sha256", "config_sha256", "expected_sha256"):
+        if not isinstance(summary.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", summary[name]):
+            raise ValueError(f"invalid summary {name}")
+    digest = hashlib.sha256()
+    for row in expected:
+        if not isinstance(row, dict) or row.get("kind") != "expected" or row.get("run") != summary["run"]:
+            raise ValueError("unsupported expected row kind/run")
+        digest.update(canonical(row) + b"\n")
+    if digest.hexdigest() != summary["expected_sha256"]:
+        raise ValueError("expected row hash/seal mismatch")
     if manifest["scope"] != "software-only":
         raise ValueError("draft M2 tools accept software-only evidence; hardware observer is pending")
     if manifest["timing_mode"] not in {"stress", "calibration"}:
@@ -99,6 +114,7 @@ def build_report(expected, summary, received, counters, config, manifest, traces
         reasons.append("incomplete ingress/end evidence")
     if summary["config_sha256"] != hashlib.sha256(canonical(config)).hexdigest():
         raise ValueError("reference/config hash mismatch")
+    Reference(config, summary["run"], traces)
     lines = {line["name"]: line for line in config["lines"]}
     # Configuration and trace validation is owned by the independent reference.
     expected_by_id = {}
@@ -132,6 +148,8 @@ def build_report(expected, summary, received, counters, config, manifest, traces
             unknown.append(key)
         else:
             observed_order[want["egress_port"]].append(key)
+            if row.get("receive_ns") is not None and row["receive_ns"] + uncertainty < want["arrival_ns"]:
+                reasons.append("negative OWD beyond clock uncertainty; invalid pairing/clock evidence")
     if any(key[1] not in {line["ingress_port"] for line in lines.values()} for key in unknown):
         reasons.append("receiver evidence contains an undeclared ingress direction")
 
@@ -251,7 +269,9 @@ def build_report(expected, summary, received, counters, config, manifest, traces
                 missing_timing += 1
                 continue
             if manifest["timing_mode"] == "stress":
-                predicted = row["deadline_ns"] - row["arrival_ns"]
+                line = lines[row["line"]]
+                target = row["release_ns"] if line["trace"] is not None else row["deadline_ns"]
+                predicted = target - row["arrival_ns"]
             else:
                 line = lines[row["line"]]
                 if line["trace"] is not None:

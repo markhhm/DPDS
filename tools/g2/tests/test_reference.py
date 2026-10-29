@@ -106,6 +106,39 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ref.consume(bad)
 
+    def test_configuration_cannot_silently_ignore_unsupported_or_invalid_fields(self):
+        for field, value in [("storage_capacity_packets", 0), ("storage_capacity_bytes", -1),
+                             ("typo_extra_delay_ns", 999999999)]:
+            cfg = config()
+            cfg["lines"][0]["model"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                Reference(cfg, "fixture")
+        cfg = config()
+        cfg["lines"][0]["envelope"]["burst_bound_packets"] = 0
+        with self.assertRaises(ValueError):
+            Reference(cfg, "fixture")
+        cfg = config()
+        cfg["lines"][0]["extra_policy"] = "unsupported"
+        with self.assertRaises(ValueError):
+            Reference(cfg, "fixture")
+
+    def test_probability_selection_includes_intentionally_q_dropped_packets(self):
+        cfg = config()
+        cfg["lines"][0]["model"].update(p="1", q_bytes=0)
+        ref = Reference(cfg, "fixture")
+        row = ref.consume(packet(0))
+        self.assertEqual(row["outcome"], "q_drop")
+        self.assertTrue(row["late"])
+
+    def test_finish_seals_expected_rows_without_reusing_ingress_digest(self):
+        ref = Reference(config(), "fixture")
+        row = ref.consume(packet(0))
+        ref.consume(dict(kind="end", run="fixture", ingress_port=0, next_ingress_seq=1))
+        summary = ref.finish()
+        data = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()+b"\n"
+        self.assertEqual(summary["expected_sha256"], hashlib.sha256(data).hexdigest())
+        self.assertNotEqual(summary["expected_sha256"], summary["ingress_sha256"])
+
     def test_loader_hashes_the_same_bytes_it_parses(self):
         fixture = Path(__file__).resolve().parents[3] / "dpds-core/tests/fixtures/trace.json"
         data = fixture.read_bytes()
@@ -121,3 +154,26 @@ class ReferenceTests(unittest.TestCase):
             (root / "trace.json").write_bytes(data + b" ")
             with self.assertRaisesRegex(ValueError, "SHA-256"):
                 load_config(root / "config.json")
+
+    def test_trace_metadata_and_references_have_strict_types(self):
+        fixture = Path(__file__).resolve().parents[3] / "dpds-core/tests/fixtures/trace.json"
+        original = json.loads(fixture.read_text())
+        changes = [("source_id", ["invalid-array"]), ("direction", 123), ("conversion", True),
+                   ("source_sha256", 123), ("trace_epoch_ns", False), ("time_scale", True)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for key, value in changes:
+                document = dict(original, **{key: value})
+                data = json.dumps(document).encode()
+                (root / "trace.json").write_bytes(data)
+                cfg = config()
+                cfg["lines"][0]["trace"] = {"path": "trace.json", "sha256": hashlib.sha256(data).hexdigest()}
+                (root / "config.json").write_text(json.dumps(cfg))
+                with self.subTest(field=key), self.assertRaises(ValueError):
+                    load_config(root / "config.json")
+            for key, value in [("path", ["bad"]), ("sha256", 123)]:
+                cfg = config()
+                cfg["lines"][0]["trace"] = {"path": "trace.json", "sha256": "0"*64, key: value}
+                (root / "config.json").write_text(json.dumps(cfg))
+                with self.subTest(field=key), self.assertRaises(ValueError):
+                    load_config(root / "config.json")

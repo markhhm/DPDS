@@ -12,6 +12,11 @@ import sys
 U64 = (1 << 64) - 1
 
 
+def fields(value, required, optional=()):
+    if not isinstance(value, dict) or set(required) - value.keys() or value.keys() - set(required) - set(optional):
+        raise ValueError(f"unsupported/missing fields; expected {required}, optional {optional}")
+
+
 def uint(value, name, maximum=U64):
     if type(value) is not int or not 0 <= value <= maximum:
         raise ValueError(f"{name} must be an unsigned integer <= {maximum}")
@@ -56,21 +61,41 @@ def strict_json(text):
     return json.loads(text, object_pairs_hook=pairs, parse_constant=invalid)
 
 
+def trace_reference(value):
+    fields(value, ("path", "sha256"))
+    if (not isinstance(value["path"], str) or not value["path"]
+            or not isinstance(value["sha256"], str)
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", value["sha256"])):
+        raise ValueError("trace path/hash must be nonempty path and SHA-256 strings")
+
+
 def load_config(path):
     path = Path(path)
     config = strict_json(path.read_text())
+    fields(config, ("schema", "lines"))
+    if not isinstance(config["lines"], list):
+        raise ValueError("lines must be an array")
     traces = {}
     for line in config["lines"]:
+        fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"))
         if line["trace"] is None:
             continue
+        trace_reference(line["trace"])
         data = (path.parent / line["trace"]["path"]).read_bytes()
-        if hashlib.sha256(data).hexdigest() != line["trace"]["sha256"]:
+        if hashlib.sha256(data).hexdigest() != line["trace"]["sha256"].lower():
             raise ValueError("trace SHA-256 mismatch")
         doc = strict_json(data)
+        fields(doc, ("schema", "source_id", "direction", "units", "conversion", "source_sha256",
+                     "splice_policy", "trace_epoch_ns", "time_scale", "profile"))
+        if (any(not isinstance(doc[key], str) or not doc[key]
+                for key in ("source_id", "direction", "conversion", "source_sha256", "splice_policy"))
+                or uint(doc["trace_epoch_ns"], "trace epoch") != 0
+                or uint(doc["time_scale"], "trace scale") != 1):
+            raise ValueError("invalid normalized trace metadata types/epoch/scale")
         if (doc["schema"] != "hng-trace-v1" or doc["units"] != "ns_owd"
                 or doc["trace_epoch_ns"] != 0 or doc["time_scale"] != 1
                 or not doc["source_id"] or not doc["direction"]
-                or not re.fullmatch(r"[0-9a-f]{64}", doc["source_sha256"])
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", doc["source_sha256"])
                 or not doc["conversion"]
                 or doc["splice_policy"] not in {"natural_hold", "paired_splice", "unspliced_phases"}):
             raise ValueError("invalid normalized trace provenance/units")
@@ -80,10 +105,15 @@ def load_config(path):
 
 class Trace:
     def __init__(self, profile):
+        fields(profile, ("end_ns", "loss_seed", "rows", "outage_action", "terminal", "terminal_horizon_ns"))
         self.profile = profile
         self.end = uint(profile["end_ns"], "trace end")
         self.seed = uint(profile["loss_seed"], "loss seed")
         self.rows = profile["rows"]
+        if not isinstance(self.rows, list):
+            raise ValueError("trace rows must be an array")
+        for row in self.rows:
+            fields(row, ("at_ns", "t_ns", "loss", "outage"))
         self.starts = [uint(row["at_ns"], "trace at") for row in self.rows]
         if (not self.starts or self.starts[0] != 0 or self.starts[-1] >= self.end
                 or any(a >= b for a, b in zip(self.starts, self.starts[1:]))):
@@ -126,15 +156,22 @@ class Reference:
     """
 
     def __init__(self, config, run, traces=None):
+        fields(config, ("schema", "lines"))
         if config["schema"] != "hng-v1" or not isinstance(run, str) or not run:
             raise ValueError("invalid schema/run")
         self.config, self.run = config, run
         self.lines, self.ports = {}, {}
         self.digest = hashlib.sha256()
+        self.expected_digest = hashlib.sha256()
         self.count = 0
         mappings = set()
+        if not isinstance(config["lines"], list) or not 1 <= len(config["lines"]) <= 4:
+            raise ValueError("hng-v1 requires 1..4 lines")
         for line in config["lines"]:
+            fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"))
             name, model = line["name"], line["model"]
+            fields(model, ("c_bps", "q_bytes", "t_ns", "delta_ns", "p", "seed",
+                           "storage_capacity_packets", "storage_capacity_bytes"))
             if not isinstance(name, str) or not name or name in self.lines:
                 raise ValueError("duplicate/empty line name")
             port = uint(line["ingress_port"], "ingress port", 65535)
@@ -143,21 +180,43 @@ class Reference:
             if mapping in mappings or mapping[1] == 0:
                 raise ValueError("invalid/duplicate VLAN mapping")
             mappings.add(mapping)
-            for key in ("c_bps", "q_bytes", "t_ns", "delta_ns", "seed"):
+            for key in ("c_bps", "q_bytes", "t_ns", "delta_ns", "seed", "storage_capacity_packets", "storage_capacity_bytes"):
                 uint(model[key], key)
-            if not model["c_bps"] or model["t_ns"] + model["delta_ns"] > U64:
+            if (not model["c_bps"] or not model["storage_capacity_packets"]
+                    or not model["storage_capacity_bytes"] or model["t_ns"] + model["delta_ns"] > U64):
                 raise ValueError("invalid rate/delay")
             chance = probability(model["p"])
             trace = None
             if line["trace"] is not None:
+                trace_reference(line["trace"])
                 if model["t_ns"] or chance or model["delta_ns"] or name not in (traces or {}):
                     raise ValueError("trace needs registered profile, t=0, p=0 and delta=0")
                 trace = Trace(traces[name])
             envelope = line["envelope"]
+            fields(envelope, ("min_q_bytes", "max_q_bytes", "burst_bound_packets"))
             low = uint(envelope["min_q_bytes"], "minimum frame")
             high = uint(envelope["max_q_bytes"], "maximum frame")
-            if low < 64 or high < low:
+            if low < 64 or high < low or high > 1522 or not uint(envelope["burst_bound_packets"], "burst bound"):
                 raise ValueError("invalid frame envelope")
+            delay = model["t_ns"] + model["delta_ns"]
+            if trace:
+                delay = max(row["t_ns"] for row in trace.rows)
+                if trace.profile["outage_action"] == "hold":
+                    holds = []
+                    start = None
+                    for row in trace.rows:
+                        if row["outage"] and start is None:
+                            start = row["at_ns"]
+                        elif not row["outage"] and start is not None:
+                            holds.append(row["at_ns"] - start)
+                            start = None
+                    delay += max(holds, default=0)
+            uint(delay, "delay/hold bound")
+            duration_packets = Fraction(model["c_bps"] * delay, 8 * (low + 20) * 10**9)
+            required = model["q_bytes"] // low + envelope["burst_bound_packets"] - (-duration_packets.numerator // duration_packets.denominator)
+            if (required > model["storage_capacity_packets"]
+                    or required * (high - 4) > model["storage_capacity_bytes"]):
+                raise ValueError("storage is below the declared envelope")
             self.lines[name] = dict(config=line, chance=chance, trace=trace,
                                     tail=Fraction(0), ledger=deque(), used=0, seq=0, floor=0)
             self.ports.setdefault(port, dict(next_seq=0, arrival=0, frontier=-1, ended=False))
@@ -165,6 +224,8 @@ class Reference:
             raise ValueError("no lines")
 
     def consume(self, event):
+        if not isinstance(event, dict):
+            raise ValueError("ingress event must be a JSON object")
         if event["run"] != self.run:
             raise ValueError("mixed run IDs")
         port = self.ports[uint(event["ingress_port"], "ingress port", 65535)]
@@ -207,14 +268,14 @@ class Reference:
         ledger = state["ledger"]
         while ledger and ledger[0][0] <= arrival:
             state["used"] -= ledger.popleft()[1]
+        is_late = selected(state["chance"], line["model"]["seed"], ordinal)
         result = dict(event, kind="expected", egress_port=line["egress_port"],
-                      l2_bytes=q, wire_bytes=q + 20, outcome="q_drop", late=False,
+                      l2_bytes=q, wire_bytes=q + 20, outcome="q_drop", late=is_late,
                       service_ns=None, deadline_ns=None, release_ns=None, clamp_extra_ns=0)
         model = line["model"]
         if state["used"] + q <= model["q_bytes"]:
             finish = max(Fraction(arrival), state["tail"]) + Fraction(8 * (q + 20) * 10**9, model["c_bps"])
             service = -(-finish.numerator // finish.denominator)
-            is_late = selected(state["chance"], model["seed"], ordinal)
             deadline = service + model["t_ns"] + is_late * model["delta_ns"]
             release, outcome, clamp = deadline, "accepted", 0
             trace = state["trace"]
@@ -241,6 +302,7 @@ class Reference:
         result["q_bytes"] = state["used"]
         drain = max(Fraction(0), state["tail"] - arrival)
         result["q_drain_ns"] = -(-drain.numerator // drain.denominator)
+        self.expected_digest.update(canonical(result) + b"\n")
         return result
 
     def finish(self):
@@ -248,6 +310,7 @@ class Reference:
             raise ValueError("missing end marker(s): incomplete full-ingress evidence")
         return dict(kind="summary", schema="hng-g2-reference-draft-v1", run=self.run,
                     input_complete=True, event_count=self.count, ingress_sha256=self.digest.hexdigest(),
+                    expected_sha256=self.expected_digest.hexdigest(),
                     config_sha256=hashlib.sha256(canonical(self.config)).hexdigest())
 
 

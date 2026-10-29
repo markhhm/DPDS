@@ -61,7 +61,11 @@ events require the forthcoming observer schema rather than silently skipping
 sequence gaps. Optional packet `app` is an oversampling stratum label.
 
 The output has one `kind=expected` row per packet, including intentional drops,
-plus one required terminal summary with config/input hashes and event count.
+plus one required terminal summary with config/input hashes, canonical
+expected-row SHA-256 and event count. The reporter verifies expected rows
+against the seal and enforces schema/kind/run/count/hash consistency.
+This detects changed/mixed reference output; final observer stream seals
+will establish end-to-end source completeness.
 Never feed production-computed deadlines into this reference. The reporter
 requires the summary; truncated reference output cannot pass.
 
@@ -92,10 +96,15 @@ Example manifest:
 
 The draft report has four gates **per ingress direction**: median absolute
 error <=100,000 ns; p99 <=500,000 ns; zero unexplained order mismatches; zero
-delay-storage drops. `stress` uses independently calculated `deadline-arrival`.
+delay-storage drops. Fixed `stress` uses independently calculated
+`deadline-arrival`; trace `stress` uses `release-arrival`, including modeled
+outage hold, as clarified by the M2 specification owner.
 Fixed `calibration` uses `t+I*delta`, retaining serialization in the error.
 No fitted baseline is subtracted. Trace calibration needs its registered trace
-deadline model and currently uses `stress` instead.
+release model and currently uses `stress` instead. Any paired reception before
+ingress beyond declared clock uncertainty invalidates evidence before sampling.
+The draft uses software engine arrival for ingress; the final observer schema
+will separate engine arrival from external ingress/common-clock timestamps.
 
 Timing uses a distinct SHA-256 domain, a recorded uint64 seed, and ten zero
 low hash bits (1/1024) of run/port/external identity. The uniform main sample

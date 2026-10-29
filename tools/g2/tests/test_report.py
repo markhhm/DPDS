@@ -12,11 +12,19 @@ from tools.g2.report import build_report, timing_sample, timing_stats
 from tools.g2.tests.test_reference import config
 
 
+def sealed_summary(rows, cfg):
+    return dict(kind="summary", schema="hng-g2-reference-draft-v1", run="fixture",
+                input_complete=True, event_count=len(rows), ingress_sha256="1"*64,
+                config_sha256=hashlib.sha256(canonical(cfg)).hexdigest(),
+                expected_sha256=hashlib.sha256(b"".join(canonical(row)+b"\n" for row in rows)).hexdigest())
+
+
 class ReportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cfg = config()
-        cls.cfg["lines"][0]["model"].update(p="0", t_ns=1_000_000, delta_ns=0)
+        cls.cfg["lines"][0]["model"].update(p="0", t_ns=1_000_000, delta_ns=0,
+                                              storage_capacity_packets=32768, storage_capacity_bytes=100_000_000)
         cls.manifest = dict(scope="software-only", timing_mode="stress", sampling_seed=17,
                             oversample_apps=[], clock=dict(common=True, uncertainty_ns=0),
                             egress_bps={"1": 8_000_000_000})
@@ -36,14 +44,15 @@ class ReportTests(unittest.TestCase):
             cls.expected.append(row)
             cls.received.append(dict(run="fixture", ingress_port=0, external_identity=row["external_identity"],
                                      receive_ns=arrival+1_000_100))
-        cls.summary = dict(kind="summary", input_complete=True, event_count=600,
-                           config_sha256=hashlib.sha256(canonical(cls.cfg)).hexdigest())
+        cls.summary = sealed_summary(cls.expected, cls.cfg)
         cls.counters = {"0": dict(rx_returned=600, tx_accepted=600, still_owned=0,
             q_drop=0, trace_loss_drop=0, trace_outage_drop=0, delay_storage_drop=0,
             invalid_input_drop=0, handoff_drop=0, terminal_tx_drop=0,
             missed_deadline_outage_drop=0, shutdown_drop=0, observer_drop_packets=0)}
 
     def run_report(self, received=None, counters=None, manifest=None, expected=None, summary=None):
+        if expected is not None and summary is None:
+            summary = sealed_summary(expected, self.cfg)
         return build_report(self.expected if expected is None else expected,
                             self.summary if summary is None else summary,
                             self.received if received is None else received,
@@ -107,6 +116,7 @@ class ReportTests(unittest.TestCase):
             row["receive_ns"] += 200_000
         result = self.run_report(received=received)
         self.assertEqual(result["directions"]["0"]["gates"]["p99"]["status"], "PASS")
+        self.assertEqual(result["directions"]["0"]["timing"]["main"]["p99_abs_error_ns"], 200_000)
         for row in received[-30:]:
             row["receive_ns"] += 400_000
         self.assertEqual(self.run_report(received=received)["directions"]["0"]["gates"]["p99"]["status"], "FAIL")
@@ -154,6 +164,42 @@ class ReportTests(unittest.TestCase):
             self.run_report(counters=[])
         with self.assertRaises(ValueError):
             self.run_report(counters={"0": []})
+
+    def test_changed_expected_timing_and_wrong_run_summary_are_invalid(self):
+        expected = copy.deepcopy(self.expected)
+        for row in expected[-30:]:
+            row["deadline_ns"] += 600_000
+            row["release_ns"] += 600_000
+        with self.assertRaisesRegex(ValueError, "expected.*hash|seal"):
+            self.run_report(expected=expected, summary=self.summary)
+        for change in [dict(run="wrong-run"), dict(ingress_sha256="not-a-hash"), dict(expected_sha256="0"*64)]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.run_report(summary=dict(self.summary, **change))
+
+    def test_negative_owd_invalidates_evidence_with_small_absolute_error(self):
+        received = copy.deepcopy(self.received)
+        for row in received:
+            row["receive_ns"] -= 1_000_101
+            row["receive_ns"] = max(0, row["receive_ns"])
+        result = self.run_report(received=received)
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+        self.assertEqual(result["rows"][0]["status"], "INVALID")
+
+    def test_modeled_trace_hold_uses_release_for_expected_owd(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["lines"][0]["trace"] = dict(path="registered", sha256="0"*64)
+        cfg["lines"][0]["model"]["t_ns"] = 0
+        trace = dict(end_ns=10**12, terminal="error", terminal_horizon_ns=None,
+                     loss_seed=0, outage_action="hold",
+                     rows=[dict(at_ns=0, t_ns=1_000_000, loss="0", outage=False),
+                           dict(at_ns=1_000_100, t_ns=1_000_000, loss="0", outage=True),
+                           dict(at_ns=2_000_100, t_ns=1_000_000, loss="0", outage=False)])
+        expected, received = copy.deepcopy(self.expected), copy.deepcopy(self.received)
+        expected[0]["release_ns"] = received[0]["receive_ns"] = 2_000_100
+        summary = sealed_summary(expected, cfg)
+        result = build_report(expected, summary, received, self.counters, cfg, self.manifest, {"cable": trace})
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["directions"]["0"]["timing"]["main"]["p99_abs_error_ns"], 0)
 
     def test_late_collision_serialization_is_reported_without_changing_error(self):
         expected = copy.deepcopy(self.expected)

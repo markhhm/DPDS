@@ -17,11 +17,13 @@ def compare(executable, total=1 << 20, seeds=32):
     counts, digest = {}, hashlib.sha256()
     for seed in range(seeds):
         rng = random.Random(seed)
+        # Short corruption fixtures still require the full registered storage envelope.
+        capacity = max(total // seeds, 32768) + 16
         model = dict(c_bps=[8_000_000_000, 3_000_000_000, 99_999_999_989][seed % 3],
                      q_bytes=[160, 1522, 8192][seed % 3], t_ns=6500,
                      delta_ns=[0, 5000, 32000][seed % 3], p=["0", "1", "0.1"][seed % 3],
-                     seed=seed, storage_capacity_packets=total // seeds + 16,
-                     storage_capacity_bytes=(total // seeds + 16) * 1600)
+                     seed=seed, storage_capacity_packets=capacity,
+                     storage_capacity_bytes=capacity * 1600)
         trace = None
         if seed % 2:
             model.update(t_ns=0, delta_ns=0, p="0")
