@@ -5,8 +5,7 @@ import selectors
 import time
 
 
-def wait_for_layout(process, cores, timeout=8):
-    marker = f"layout={cores}-lcore\n".encode()
+def wait_for_output(process, marker, timeout=8):
     output = bytearray()
     deadline = time.monotonic() + timeout
     with selectors.DefaultSelector() as selector:
@@ -17,6 +16,6 @@ def wait_for_layout(process, cores, timeout=8):
                 raise AssertionError("DUT startup timed out:\n"+output.decode(errors="replace"))
             chunk = os.read(process.stdout.fileno(), 65536)
             if not chunk:
-                raise AssertionError("DUT exited before workers were ready:\n"+output.decode(errors="replace"))
+                raise AssertionError("DUT exited before startup marker:\n"+output.decode(errors="replace"))
             output.extend(chunk)
     return output.decode(errors="replace")

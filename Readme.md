@@ -136,7 +136,7 @@ the namespace exits. PMD, payload, or application failures are test failures.
 
 ```sh
 cd build
-./dpds -l 0-3 --no-pci --no-huge --no-telemetry \
+./dpds -l 0-3 --no-pci --no-huge --no-telemetry -m 256 \
   --vdev=net_null0,no-rx=1 --vdev=net_null1,no-rx=1 \
   -- -c config.json -o stats.txt
 ```
@@ -154,8 +154,101 @@ Classifier rejection has a separate counter.
 | 2 | RX, worker, and TX share one worker core |
 | 3 | RX has one core; worker and TX share another core |
 | 4 | RX, worker, and TX each have one core |
+| 5 | RX and TX each have one core; one scheduler per ingress port |
 
 The main lcore waits for completion. It reads counters after the worker cores exit.
+
+The 5-lcore layout needs two ports, and every egress port must be fed by lines
+of only one ingress port (true for the usual cable/LEO pair in each direction).
+Each scheduler owns the lines of its ingress port through core line handles and
+has its own RX handoff ring; both feed one TX handoff ring. The four line states
+are independent, so per-egress output equals that of one scheduler: the `split`
+test compares both on the same input and clock schedule, and the `io-ring-split`
+and `io-ring-stepped-split` tests run the PMD integrity oracle with two owners.
+
+## Performance tools
+
+These tools need no NIC, hugepages or root. Their numbers describe the machine
+they ran on; software rings are not evidence of NIC or 100 Gbit/s performance.
+
+`hng-ring-rate` measures the maximum host packet rate through the production
+RX, scheduler and TX lcore functions over two `net_ring` ports:
+
+```sh
+python3 perf/ring_rate.py build/hng-ring-rate -- -b 1518 -d 3 -w 0.5
+```
+
+The main lcore is a closed-loop generator. It recycles each frame that leaves
+an egress ring into the same port's ingress ring and refills the population
+after drops. The population (`-n`, default and maximum 1023) never exceeds the
+TX handoff ring, because the production scheduler invalidates a run instead
+of waiting for TX handoff space. `perf/ring_rate.json` sets C = 400 Gbit/s
+and t = 2 us per line, so the model does not limit the rate. The tool prints
+egress packets per second over the window `-d` after a warmup `-w`, and fails
+unless the run is conserved, drained and every mbuf is reclaimed. Without
+options after `--` it runs the short smoke check used by `meson test`.
+`ring_rate.py --split` runs the 5-lcore layout with one scheduler per ingress port.
+
+`hng-sched-bench` times the production `worker_step_at()` per packet with real
+mbufs and a fixture clock: 1518-byte frames back to back, cable and LEO VLANs
+alternating. It runs one owner of all four lines on one lcore, then one owner
+per ingress port on two lcores at the same time, and reports p50/p99 ns per
+packet with the CPU each owner ran on. Each owner generates its input untimed
+and recycles its own mbufs. Two fixtures:
+
+- `sched_bench.json` (default): 100 Gbit/s arrivals, t = 1 / 1.5 ms,
+  delta = 2 ms, p = 0.01; about 10,000 packets in flight per owner.
+- `sched_bench_prod.json`: t = 142 ms, delta = 320 ms, p = 0.01, Q = 50 ms.
+  Arrivals at 25 Gbit/s per direction (`-g 493440`) keep about 294,000 packets
+  in flight per owner, a quarter of 100G, so that the run fits in about 2.1 GB.
+
+```sh
+cd build
+python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 -- -r 3
+python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 --memory 1800 -- \
+  -c sched_bench_prod.json -g 493440 -n 3000000 -w 470000000 -m 640000 -r 3
+```
+
+The mbuf pool lets objects straddle pages, so its stride matches a hugepage
+pool. Setting `HNG_BENCH_THP=1` (EAL memory) and
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1` (core heap) asks for transparent huge
+pages, which is closer to a hugepage deployment; both are process hints only.
+The scheduling-core microbenchmark is in the core README.
+
+`hng-pool-calc` sizes the mbuf pool and core metadata per NUMA node. The host
+allocates one pool per ingress port on that port's node, so one node holds the
+lines of one direction. Without `--verify` it needs no EAL:
+
+```sh
+./build/hng-pool-calc                      # 100G, t=142 ms, delta=320 ms, Q=50 ms, p=0.01 and 0.10
+./build/hng-pool-calc --lines-per-port 2   # cable and LEO with the same parameters
+./build/hng-pool-calc --help
+```
+
+Defaults: 5 lcores (the per-ingress-port scheduler layout). For trace lines,
+`--trace-max-delay-ms D --trace-max-hold-ms H` sizes storage for the largest
+trace delay plus the longest outage hold, as the engine does. The 2 MiB page
+result is marked unverified: only 4 KiB pages were checked.
+It mirrors the engine's startup storage check, which assumes that every packet
+is late, so the required size does not depend on p. The `mean_occupancy` lines
+use t + p*delta and are estimates, not sizing bounds. `--min-frame` is the
+smallest L2 frame (with FCS) in the declared envelope; the default 1522 is an
+all-MTU, single-VLAN mix. Smaller frames raise the slot count sharply.
+Object bytes use the real `rte_mempool_calc_obj_size` stride and the rule that
+an object never straddles a page (`--page-bytes`, default 2 MiB). Core metadata
+uses `hng_slot_metadata_bytes()` from the core and lives in the process heap,
+not in hugepages.
+
+`--verify` builds the same configuration on two `net_null` ports and compares
+the prediction with the real allocation made by the production pool function: the object count reported by the mempool, DPDK heap growth for each pool, and
+process heap growth across engine load. It uses the page size the EAL really
+uses (4 KiB under `--no-huge`) and fails above 5% error:
+
+```sh
+./build/hng-pool-calc -l 0 --no-pci --no-huge --no-telemetry -m 512 \
+  --vdev=net_null0 --vdev=net_null1 -- \
+  --c-bps 1000000000 --t-ms 20 --delta-ms 40 --q-ms 5 --burst 256 --lines-per-port 2 --verify
+```
 
 ## Configuration and packet contract
 
@@ -194,10 +287,14 @@ for each distinct mapped egress. Port setup uses those same descriptor counts.
 Startup prints the actual object footprint and NUMA node. It does not reserve a fixed 32 GiB.
 Cross-NUMA egress DMA remains possible.
 
-The RX producer waits for handoff space before another burst. An unexpected
+RX skips a port whose scheduler ring lacks room for a burst, so the other
+direction keeps flowing. `rx_ring_full_skips` counts skipped polls, not
+packets: the skipped frames stay in the NIC queue. If that queue overflows the
+NIC counts `imissed`; any nonzero `imissed` or `rx_nombuf` invalidates the run. An unexpected
 short ring enqueue invalidates the run and counts its discarded suffix.
-The TX backlog permits 256 packets per line. An exhausted backlog invalidates
-the run.
+The TX backlog permits 1024 packets per line (about 126 us at 8.127 Mpps,
+estimate), and each port requests 1024 TX descriptors. An exhausted backlog
+invalidates the run. Under `--no-huge` the larger pools need `-m 256`.
 
 The one-second TX retry bound starts after the first unsuccessful admission.
 Actual-time TX outage holds and scheduler shutdown have a five-second bound.

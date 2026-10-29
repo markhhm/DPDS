@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Public test CLI: io_pmd.py {oracle|pcap|ring|ring-stepped|af_packet} EXECUTABLE.
+"""Public test CLI: io_pmd.py {pcap|ring|ring-stepped|ring-split|ring-stepped-split|af_packet} EXECUTABLE.
+
+The -split modes run one scheduler owner per ingress port on five lcores.
 
 All fixtures are synthetic. PASS lines report input, output and intentional Q
 loss; every output identity, complete frame and physical egress is checked.
@@ -18,7 +20,7 @@ import sys
 import tempfile
 import time
 from eal_args import eal_arguments
-from startup import wait_for_layout
+from startup import wait_for_output
 
 
 def config(seed, smoke=False):
@@ -57,8 +59,8 @@ def pcap(path, seed, port):
             output.write(data)
 
 
-def eal(binary):
-    return [binary]+eal_arguments(4)+["--no-pci", "--no-huge", "--no-telemetry",
+def eal(binary, lcores=4):
+    return [binary]+eal_arguments(lcores)+["--no-pci", "--no-huge", "--no-telemetry",
             f"--file-prefix=hng-io-{os.getpid()}"]
 
 
@@ -81,7 +83,7 @@ def smoke(binary, directory):
     expected = [[frame(0, 1-p, seq) for seq in range(32)] for p in range(2)]
     prefix = ""
     try:
-        prefix = wait_for_layout(process, 4)
+        prefix = wait_for_output(process, b"layout=4-lcore")
         time.sleep(0.5)
         assert process.poll() is None, process.communicate()[0]
         seen = [[], []]
@@ -149,8 +151,8 @@ def main():
         for seed in range(32):
             (directory/f"seed{seed}.json").write_text(json.dumps(config(seed)))
         environment = dict(os.environ, IO_DIR=str(directory), IO_MODE=mode)
-        if mode in ("ring", "ring-stepped"):
-            subprocess.run(eal(binary), env=environment, check=True, timeout=240)
+        if mode in ("ring", "ring-stepped", "ring-split", "ring-stepped-split"):
+            subprocess.run(eal(binary, 5 if mode.endswith("-split") else 4), env=environment, check=True, timeout=240)
         elif mode == "pcap":
             for seed in range(32):
                 # A fresh directory also prevents stale output from satisfying the checker.

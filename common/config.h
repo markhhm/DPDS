@@ -7,7 +7,7 @@
 // Static settings
 // -------------------------------------------
 #define RX_RING_SIZE 256
-#define TX_RING_SIZE 256
+#define TX_RING_SIZE 1024
 
 #define MBUF_CACHE_SIZE 32
 #define SCHED_RX_RING_SZ 1024
@@ -27,8 +27,8 @@
 // -------------------------------------------
 // Global defaults
 // -------------------------------------------
-// Mostly copied from distributor example application.
-#define TX_PENDING_PER_LINE 256
+// 1024 pending packets per line cover about 126 us at 8.127 Mpps (estimate); see the M4 report.
+#define TX_PENDING_PER_LINE 1024
 #define TERMINAL_TIMEOUT_NS UINT64_C(1000000000)
 #define SHUTDOWN_TIMEOUT_NS UINT64_C(5000000000)
 static const struct rte_eth_conf default_port_configuration = {

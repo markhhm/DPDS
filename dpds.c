@@ -59,6 +59,12 @@ static void report(FILE *out, struct pipeline_stats *s)
         s->tx.tx_drop_bytes + s->tx.trace_outage_bytes;
     bool bytes_conserved = s->rx.received_bytes == drop_bytes + s->tx.transmitted_bytes;
     if (!bytes_conserved) host_invalidate("software byte conservation failed");
+    /* Check NIC loss before the status line, so it is reported as INVALID. */
+    for (uint16_t i = 0; i < host.port_count; ++i) {
+        struct rte_eth_stats n;
+        if (rte_eth_stats_get(host.ports[i], &n) == 0) host_check_nic_loss(host.ports[i], &n);
+    }
+    fprintf(out, "rx_ring_full_skips=%"PRIu64",%"PRIu64"\n", s->rx.ring_full_skips[0], s->rx.ring_full_skips[1]);
     fprintf(out, "submit_late_packets=%"PRIu64" submit_late_total_ns=%"PRIu64" submit_late_max_ns=%"PRIu64"\n",
         s->tx.late_submit_packets, s->tx.late_submit_total_ns, s->tx.late_submit_max_ns);
     fprintf(out, "rx=%"PRIu64" rx_bytes=%"PRIu64" tx_accepted=%"PRIu64" tx_bytes=%"PRIu64
@@ -83,6 +89,11 @@ static void report(FILE *out, struct pipeline_stats *s)
 
 int main(int argc, char **argv)
 {
+    /* Install the handlers first: a SIGINT during EAL init, engine load or port
+     * setup must request a clean drain, not kill the process with the default action. */
+    signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler);
+    /* Line-buffer stdout so counters already printed survive any abnormal exit. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     int eal_args = rte_eal_init(argc, argv);
     if (eal_args < 0) rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
     argc -= eal_args; argv += eal_args;
@@ -94,8 +105,8 @@ int main(int argc, char **argv)
         else if (option == 'o') stats_path = optarg;
         else rte_exit(EXIT_FAILURE, "Usage: ... -- [-c config.json] [-o stats.txt]\n");
     }
-    if (rte_lcore_count() < 2 || rte_lcore_count() > 4)
-        rte_exit(EXIT_FAILURE, "HNG requires 2, 3 or 4 lcores\n");
+    if (rte_lcore_count() < 2 || rte_lcore_count() > 5)
+        rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4 or 5 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "HNG configuration rejected before RX\n");
     uint16_t port;
     RTE_ETH_FOREACH_DEV(port) host.ports[host.port_count++] = port;
@@ -114,13 +125,8 @@ int main(int argc, char **argv)
         port = host.ports[i];
         uint64_t count = host_pool_objects(port, rte_lcore_count());
         if (!count) rte_exit(EXIT_FAILURE, "Port %u has an invalid pool envelope\n", port);
-        char name[32];
-        snprintf(name, sizeof(name), "ingress_pool_%u", port);
-        int socket = rte_eth_dev_socket_id(port);
-        if (socket < 0) socket = rte_socket_id();
-        pools[port] = rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
-            RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN),
-            RTE_MBUF_DEFAULT_BUF_SIZE, socket);
+        int socket;
+        pools[port] = host_create_pool(port, rte_lcore_count(), &socket);
         if (!pools[port]) rte_exit(EXIT_FAILURE, "Cannot allocate port %u pool: %s\n", port, rte_strerror(rte_errno));
         struct rte_mempool_objsz size;
         rte_mempool_calc_obj_size(pools[port]->elt_size, pools[port]->flags, &size);
@@ -136,36 +142,60 @@ int main(int argc, char **argv)
     struct pipeline_stats *stats = rte_zmalloc("stats", sizeof(*stats), 64);
     if (!stats) rte_exit(EXIT_FAILURE, "Cannot allocate counters\n");
     unsigned workers = rte_lcore_count() - 1;
-    struct rte_ring *rx_ring = NULL, *tx_ring = NULL;
-    if (workers >= 2) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
-    if (workers >= 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
-    if ((workers >= 2 && !rx_ring) || (workers >= 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
-    signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler);
-    unsigned cores[3], index = 0, core;
+    bool split = workers == 4;
+    if (split && (host.port_count != 2 || !host_split_valid()))
+        rte_exit(EXIT_FAILURE, "5 lcores need two ports, each egress fed by one ingress port\n");
+    struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0};
+    if (workers >= 2 && !split) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+    for (unsigned k = 0; split && k < 2; ++k) {
+        char name[32];
+        snprintf(name, sizeof(name), "rx_ring%u", k);
+        owner_rings[k] = rte_ring_create(name, SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+        if (!owner_rings[k]) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
+    }
+    /* Two schedulers share the TX handoff ring as producers. */
+    if (workers >= 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
+    if ((workers >= 2 && !split && !rx_ring) || (workers >= 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
+    unsigned cores[4], index = 0, core;
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
-    lcore_function_t *functions[3];
+    lcore_function_t *functions[4];
     if (workers == 1) functions[0] = (lcore_function_t *)lcore_receive_worker_transmit;
     else if (workers == 2) {
         functions[0] = (lcore_function_t *)lcore_worker_transmit;
         functions[1] = (lcore_function_t *)lcore_receive;
-    } else {
+    } else if (workers == 3) {
         functions[0] = (lcore_function_t *)lcore_transmit;
         functions[1] = (lcore_function_t *)lcore_worker;
         functions[2] = (lcore_function_t *)lcore_receive;
+    } else {
+        functions[0] = (lcore_function_t *)lcore_transmit;
+        functions[1] = functions[2] = (lcore_function_t *)lcore_worker;
+        functions[3] = (lcore_function_t *)lcore_receive;
+        host.schedulers_running = 2;
     }
     host.epoch_cycles = rte_get_timer_cycles();
+    host_mark_launched();
     for (unsigned i = 0; i < workers; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
         if (!parameters) rte_exit(EXIT_FAILURE, "Cannot allocate core parameters\n");
-        *parameters = (struct lcore_parameters){i, rx_ring, tx_ring, stats, host.port_count};
+        *parameters = (struct lcore_parameters){.worker_id = i, .receive_worker_ring = rx_ring,
+            .worker_transmit_ring = tx_ring, .stats = stats, .num_ports = host.port_count};
+        if (split) {
+            parameters->split = true;
+            parameters->owner_rings[0] = owner_rings[0];
+            parameters->owner_rings[1] = owner_rings[1];
+            parameters->owner_index = (uint16_t)(i - 1);
+            if (i == 1 || i == 2) parameters->receive_worker_ring = owner_rings[i - 1];
+        }
         if (rte_eal_remote_launch(functions[i], parameters, cores[i]) != 0)
             rte_exit(EXIT_FAILURE, "Cannot launch lcore\n");
     }
-    printf("layout=%u-lcore\n", workers + 1);
+    printf("layout=%u-lcore%s\n", workers + 1, split ? " schedulers=per-ingress-port" : "");
     fflush(stdout);
     RTE_LCORE_FOREACH_WORKER(core) {
         if (rte_eal_wait_lcore(core) < 0) host_invalidate("lcore failed");
     }
+    for (unsigned k = 0; split && k < 2; ++k) worker_stats_merge(&stats->worker, &stats->owners[k], host.ports[k]);
     report(stdout, stats);
     if (stats_path) {
         FILE *out = fopen(stats_path, "wx");
@@ -183,6 +213,7 @@ int main(int argc, char **argv)
     }
     host_cleanup();
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
+    rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
     bool invalid = host.invalid;
     rte_eal_cleanup();
     return invalid ? EXIT_FAILURE : EXIT_SUCCESS;

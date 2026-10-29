@@ -44,6 +44,29 @@ bool host_load(const char *path)
         host.policies[i] = hng_tx_policy_new(host.engine, i);
         if (!host.policies[i]) return false;
     }
+    return host_take_line_handles();
+}
+
+bool host_take_line_handles(void)
+{
+    /* hng_engine_line borrows the whole Engine; owners may already hold line handles. */
+    if (atomic_load(&host.launched)) {
+        host_invalidate("line handle requested after owner launch");
+        return false;
+    }
+    for (size_t i = 0; i < host.line_count; ++i)
+        if (!(host.line_handle[i] = hng_engine_line(host.engine, i))) return false;
+    return true;
+}
+
+void host_mark_launched(void) { atomic_store(&host.launched, true); }
+
+bool host_split_valid(void)
+{
+    for (size_t i = 0; i < host.line_count; ++i)
+        for (size_t j = 0; j < host.line_count; ++j)
+            if (host.lines[i].egress_port == host.lines[j].egress_port &&
+                host.lines[i].ingress_port != host.lines[j].ingress_port) return false;
     return true;
 }
 
@@ -111,7 +134,7 @@ int host_prepare_port(uint16_t port)
 
 unsigned host_pool_objects(uint16_t port, unsigned lcores)
 {
-    if (port >= RTE_MAX_ETHPORTS || !host.resources[port].prepared || lcores < 1 || lcores > 4) return 0;
+    if (port >= RTE_MAX_ETHPORTS || !host.resources[port].prepared || lcores < 1 || lcores > 5) return 0;
     uint64_t count = host.resources[port].rx_descriptors + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ +
         MBUF_CACHE_SIZE * lcores + HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE;
     bool reserved_egress[RTE_MAX_ETHPORTS] = {0};
@@ -128,6 +151,26 @@ unsigned host_pool_objects(uint16_t port, unsigned lcores)
         count += host.lines[line].storage_capacity_packets;
     }
     return (unsigned)count;
+}
+
+bool host_check_nic_loss(uint16_t port, const struct rte_eth_stats *n)
+{
+    if (!n->imissed && !n->rx_nombuf) return true;
+    fprintf(stderr, "nic=%u imissed=%" PRIu64 " rx_nombuf=%" PRIu64 "\n", port, n->imissed, n->rx_nombuf);
+    host_invalidate("NIC dropped received frames (imissed or rx_nombuf)");
+    return false;
+}
+
+struct rte_mempool *host_create_pool(uint16_t port, unsigned lcores, int *socket)
+{
+    unsigned count = host_pool_objects(port, lcores);
+    if (!count) return NULL;
+    char name[32];
+    snprintf(name, sizeof(name), "ingress_pool_%u", port);
+    *socket = rte_eth_dev_socket_id(port);
+    if (*socket < 0) *socket = rte_socket_id();
+    return rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
+        RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, *socket);
 }
 
 // -------------------------------------------

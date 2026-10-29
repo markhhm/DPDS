@@ -6,8 +6,10 @@ __pycache__/
 
 # Stats exports
 *.csv
+# Test fixture: the pre-M4 golden digest for tests/split.c.
 
 # Editor / OS cruft
 .vscode/
 *.swp
 .DS_Store
+!tests/split-golden.csv
