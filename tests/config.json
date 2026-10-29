@@ -1,0 +1,18 @@
+{
+  "buffer_capacity": 32,
+  "reordering": false,
+  "delayer": {
+    "distribution": "DeterministicDistribution",
+    "mean_ns": 1000000000,
+    "std_ns": 0,
+    "activate_correlation": false,
+    "half_life_period_ns": 1
+  },
+  "limiter": {
+    "mode": "Spacer",
+    "activate": true,
+    "rate_bps": 8000000000,
+    "limit_bit": 800
+  },
+  "loss_model": { "Random": 0 }
+}
