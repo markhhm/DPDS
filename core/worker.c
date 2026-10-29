@@ -99,9 +99,16 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             continue;
         }
         meta->line = (uint16_t)line;
-        enum PushResult result = hng_line_offer(s->line[line], m, m->pkt_len,
-            meta->arrival_ns, meta->ingress_seq);
-        if (result == Accepted) continue;
+        struct HngPacket record;
+        enum PushResult result = hng_line_offer_record(s->line[line], m, m->pkt_len,
+            meta->arrival_ns, meta->ingress_seq, &record);
+        if (result == Accepted) {
+            /* Annotate now, while the mbuf is cached; the record never changes after admission. */
+            meta->release_ns = record.release_ns;
+            meta->deadline_ns = record.deadline_ns;
+            m->port = host.lines[line].egress_port;
+            continue;
+        }
         if (result == QDrop || result == TraceLoss || result == TraceOutage) {
             s->stats->emulator_drops++;
         } else if (result == StorageDrop) {
@@ -153,14 +160,10 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         if (!complete) continue;
         if (!hng_line_pop(s->line[chosen], now,
             watermark(s, host.lines[chosen].ingress_port), &candidate)) continue;
-        struct rte_mbuf *m = candidate.packet_ptr;
-        struct packet_meta *meta = packet_meta(m);
-        meta->release_ns = candidate.release_ns;
-        meta->deadline_ns = candidate.deadline_ns;
-        m->port = port;
-        out_batch[emitted++] = m;
+        /* Dequeue does not touch the (usually cold) mbuf; admission annotated it. */
+        out_batch[emitted++] = candidate.packet_ptr;
         s->stats->sent++;
-        s->stats->sent_bytes += m->pkt_len;
+        s->stats->sent_bytes += candidate.packet_bytes;
         if (emitted == MAX_BURST_SIZE) break;
     }
     return emitted;
