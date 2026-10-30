@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
@@ -15,7 +16,7 @@ uint16_t rx_step(struct rx_state *s, struct rte_mbuf **batch, uint16_t max_batch
     uint16_t port = host.ports[s->next_port];
     s->last_port = port;
     s->last_index = s->next_port;
-    s->next_port = (s->next_port + 1) % host.port_count;
+    if (!s->fixed) s->next_port = (s->next_port + 1) % host.port_count;
     uint16_t count = rte_eth_rx_burst(port, 0, batch, max_batch);
     for (uint16_t i = 0; i < count; ++i) {
         struct packet_meta *m = packet_meta(batch[i]);
@@ -53,7 +54,7 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
     if (rte_ring_free_count(ring) < MAX_BURST_SIZE) {
         /* Defer only this port: its frames wait in the NIC queue (imissed if it overflows). */
         s->stats->ring_full_skips[s->next_port]++;
-        s->next_port = (s->next_port + 1) % host.port_count;
+        if (!s->fixed) s->next_port = (s->next_port + 1) % host.port_count;
         return 0;
     }
     uint16_t count = rx_step(s, batch, MAX_BURST_SIZE);
@@ -72,17 +73,29 @@ uint16_t rx_iteration(struct rx_state *s, struct lcore_parameters *parameters, s
     return count;
 }
 
+void rx_stats_merge(struct rx_stats *dst, const struct rx_stats *src)
+{
+    RX_STATS_FIELDS(STATS_MERGE_S, STATS_MERGE_A)
+}
+
 int lcore_receive(struct lcore_parameters *parameters)
 {
     struct rx_state rx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     rx_state_init(&rx, parameters->stats);
     rx.split = parameters->split;
+    if (parameters->io_split) {
+        rx.fixed = true;
+        rx.next_port = parameters->owner_index;
+        rx.stats = &parameters->stats->rx_owners[parameters->owner_index];
+    }
     while (!quit_signal_receive)
         if (!rx_iteration(&rx, parameters, batch)) rte_pause();
-    for (unsigned p = 0; p < host.port_count; ++p) observer_input_end(host.ports[p], rx.sequence[host.ports[p]]);
-    /* Completion follows the final enqueue and frontier publication. */
-    quit_signal_worker = 1;
+    for (unsigned p = 0; p < host.port_count; ++p)
+        if (!parameters->io_split || p == parameters->owner_index) observer_input_end(host.ports[p], rx.sequence[host.ports[p]]);
+    /* Completion follows the final enqueue and frontier publication of every RX lcore:
+     * a scheduler must not end its input while another direction's RX still runs. */
+    if (atomic_fetch_sub(&host.receivers_running, 1) <= 1) quit_signal_worker = 1;
     rte_free(parameters);
     return 0;
 }

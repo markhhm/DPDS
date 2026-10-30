@@ -120,8 +120,10 @@ class IdentityIndexTests(unittest.TestCase):
                 IdentityIndex(self.registration()).remember(row)
 
     def test_index_requires_a_registered_limit(self):
+        registration = manifest()
+        registration["capacity"].pop("identity_index_capacity")
         with self.assertRaises(ValueError):
-            IdentityIndex(manifest())
+            IdentityIndex(registration)
 
     def test_index_report_cannot_rescue_another_run_or_omit_cells(self):
         registration = self.registration()

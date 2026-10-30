@@ -42,6 +42,8 @@ struct host_context {
     _Atomic bool invalid;
     /* The last scheduler to finish releases TX; 0 or 1 means a single scheduler. */
     _Atomic int schedulers_running;
+    /* The last RX lcore to finish releases the schedulers; 0 or 1 means a single RX lcore. */
+    _Atomic int receivers_running;
 };
 extern struct host_context host;
 uint64_t host_now_ns(void);
@@ -57,12 +59,20 @@ void host_invalidate(const char *reason);
 void host_publish(uint16_t port, uint64_t enqueued, uint64_t watermark);
 bool host_frontier(uint16_t port, uint64_t consumed, uint64_t *watermark);
 
-struct rx_stats {
-    uint64_t received, received_bytes, enqueued, rx_ring_drops, rx_ring_drop_bytes;
-    /* Polls skipped because that port's scheduler ring had no room; indexed like host.ports. */
-    uint64_t ring_full_skips[2];
-    uint64_t burst_hist[BURST_HIST_BUCKETS];
-} __attribute__((aligned(64)));
+/* Counter structs merged across lcores are defined from field lists, so the merge
+ * (rx_stats_merge, tx_stats_merge) handles every field by name with its declared
+ * rule: SUM or MAX. A field outside the list is never merged. */
+#define STATS_DECLARE_S(name, rule) uint64_t name;
+#define STATS_DECLARE_A(name, count, rule) uint64_t name[count];
+#define STATS_SUM(d, s) (d) += (s);
+#define STATS_MAX(d, s) if ((s) > (d)) (d) = (s);
+#define STATS_MERGE_S(name, rule) STATS_##rule(dst->name, src->name)
+#define STATS_MERGE_A(name, count, rule) for (size_t i = 0; i < (count); ++i) STATS_##rule(dst->name[i], src->name[i])
+/* ring_full_skips: polls skipped because that port's scheduler ring had no room; indexed like host.ports. */
+#define RX_STATS_FIELDS(S, A) \
+    S(received, SUM) S(received_bytes, SUM) S(enqueued, SUM) S(rx_ring_drops, SUM) S(rx_ring_drop_bytes, SUM) \
+    A(ring_full_skips, 2, SUM) A(burst_hist, BURST_HIST_BUCKETS, SUM)
+struct rx_stats { RX_STATS_FIELDS(STATS_DECLARE_S, STATS_DECLARE_A) } __attribute__((aligned(64)));
 _Static_assert(_Alignof(struct rx_stats) == 64 && sizeof(struct rx_stats) % 64 == 0,
     "rx_stats owners write different cache lines");
 struct worker_stats {
@@ -73,25 +83,31 @@ struct worker_stats {
 } __attribute__((aligned(64)));
 _Static_assert(_Alignof(struct worker_stats) == 64 && sizeof(struct worker_stats) % 64 == 0,
     "worker_stats owners write different cache lines");
-struct tx_stats {
-    uint64_t received, received_bytes, transmitted, transmitted_bytes, tx_drops, tx_drop_bytes;
-    uint64_t retries, pending_peak, trace_outage_drops, trace_outage_bytes;
-    uint64_t late_submit_packets, late_submit_total_ns, late_submit_max_ns;
-    uint64_t line_outage_drops[HNG_MAX_LINES], line_invalid_drops[HNG_MAX_LINES];
-    uint64_t line_transmitted[HNG_MAX_LINES], line_transmitted_bytes[HNG_MAX_LINES];
-    uint64_t burst_hist[BURST_HIST_BUCKETS];
-} __attribute__((aligned(64)));
+#define TX_STATS_FIELDS(S, A) \
+    S(received, SUM) S(received_bytes, SUM) S(transmitted, SUM) S(transmitted_bytes, SUM) \
+    S(tx_drops, SUM) S(tx_drop_bytes, SUM) S(retries, SUM) S(pending_peak, MAX) \
+    S(trace_outage_drops, SUM) S(trace_outage_bytes, SUM) \
+    S(late_submit_packets, SUM) S(late_submit_total_ns, SUM) S(late_submit_max_ns, MAX) \
+    A(line_outage_drops, HNG_MAX_LINES, SUM) A(line_invalid_drops, HNG_MAX_LINES, SUM) \
+    A(line_transmitted, HNG_MAX_LINES, SUM) A(line_transmitted_bytes, HNG_MAX_LINES, SUM) \
+    A(burst_hist, BURST_HIST_BUCKETS, SUM)
+struct tx_stats { TX_STATS_FIELDS(STATS_DECLARE_S, STATS_DECLARE_A) } __attribute__((aligned(64)));
 _Static_assert(_Alignof(struct tx_stats) == 64 && sizeof(struct tx_stats) % 64 == 0,
     "tx_stats owners write different cache lines");
-/* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts. */
-struct pipeline_stats { struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2]; };
+/* owners[k] holds the counters of the scheduler for host.ports[k] in split layouts;
+ * rx_owners[k] and tx_owners[k] those of direction k's RX and TX lcores (7 lcores). */
+struct pipeline_stats {
+    struct rx_stats rx; struct worker_stats worker; struct tx_stats tx; struct worker_stats owners[2];
+    struct rx_stats rx_owners[2]; struct tx_stats tx_owners[2];
+};
 struct lcore_parameters {
     unsigned int worker_id;
     struct rte_ring *receive_worker_ring, *worker_transmit_ring;
     struct pipeline_stats *stats;
     uint16_t num_ports;
-    /* Split layout: one scheduler per ingress port host.ports[owner_index]. */
-    bool split;
+    /* Split layout: one scheduler per ingress port host.ports[owner_index].
+     * io_split (7 lcores): RX and TX lcores are per direction owner_index too. */
+    bool split, io_split;
     uint16_t owner_index;
     struct rte_ring *owner_rings[2], *tx_owner_rings[2];
 };

@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
@@ -118,37 +119,52 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             if (chosen == HNG_MAX_LINES || key_before(m, pending_at(&s->pending[chosen])[0])) chosen = line;
         }
         if (chosen == HNG_MAX_LINES) continue;
-        struct mbuf_table *table = &s->pending[chosen];
-        uint16_t n = table->len < MAX_BURST_SIZE ? table->len : MAX_BURST_SIZE;
+        /* Gather one burst for this port: merge the eligible lines' pending frames in
+         * global release order. Frames stay in their tables until the PMD accepts them. */
+        bool eligible[HNG_MAX_LINES] = {0};
         for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
-            if (line == chosen || !s->pending[line].len ||
-                pending_at(&s->pending[line])[0]->port != port) continue;
-            uint32_t gate = host.policies[line] ? hng_tx_policy_gate(host.policies[line], now) : 0;
-            if (gate != 0) continue;
-            for (uint16_t i = 1; i < n; ++i) {
-                if (key_before(pending_at(&s->pending[line])[0], pending_at(table)[i])) { n = i; break; }
+            if (!s->pending[line].len || pending_at(&s->pending[line])[0]->port != port) continue;
+            eligible[line] = !host.policies[line] || hng_tx_policy_gate(host.policies[line], now) == 0;
+        }
+        struct rte_mbuf *burst[MAX_BURST_SIZE];
+        uint8_t line_of[MAX_BURST_SIZE];
+        uint16_t taken[HNG_MAX_LINES] = {0}, n = 0;
+        while (n < MAX_BURST_SIZE) {
+            unsigned next = HNG_MAX_LINES;
+            for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
+                if (!eligible[line] || taken[line] == s->pending[line].len) continue;
+                if (next == HNG_MAX_LINES ||
+                    key_before(pending_at(&s->pending[line])[taken[line]], pending_at(&s->pending[next])[taken[next]]))
+                    next = line;
             }
+            if (next == HNG_MAX_LINES) break;
+            burst[n] = pending_at(&s->pending[next])[taken[next]++];
+            line_of[n++] = (uint8_t)next;
         }
         struct observer_record event = {.kind = OBS_ATTEMPT, .port = port, .count = n,
             .gate_ns = now, .snapshot = s->snapshot};
         if (live_clock) now = host_now_ns();
-        if (host.policies[chosen] && hng_tx_policy_gate(host.policies[chosen], now) != 0) continue;
+        /* Every line in the merged burst must still be open at the confirmed gate time. */
+        bool reopened = true;
+        for (unsigned line = 0; line < HNG_MAX_LINES; ++line)
+            if (taken[line] && host.policies[line] && hng_tx_policy_gate(host.policies[line], now) != 0) reopened = false;
+        if (!reopened) continue;
         if (observer_enabled()) {
             event.attempt_id = s->attempt_id[port]++;
             memcpy(event.consumed_dispatch, s->consumed_dispatch, sizeof(event.consumed_dispatch));
             for (unsigned i = 0; i < n; ++i) {
-                event.items[i] = observer_packet(pending_at(table)[i]); event.items[i].gate_ns = now;
+                event.items[i] = observer_packet(burst[i]); event.items[i].gate_ns = now;
             }
         }
         uint32_t bytes[MAX_BURST_SIZE];
         uint64_t lateness[MAX_BURST_SIZE];
         for (uint16_t i = 0; i < n; ++i) {
-            bytes[i] = pending_at(table)[i]->pkt_len;
-            uint64_t deadline = packet_meta(pending_at(table)[i])->deadline_ns;
+            bytes[i] = burst[i]->pkt_len;
+            uint64_t deadline = packet_meta(burst[i])->deadline_ns;
             lateness[i] = now > deadline ? now - deadline : 0;
         }
         if (observer_enabled()) event.submit_before_ns = live_clock ? host_now_ns() : now;
-        uint16_t sent = s->burst(port, 0, pending_at(table), n);
+        uint16_t sent = s->burst(port, 0, burst, n);
         if (observer_enabled()) {
             event.submit_after_ns = live_clock ? host_now_ns() : now; event.accepted_count = sent;
             observer_emit(OBS_TX, &event);
@@ -160,21 +176,29 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             sent = n;
         }
         s->stats->transmitted += sent;
-        s->stats->line_transmitted[chosen] += sent;
+        uint16_t accepted[HNG_MAX_LINES] = {0};
         for (uint16_t i = 0; i < sent; ++i) {
+            unsigned line = line_of[i];
+            accepted[line]++;
+            s->stats->line_transmitted[line]++;
             s->stats->transmitted_bytes += bytes[i];
-            s->stats->line_transmitted_bytes[chosen] += bytes[i];
+            s->stats->line_transmitted_bytes[line] += bytes[i];
             if (lateness[i]) {
                 s->stats->late_submit_packets++;
                 s->stats->late_submit_total_ns += lateness[i];
                 if (lateness[i] > s->stats->late_submit_max_ns) s->stats->late_submit_max_ns = lateness[i];
             }
         }
-        table->len -= sent;
-        table->head = table->len ? table->head + sent : 0;
+        /* The accepted prefix of a merge is a prefix of each line, so each line drops
+         * its accepted frames from its head; the refused frames stay there in order. */
+        for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
+            struct mbuf_table *table = &s->pending[line];
+            table->len -= accepted[line];
+            table->head = table->len ? table->head + accepted[line] : 0;
+        }
         if (sent < n) {
-            for (uint16_t i = 0; i < n - sent; ++i) {
-                struct packet_meta *meta = packet_meta(pending_at(table)[i]);
+            for (uint16_t i = sent; i < n; ++i) {
+                struct packet_meta *meta = packet_meta(burst[i]);
                 if (!meta->retry_active) { meta->retry_active = true; meta->retry_since_ns = now; }
             }
             s->stats->retries++;
@@ -204,6 +228,11 @@ void tx_state_cleanup(struct tx_state *s)
     while (tx_has_backlog(s)) tx_step(s, NULL, 0);
 }
 
+void tx_stats_merge(struct tx_stats *dst, const struct tx_stats *src)
+{
+    TX_STATS_FIELDS(STATS_MERGE_S, STATS_MERGE_A)
+}
+
 int lcore_transmit(struct lcore_parameters *parameters)
 {
     struct tx_state tx;
@@ -212,6 +241,8 @@ int lcore_transmit(struct lcore_parameters *parameters)
     if (observer_enabled() && parameters->split && !owner_queues)
         { observer_abort(OBS_ABORT_RESOURCE); host_invalidate("observation requires single-producer TX queues"); }
     tx_state_init(&tx, parameters->stats);
+    if (parameters->io_split) tx.stats = &parameters->stats->tx_owners[parameters->owner_index];
+    /* quit_signal_transmit follows the last scheduler's final enqueue. */
     while (!quit_signal_transmit ||
         (owner_queues ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :
             !rte_ring_empty(parameters->worker_transmit_ring)) || tx_has_backlog(&tx)) {

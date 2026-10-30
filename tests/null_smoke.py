@@ -15,14 +15,14 @@ from eal_args import eal_arguments
 from startup import wait_for_output
 
 binary = os.path.abspath(sys.argv[1])
-cases = [(cores, no_rx, 0.25) for cores in (2, 3, 4, 5) for no_rx in (True, False)]
+cases = [(cores, no_rx, 0.25) for cores in (2, 3, 4, 5, 7) for no_rx in (True, False)]
 # Regression: early signals used to kill dpds before its handler was installed.
 # Those delays count from the first EAL line, so main() is already running.
-cases += [(cores, True, -delay) for cores in (2, 5) for delay in (0.001, 0.01, 0.05, 0.1)]
+cases += [(cores, True, -delay) for cores in (2, 5, 7) for delay in (0.001, 0.01, 0.05, 0.1)]
 for cores, no_rx, delay in cases:
     suffix = ",no-rx=1" if no_rx else ""
     command = [binary]+eal_arguments(cores)+["--no-pci", "--no-huge",
-               "--no-telemetry", "-m", "256", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}-{delay}",
+               "--no-telemetry", "-m", "256", "--in-memory", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}-{delay}",
                f"--vdev=net_null0{suffix}", f"--vdev=net_null1{suffix}"]
     if cores == 2 and no_rx and delay > 0:
         # Readiness must also tolerate a delayed exec of the real DUT.

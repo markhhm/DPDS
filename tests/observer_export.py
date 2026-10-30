@@ -72,7 +72,7 @@ def run(binary, cores, enabled, directory):
             rows.extend(json.loads(line) for line in source)
     thread = threading.Thread(target=consume)
     thread.start()
-    command = [binary] + eal_arguments(cores) + ['--no-pci', '--no-huge', '--no-telemetry', '-m', '256',
+    command = [binary] + eal_arguments(cores) + ['--no-pci', '--no-huge', '--no-telemetry', '-m', '256', '--in-memory',
         f'--file-prefix=hng-observe-{os.getpid()}-{cores}-{enabled}']
     command += [f'--vdev=net_pcap{p},rx_pcap={inputs[p]},tx_pcap={outputs[p]}' for p in (0, 1)]
     command += ['--', '-c', str(config)]
