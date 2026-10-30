@@ -141,14 +141,17 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             burst[n] = pending_at(&s->pending[next])[taken[next]++];
             line_of[n++] = (uint8_t)next;
         }
+        if (live_clock) now = host_now_ns();
+        /* A newly recovered line can precede this burst, so rebuild if any port candidate changed. */
+        bool unchanged = true;
+        for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
+            if (!s->pending[line].len || pending_at(&s->pending[line])[0]->port != port) continue;
+            bool open = !host.policies[line] || hng_tx_policy_gate(host.policies[line], now) == 0;
+            if (eligible[line] != open) unchanged = false;
+        }
+        if (!unchanged) continue;
         struct observer_record event = {.kind = OBS_ATTEMPT, .port = port, .count = n,
             .gate_ns = now, .snapshot = s->snapshot};
-        if (live_clock) now = host_now_ns();
-        /* Every line in the merged burst must still be open at the confirmed gate time. */
-        bool reopened = true;
-        for (unsigned line = 0; line < HNG_MAX_LINES; ++line)
-            if (taken[line] && host.policies[line] && hng_tx_policy_gate(host.policies[line], now) != 0) reopened = false;
-        if (!reopened) continue;
         if (observer_enabled()) {
             event.attempt_id = s->attempt_id[port]++;
             memcpy(event.consumed_dispatch, s->consumed_dispatch, sizeof(event.consumed_dispatch));
