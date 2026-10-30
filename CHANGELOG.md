@@ -10,4 +10,4 @@
   skips, byte comparisons, and accounted background traffic.
 - Register the complete software suite with Meson and CI. Map test lcores onto
   available CPUs, including small CI runners; these checks do not measure throughput.
-- Adopt the existing M0 pre-push gate. Preserve the core submodule at 9531a95.
+- Adopt the existing M0 pre-push gate. Preserve the core submodule at e9dc335.
