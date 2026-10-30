@@ -25,11 +25,19 @@ except ImportError:
     build_bundle_report = None
 
 
-def fixture(root, count=400, mutate=None, mode="stream"):
+def fixture(root, count=400, mutate=None, mode="stream", lines=1):
     cfg, reg, cal = config(), manifest(), document()
-    cfg["lines"][0]["model"].update(p="0", delta_ns=0)
+    # Extra lines share the first line's ingress and egress port and differ by VLAN.
+    names, vlans = ["cable", "leo"][:lines], {"cable": 100, "leo": 200}
+    for name in names[1:]:
+        cfg["lines"].append(dict(copy.deepcopy(cfg["lines"][0]), name=name, vlan_id=vlans[name]))
+        reg["lines"].append(dict(reg["lines"][0], name=name, vlan_id=vlans[name]))
+        reg["required_cells"].append(dict(reg["required_cells"][0], line=name))
+    for line in cfg["lines"]:
+        line["model"].update(p="0", delta_ns=0)
     reg["sampling"]["oversample_apps"] = []
-    reg["required_cells"][0].update(mask_bits=0, planned_survivors=400)
+    for cell in reg["required_cells"]:
+        cell.update(mask_bits=0, planned_survivors=count//lines)
     reg["capacity"].update(identity_index_capacity=count+10, max_unresolved=32)
     reg["retention"]["mode"] = mode
     for mapping in cal["mappings"]:
@@ -44,9 +52,9 @@ def fixture(root, count=400, mutate=None, mode="stream"):
     ref = Reference(cfg, "demo")
     for seq in range(count):
         packet = dict(kind="packet", run="demo", stream_id="ingress", seq=seq+1,
-            ingress_port=0, ingress_seq=seq, line="cable", selection_seq=seq,
+            ingress_port=0, ingress_seq=seq, line=names[seq%lines], selection_seq=seq//lines,
             external_identity=f"f:{seq}", flow_id="f", arrival_ns=100+seq*1000,
-            length=60, vlan_id=100, segments=1,
+            length=60, vlan_id=vlans[names[seq%lines]], segments=1,
             length_flags=dict(fcs_present=False, vlan_retained=True), app=None,
             selected_late=None, input_error=None)
         want = ref.consume(packet)
@@ -55,7 +63,7 @@ def fixture(root, count=400, mutate=None, mode="stream"):
         identity = {name:want[name] for name in ("ingress_port", "ingress_seq", "external_identity", "line")}
         state = dict(seen_next_ingress_seq={"0":seq+1}, frontiers={"0":dict(
             through_ns=want["release_ns"], input_complete=False)})
-        rows["host"] += [dict(kind="offer", **identity, at_ns=want["arrival_ns"], actual_selection_seq=seq),
+        rows["host"] += [dict(kind="offer", **identity, at_ns=want["arrival_ns"], actual_selection_seq=seq//lines),
             dict(kind="dispatch", at_ns=want["release_ns"], egress_port=1, handoff_queue_id="h",
                  first_handoff_seq=seq, identities=[identity], **state),
             dict(kind="attempt", egress_port=1, queue_id=0, attempt_id=seq,
@@ -155,6 +163,23 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(row["probe_sent"], 0)
         self.assertEqual(row["serialization"]["modeled"]["wait"]["n"], 400)
         self.assertEqual(row["serialization"]["actual_attempt"]["wait"]["n"], 400)
+
+    def test_two_lines_sharing_one_egress_port_pass_with_per_line_cells(self):
+        result = self.run_bundle(count=800, lines=2)
+        self.assertEqual(result["status"], "PASS", result.get("reason_codes"))
+        self.assertEqual(sorted((row["line"], row["timing"]["main"]["n"]) for row in result["rows"]),
+                         [("cable", 400), ("leo", 400)])
+
+    def test_shared_egress_dispatch_out_of_release_order_is_not_a_pass(self):
+        def swap(rows, reg):
+            dispatch = [row for row in rows["host"] if row["kind"]=="dispatch"][10:12]
+            attempt = [row for row in rows["host"] if row["kind"]=="attempt"][10:12]
+            dispatch[0]["identities"], dispatch[1]["identities"] = dispatch[1]["identities"], dispatch[0]["identities"]
+            for row, other in zip(attempt, attempt[::-1]):
+                row["offered"] = [dict(other["offered"][0], handoff_seq=row["offered"][0]["handoff_seq"],
+                                       gate_ns=row["offered"][0]["gate_ns"])]
+        result = self.run_bundle(count=800, lines=2, mutate=swap)
+        self.assertNotEqual(result["status"], "PASS")
 
     def test_receive_wire_order_is_independent_of_export_order(self):
         result = self.run_bundle(mutate=lambda rows, reg: rows["receiver"].reverse())
