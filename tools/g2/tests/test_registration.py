@@ -38,7 +38,7 @@ def manifest():
                              mask_bits=10, planned_survivors=440_433)],
         streams=[dict(role=role, stream_id=role, path=f"{role}.jsonl", file_sha256="b"*64)
                  for role in ("ingress", "before", "receiver", "host", "counters", "expected")],
-        capacity=dict(max_unresolved=4096, timing_sample_capacity=10000, max_diagnostics=64,
+        capacity=dict(max_unresolved=4096, timing_sample_capacity=10000, max_diagnostics=64,identity_index_capacity=1_000_000,
                       max_join_lag_ns=10**9, observer_ring_records=4096,
                       raw_record_bytes=dict(ingress=64, before=64, receiver=64, host=128),
                       join_disk_bytes=0, processing_qualified=False, storage_qualified=False,
@@ -51,6 +51,11 @@ def manifest():
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_default_streaming_registration_requires_a_positive_identity_index_bound(self):
+        registration=manifest()
+        registration["capacity"].pop("identity_index_capacity",None)
+        self.assert_invalid(registration,reason="identity.index.capacity")
+
     def assert_invalid(self, registration, configuration=None, reason=None):
         with self.assertRaisesRegex(ValueError, reason or ".+"):
             validate_registration(registration, config() if configuration is None else configuration)

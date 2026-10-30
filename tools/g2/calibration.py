@@ -165,15 +165,16 @@ class Calibration:
         if result != mapped_ns:
             raise StreamError("TIMESTAMP_MISMATCH", "retained raw time does not match mapped timestamp")
         if chronological:
-            prior = self._last_raw.get(timestamp["clock_id"])
+            order_key = timestamp["clock_id"] if chronological is True else (timestamp["clock_id"], chronological)
+            prior = self._last_raw.get(order_key)
             if prior is not None and raw < prior:
                 raise StreamError("CLOCK_BACKWARD", "raw clock stepped backward/reset/wrapped", "INCONCLUSIVE")
-            self._last_raw[timestamp["clock_id"]] = raw
+            self._last_raw[order_key] = raw
         return result, mapping
 
-    def map_timestamp(self, timestamp, mapped_ns):
+    def map_timestamp(self, timestamp, mapped_ns, order_key=None):
         """Validate in capture order; equal raw times are allowed, resets are not."""
-        return self._map(timestamp, mapped_ns, chronological=True)[0]
+        return self._map(timestamp, mapped_ns, chronological=True if order_key is None else order_key)[0]
 
     def pair(self, before, receive):
         """Join order is independent of capture order; retain uncorrected OWD."""

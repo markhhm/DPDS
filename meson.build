@@ -40,7 +40,9 @@ test('g2-software', python,
          'tools.g2.tests.test_protocol', 'tools.g2.tests.test_online',
          'tools.g2.tests.test_calibration', 'tools.g2.tests.test_custody',
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
-         'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index'],
+         'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index',
+         'tools.g2.tests.test_bundle', 'tools.g2.tests.test_serializer',
+         'tools.g2.tests.test_live_custody'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 threads = dependency('threads')

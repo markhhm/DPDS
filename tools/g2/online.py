@@ -101,14 +101,15 @@ class Retention:
 
 class ReceiveOrder:
     """Reconstruct contiguous wire order from bounded, possibly reordered exports."""
-    def __init__(self,capacity):
+    def __init__(self,capacity,port_field="egress_port",sequence_field="receive_seq"):
         self.capacity=uint(capacity,"receiver reorder capacity")
         self.next={}
         self.pending={}
+        self.port_field,self.sequence_field=port_field,sequence_field
 
     def push(self,row):
-        port=uint(row["egress_port"],"egress",65535)
-        seq=uint(row["receive_seq"],"receive sequence")
+        port=uint(row[self.port_field],"observation port",65535)
+        seq=uint(row[self.sequence_field],"observation sequence")
         prefix=self.next.get(port,0)
         if seq<prefix or (port,seq) in self.pending:
             raise ValueError("duplicate receive sequence")
@@ -168,17 +169,23 @@ class OnlineCells:
             return
         counts=cell["counts"]
         counts["ingress"]+=1
+        counts["offered_l1_bytes"]+=row["wire_bytes"]
         counts[row["outcome"]]+=1
         cell["q_peak"]=max(cell["q_peak"],row["q_bytes"])
         cell["q_drain"]=max(cell["q_drain"],row["q_drain_ns"])
+        counts["clamped"]+=bool(row.get("clamp_extra_ns"))
+        counts["clamp_extra_ns"]+=row.get("clamp_extra_ns",0)
+        if row["outcome"]=="accepted":
+            counts["modeled_outage_hold_ns"]+=row["release_ns"]-row["deadline_ns"]
         if row.get("selected_late") is not None:
             counts["probe_sent"]+=1
+            counts["probe_selected_late"]+=row["late"]
         if row["outcome"]=="accepted" and self._main(row,cell):
             counts["main_selected"]+=1
         if row["outcome"]=="accepted":
             cell["populations"].update(self._strata(row,cell))
 
-    def delivery(self,row,owd_ns,uncertainty_ns,expected_ns=None):
+    def delivery(self,row,owd_ns,uncertainty_ns,expected_ns=None,raw_owd_ns=None):
         cell=self._cell(row)
         if cell is None:
             return
@@ -187,6 +194,8 @@ class OnlineCells:
             cell["counts"]["unexpected_delivery"]+=1
             return
         cell["counts"]["received"]+=1
+        cell["counts"]["delivered_l1_bytes"]+=row["wire_bytes"]
+        cell["counts"]["delivered_l2_bytes"]+=row["l2_bytes"]
         if row.get("selected_late") is not None:
             cell["counts"]["probe_received"]+=1
         names=self._strata(row,cell)
@@ -206,9 +215,11 @@ class OnlineCells:
         cell["uncertainty"]=max(cell["uncertainty"],uncertainty_ns)
         main=self._main(row,cell)
         for name in names:
-            group=cell["groups"].setdefault(name,(Histogram(),Histogram()))
+            group=cell["groups"].setdefault(name,(Histogram(),Histogram(),Histogram(),Histogram()))
             group[0].add(error)
             group[1].add(abs(error))
+            group[2].add(owd_ns if raw_owd_ns is None else raw_owd_ns)
+            group[3].add(owd_ns)
         if main:
             if len(cell["errors"])>=self.sample_capacity:
                 cell["incomplete"].add("timing_sample_capacity")
@@ -282,20 +293,28 @@ class OnlineCells:
             failures=list(cell["failures"])+[name for name,gate in gates.items() if gate["status"]=="FAIL"]
             incomplete=sorted(cell["incomplete"])
             state="INCONCLUSIVE" if incomplete else "FAIL" if failures else "INCONCLUSIVE" if any(gate["status"]=="INCONCLUSIVE" for gate in gates.values()) else "PASS"
-            groups={name:dict(n=signed.n,signed_error=signed.snapshot(),absolute_error=absolute.snapshot())
-                    for name,(signed,absolute) in cell["groups"].items()}
+            groups={name:dict(n=signed.n,signed_error=signed.snapshot(),absolute_error=absolute.snapshot(),
+                             raw_owd=raw.snapshot(),corrected_owd=corrected.snapshot())
+                    for name,(signed,absolute,raw,corrected) in cell["groups"].items()}
             for name,population in cell["populations"].items():
                 group=groups.setdefault(name,dict(n=0))
                 group.update(population=population,datapath_lost=cell["lost_groups"][name],
                              missing=population-group["n"]-cell["lost_groups"][name])
             groups.setdefault("main",dict(n=0))
             groups["main"].update(stats)
+            for name in ("main","ordinary-main","late-main","late_extra",*(
+                    "app_extra:"+app for app in self.manifest["sampling"]["oversample_apps"])):
+                group=groups.setdefault(name,dict(n=0,population=0,datapath_lost=0,missing=0))
+                group["status"]="not_applicable" if not group.get("population",0) else "INCONCLUSIVE" if group.get("missing",0) else "available"
+            for name in ("median","p99"):
+                groups["main"][name+"_upper_unbounded"]=stats[name+"_ci_ns"][1] is None
             rows.append(dict(condition_id=self.manifest["condition_id"],repeat=cell["registration"].get("repeat",0),
-                direction=direction,line=line,phase=phase,required=True,status="INVALID" if state=="INCONCLUSIVE" else state,
+                direction=direction,line=line,phase=phase,required=cell["registration"].get("required",True),status="INVALID" if state=="INCONCLUSIVE" else state,
                 measurement_status=state,g2_qualified=False,gates=gates,counts={**{name:0 for name in
                     ("ingress","accepted","received","datapath_lost","probe_sent","probe_received")},**dict(counts)},timing=groups,
                 reason_codes=incomplete,observed_failures=failures,
                 q=dict(peak_l2_bytes=cell["q_peak"],peak_drain_ns_at_c=cell["q_drain"])))
-        status="FAIL" if any(row["status"]=="FAIL" for row in rows) else "INVALID" if any(row["status"]!="PASS" for row in rows) else "PASS"
+        required=[row for row in rows if row["required"]]
+        status="FAIL" if any(row["status"]=="FAIL" for row in required) else "INVALID" if any(row["status"]!="PASS" for row in required) else "PASS"
         return dict(status=status,rows=rows,scope=self.manifest["scope"],g2_qualified=False,identity_index=identity_index,
                     banner="software-only, not G2" if self.manifest["scope"]=="software-only" else "requires complete physical evidence")
