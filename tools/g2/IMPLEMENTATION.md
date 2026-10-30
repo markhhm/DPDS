@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # HNG observer v1 implementation plan
 
-**Goal:** Finish software M2 against DPDS-Core `fd4ed12`, current spec `1be2960`,
-`docs/HNG-OBSERVER.md` (`hng-observer-v1`). Existing delivery is host20433e1,
-core4ae06c5. All work stays on the measurement branch; no hardware access.
+**Goal:** Finish software M2 against DPDS-Core `8e42ecc`, current spec `fec34a4`,
+`docs/HNG-OBSERVER.md` (`hng-observer-v1`). Existing delivery is host0554cad,
+corea0d108d. All work stays on the measurement branch; no hardware access.
 
 **Architecture:** A strict sealed interchange surrounds the existing independent
 Fraction reference. Bounded active joins reconcile complete ingress, external
@@ -140,7 +140,7 @@ Files: report.py, stats helpers if needed, README.md, tests, Meson.
 - Typed counter normalization verifies complete source seals, start/end deltas,
   descriptor semantics, latched periodic resets, drain and observer accounting.
   It retains bounded scope state and preserves unavailable values as null.
-- The volatile identity/outcome index follows the Core fe20ae2 proposal: explicit
+- The volatile identity/outcome index follows the Core f8c1e53 proposal: explicit
   entry cap, no disk fallback/full packet history, teardown on completion/abort,
   heap formulas and per-cell join_overflow that always prevents a cell PASS.
   It returns classification facts; source health and active joins remain caller

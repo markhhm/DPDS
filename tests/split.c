@@ -19,7 +19,7 @@
  * fifth sequence number: TX retries at the same tick, so records stay the same.
  *
  * The single-owner output must also match a golden digest from the pre-M4
- * scheduler (DPDS d75f4fc). Regenerate it by building this file with
+ * scheduler (DPDS a5cc3b5). Regenerate it by building this file with
  * -DSPLIT_PRE_M4 against that revision and running it with SPLIT_GOLDEN_WRITE=path.
  */
 #include <assert.h>

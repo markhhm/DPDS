@@ -44,7 +44,7 @@ wire order from `receive_seq` within a registered bound, independently of export
 line order. Its gaps remain incomplete evidence.
 
 `identity_index.IdentityIndex` implements the bounded volatile index proposal
-in Core `fe20ae2`. It requires an explicit positive
+in Core `f8c1e53`. It requires an explicit positive
 `capacity.identity_index_capacity`. It retains only exact identity keys and
 compact outcome/delivery/cell tags in memory. It never writes an index to disk
 or retains a packet dictionary. `finish()` and context-manager teardown release

@@ -157,7 +157,7 @@ burst and 2046 frames it dropped 40-83 frames per run, so Q is now 1.5 MiB
 (1033 MTU frames, more than one direction's 1023): the fixture cannot drop
 in Q, and `ring_rate.py` fails on a Q drop. All runs below had q_drop=0.
 
-Before (17ed333 plus the histogram print) and after, same rounds: 1518-byte
+Before (c84b2fe plus the histogram print) and after, same rounds: 1518-byte
 mbufs, one lcore per physical core, three rounds each running all eight
 cases back to back, one-minute load average 3.4-6.4. Total Mpps, median
 (range); TX burst histogram of one run, calls with 1, 2-3, 4-7, 8-15 and 16
