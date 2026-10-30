@@ -124,6 +124,8 @@ int main(int argc, char **argv)
     }
     if (rte_lcore_count() < 2 || rte_lcore_count() == 6 || rte_lcore_count() > 7)
         rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4, 5 or 7 lcores\n");
+    if (observe_fd >= 0 && rte_lcore_count() == 7)
+        rte_exit(EXIT_FAILURE, "Observation is unsupported with 7 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "HNG configuration rejected before RX\n");
     uint16_t port;
     RTE_ETH_FOREACH_DEV(port) host.ports[host.port_count++] = port;

@@ -80,18 +80,31 @@ def run(binary, cores, enabled, directory):
         command += ['--observe-fd', str(writer), '--observe-software', '--observe-identity', 'software-l2']
     process = subprocess.Popen(command, pass_fds=(writer,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     os.close(writer)
+    reject = cores == 7 and enabled
     try:
-        prefix = wait_for_output(process, f'layout={cores}-lcore'.encode())
-        time.sleep(0.05)
-        process.send_signal(signal.SIGINT)
-        output, _ = process.communicate(timeout=10)
-        output = prefix + output
+        if reject:
+            try:
+                output, _ = process.communicate(timeout=8)
+            except subprocess.TimeoutExpired as error:
+                raise AssertionError('7-lcore observation did not reject startup') from error
+        else:
+            prefix = wait_for_output(process, f'layout={cores}-lcore'.encode())
+            time.sleep(0.05)
+            process.send_signal(signal.SIGINT)
+            output, _ = process.communicate(timeout=10)
+            output = prefix + output
     finally:
         if process.poll() is None:
             process.kill()
             process.communicate()
     thread.join(timeout=3)
     assert not thread.is_alive(), 'export descriptor was not closed'
+    if reject:
+        assert process.returncode != 0, output
+        assert 'layout=' not in output and 'pool port=' not in output, output
+        assert rows == [], rows
+        print('native export 7 lcores rejected before pools or producers: PASS')
+        return
     assert process.returncode == 0, output
     assert 'rx=8 ' in output and 'tx_accepted=8 ' in output, output
     assert 'status=DRAINED' in output and output.count('owned=0') == 2, output
@@ -141,6 +154,6 @@ def run(binary, cores, enabled, directory):
 if __name__ == '__main__':
     binary = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory() as tmp:
-        for cores in (2, 3, 4, 5):
+        for cores in (2, 3, 4, 5, 7):
             for enabled in (False, True):
                 run(binary, cores, enabled, Path(tmp))
