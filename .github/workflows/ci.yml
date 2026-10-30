@@ -15,10 +15,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: python -m pip install -r dpds-core/scripts/trace-requirements.txt
       - name: Build user-local DPDK with virtual PMDs
         run: |
           sudo apt-get update
@@ -29,6 +25,10 @@ jobs:
           meson setup dpdk-build dpdk-26.03 --prefix="$RUNNER_TEMP/dpdk" --libdir=lib -Dexamples= -Dtests=false -Denable_drivers=net/null,net/pcap,net/ring,net/af_packet,mempool/ring,bus/vdev
           meson compile -C dpdk-build -j 4
           meson install -C dpdk-build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r dpds-core/scripts/trace-requirements.txt
       # Same script as the pre-push hook: policy scan, pinned-core checks, Meson suite.
       # The runner may forbid unprivileged user namespaces; io-af-packet may then
       # SKIP, which check-skips.py prints and annotates as a warning (not a pass).
