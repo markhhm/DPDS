@@ -26,7 +26,7 @@ fixed, _ = slots(["--t-ms", "640", "--delta-ms", "0"])
 assert trace == fixed and "mode=trace" in out and "mean_occupancy" not in out, out
 # A small configuration that fits in the default --no-huge memory.
 command = [binary, "-l", "0", "--no-pci", "--no-huge", "--no-telemetry", "-m", "512",
-           f"--file-prefix=hng-pool-{os.getpid()}", "--vdev=net_null0", "--vdev=net_null1", "--",
+           "--in-memory", f"--file-prefix=hng-pool-{os.getpid()}", "--vdev=net_null0", "--vdev=net_null1", "--",
            "--c-bps", "1000000000", "--t-ms", "20", "--delta-ms", "40", "--q-ms", "5",
            "--burst", "256", "--lines-per-port", "2", "--verify"]
 run = subprocess.run(command, capture_output=True, text=True)

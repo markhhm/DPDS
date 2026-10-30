@@ -21,7 +21,7 @@ cases += [(cores, True, -delay) for cores in (2, 5, 7) for delay in (0.001, 0.01
 for cores, no_rx, delay in cases:
     suffix = ",no-rx=1" if no_rx else ""
     command = [binary]+eal_arguments(cores)+["--no-pci", "--no-huge",
-               "--no-telemetry", "-m", "256", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}-{delay}",
+               "--no-telemetry", "-m", "256", "--in-memory", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}-{delay}",
                f"--vdev=net_null0{suffix}", f"--vdev=net_null1{suffix}"]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if delay < 0:

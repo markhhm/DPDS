@@ -17,7 +17,7 @@ foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'ri
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
-  args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--file-prefix=hng-' + name]
+  args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-' + name]
   if name == 'rings'
     args += ['--vdev=net_null0,no-rx=1', '--vdev=net_null1,no-rx=1']
   endif

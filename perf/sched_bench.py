@@ -25,5 +25,5 @@ if cpus is None:
     allowed = sorted(os.sched_getaffinity(0))
     cpus = [allowed[i % len(allowed)] for i in range(3)]
 command = [binary, "--lcores=" + ",".join(f"{i}@{c}" for i, c in enumerate(cpus)), "--no-pci", "--no-huge",
-           "--no-telemetry", "-m", memory, f"--file-prefix=hng-sched-{os.getpid()}", "--"] + extra
+           "--no-telemetry", "-m", memory, "--in-memory", f"--file-prefix=hng-sched-{os.getpid()}", "--"] + extra
 sys.exit(subprocess.run(command).returncode)

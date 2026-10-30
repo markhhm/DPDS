@@ -29,7 +29,7 @@ config = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] != "-
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "ring_rate.json")
 extra = sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else ["-d", "0.2", "-w", "0.05"]
 command = [binary]+(["--lcores="+",".join(f"{i}@{c}" for i, c in enumerate(cpus[:lcores]))] if cpus else eal_arguments(lcores))+["--no-pci", "--no-huge", "--no-telemetry", "-m", "512",
-           f"--file-prefix=hng-rate-{os.getpid()}", "--", "-c", config]+extra
+           "--in-memory", f"--file-prefix=hng-rate-{os.getpid()}", "--", "-c", config]+extra
 result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
 print(result.stdout, end="")
 assert result.returncode == 0, "hng-ring-rate failed"

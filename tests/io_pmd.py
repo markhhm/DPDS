@@ -62,7 +62,7 @@ def pcap(path, seed, port):
 
 def eal(binary, lcores=4):
     return [binary]+eal_arguments(lcores)+["--no-pci", "--no-huge", "--no-telemetry",
-            f"--file-prefix=hng-io-{os.getpid()}"]
+            "--in-memory", f"--file-prefix=hng-io-{os.getpid()}"]
 
 
 def smoke(binary, directory):
