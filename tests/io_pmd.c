@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,10 @@ static unsigned seed,epoch,epochs,owners=1;
 /* split: one production scheduler owner per ingress port, each with its own RX handoff.
  * io_split: also one RX owner and one TX owner (own TX handoff and TX state) per direction. */
 static bool ring_mode,stepped,split,io_split;
+/* More lcores than allowed CPUs (tests/eal_args.py stacks them): a polling lcore must give up its
+ * CPU, or the lcore it waits for only runs when the scheduler preempts the poller. */
+static bool oversubscribed;
+static void spin(void) { if(oversubscribed) sched_yield(); else rte_pause(); }
 static unsigned stages(void) { return 3+(unsigned)split+2*(unsigned)io_split; }
 /* Stepped mode: shared fixture clock and backpressure evidence. */
 static _Atomic uint64_t clock_ns;
@@ -43,6 +48,7 @@ static void enqueue(struct rte_ring *r,struct rte_mbuf **m,unsigned n)
     while(sent<n) {
         sent+=rte_ring_enqueue_burst(r,(void **)(m+sent),n-sent,NULL);
         for(unsigned k=0;k<owners;++k) if(sent<n && r==rx_handoff[k]) atomic_fetch_add(&rx_full[k],1);
+        if(sent<n) spin();
     }
 }
 static void clock_advance(uint64_t t) { uint64_t c=atomic_load(&clock_ns); while(c<t && !atomic_compare_exchange_weak(&clock_ns,&c,t)) {} }
@@ -56,6 +62,7 @@ static int receive_owner(void *arg)
             if(io_split && p!=k) continue;
             struct rte_mbuf *batch[MAX_BURST_SIZE];
             unsigned n=rte_eth_rx_burst(p,0,batch,MAX_BURST_SIZE);
+            if(!n) spin();
             for(unsigned i=0;i<n;++i) {
                 struct rte_mbuf *m=batch[i]; const uint8_t *d=rte_pktmbuf_mtod(m,const uint8_t *);
                 assert(m->pkt_len>=76 && received[p]<IO_BATCH);
@@ -84,11 +91,12 @@ static int scheduler_owner(void *arg)
         uint64_t *now=now_k+k,*last_arrival=last_k+k,*steps=steps_k+k;
         if(seed_epoch()==0) *now=*last_arrival=0;
         /* Stepped: hold the RX handoff until it is full and its producer has blocked. */
-        if(stepped) { uint64_t blocked=atomic_load(&rx_full[k]); while(atomic_load(&rx_full[k])==blocked) rte_pause(); }
+        if(stepped) { uint64_t blocked=atomic_load(&rx_full[k]); while(atomic_load(&rx_full[k])==blocked) spin(); }
         while(received<batch) {
             struct rte_mbuf *in[MAX_BURST_SIZE],*out[MAX_BURST_SIZE];
             unsigned n=rte_ring_dequeue_burst(rx_handoff[k],(void **)in,MAX_BURST_SIZE,NULL);
             received+=n;
+            if(!n) spin();
             if(!stepped) {
                 unsigned emitted=worker_step_at(&worker,in,n,out,0);
                 assert(emitted==0); /* All arrivals are admitted before advancing the fixture clock. */
@@ -139,6 +147,7 @@ static int transmit_owner(void *arg)
             for(unsigned line=0;stepped && line<HNG_MAX_LINES;++line) if(tx.pending[line].len>TX_PENDING_PER_LINE-MAX_BURST_SIZE) room=false;
             if(!room) tx_hold++;
             unsigned n=room?rte_ring_dequeue_burst(ring,(void **)in,MAX_BURST_SIZE,NULL):0;
+            if(!n) spin();
             tx_step_at(&tx,in,n,stepped?atomic_load(&clock_ns):fixture_now());
         } while(atomic_load(&workers_done)<owners || !rte_ring_empty(ring) || tx_has_backlog(&tx));
         tx_state_cleanup(&tx); atomic_fetch_add(&tx_done,1);
@@ -307,6 +316,7 @@ int main(int argc,char **argv)
     stepped=strncmp(mode,"ring-stepped",12)==0; ring_mode=stepped || strncmp(mode,"ring",4)==0;
     unsigned ring_size=stepped?64:4096; /* Small rings make every producer block. */ epochs=ring_mode?32*153:1;
     assert(rte_eal_init(argc,argv)>=0 && rte_lcore_count()==1+stages());
+    { cpu_set_t allowed; assert(!sched_getaffinity(0,sizeof(allowed),&allowed)); oversubscribed=rte_lcore_count()>(unsigned)CPU_COUNT(&allowed); }
     if(ring_mode) for(unsigned p=0;p<2;++p) {
         char a[32],b[32],port[32]; snprintf(a,sizeof(a),"source%u",p); snprintf(b,sizeof(b),"sink%u",p);
         struct rte_ring *rx=rte_ring_create(a,ring_size,rte_socket_id(),RING_F_SP_ENQ|RING_F_SC_DEQ);
@@ -365,6 +375,7 @@ int main(int argc,char **argv)
                 struct rte_mbuf *packets[MAX_BURST_SIZE]; unsigned n=rte_eth_rx_burst(p+2,0,packets,MAX_BURST_SIZE);
                 for(unsigned i=0;i<n;++i) { check_frame(rte_pktmbuf_mtod(packets[i],const uint8_t *),packets[i]->pkt_len,p,expected,count,next); rte_pktmbuf_free(packets[i]); observed++; }
             }
+            spin();
         } while(atomic_load(&tx_done)<directions || observed<count);
         pthread_barrier_wait(&barrier);
         for(unsigned k=0;split && k<2;++k) worker_stats_merge(&stats.worker,&stats.owners[k],(int)k);
