@@ -8,8 +8,11 @@
  * the real allocation.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <malloc.h>
 #include <math.h>
 #include <stdio.h>
@@ -38,7 +41,48 @@ struct plan {
 
 static const double GIB = 1024.0 * 1024.0 * 1024.0;
 
-static uint64_t ms_to_ns(const char *s) { return (uint64_t)llround(strtod(s, NULL) * 1e6); }
+/* Option parsing is strict: the whole string must be a valid value, or the run fails.
+ * Integers are decimal digits with an optional exponent ("100e9"); the result must be an exact integer. */
+static bool parse_u64(const char *s, uint64_t max, uint64_t *out)
+{
+    if (!isdigit((unsigned char)*s)) return false;
+    char *end;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno) return false;
+    if (*end == 'e' || *end == 'E') {
+        if (!isdigit((unsigned char)end[1])) return false;
+        unsigned long long exponent = strtoull(end + 1, &end, 10);
+        if (errno || exponent > 19) return false;
+        for (; exponent; --exponent) {
+            if (v > UINT64_MAX / 10) return false;
+            v *= 10;
+        }
+    }
+    if (*end || v > max) return false;
+    *out = v;
+    return true;
+}
+
+/* Non-negative decimal number, optionally with an exponent. */
+static bool parse_number(const char *s, double max, double *out)
+{
+    if (!isdigit((unsigned char)*s) && *s != '.') return false;
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno || *end || !isfinite(v) || v < 0 || v > max) return false;
+    *out = v;
+    return true;
+}
+
+static bool parse_ms(const char *s, uint64_t *ns)
+{
+    double ms;
+    if (!parse_number(s, 1.8e13, &ms)) return false;
+    *ns = (uint64_t)llround(ms * 1e6);
+    return true;
+}
 
 static size_t mbuf_element_bytes(void)
 {
@@ -203,32 +247,42 @@ int main(int argc, char **argv)
     int own_argc = split ? argc - split : argc;
     char **own_argv = split ? argv + split : argv;
     int option;
-    while ((option = getopt_long(own_argc, own_argv, "", options, NULL)) != -1) {
+    int index = 0;
+    while ((option = getopt_long(own_argc, own_argv, "", options, &index)) != -1) {
+        uint64_t v = 0;
+        bool ok = true;
         switch (option) {
-        case 'c': x.c_bps = strtoull(optarg, NULL, 10); break;
-        case 't': x.t_ns = ms_to_ns(optarg); break;
-        case 'd': x.delta_ns = ms_to_ns(optarg); break;
-        case 'q': x.q_ns = ms_to_ns(optarg); break;
+        case 'c': ok = parse_u64(optarg, UINT64_MAX, &x.c_bps); break;
+        case 't': ok = parse_ms(optarg, &x.t_ns); break;
+        case 'd': ok = parse_ms(optarg, &x.delta_ns); break;
+        case 'q': ok = parse_ms(optarg, &x.q_ns); break;
         case 'p':
             if (!p_given) x.p_count = 0;
             p_given = true;
-            if (x.p_count < 8) x.p[x.p_count++] = strtod(optarg, NULL);
+            ok = x.p_count < 8 && parse_number(optarg, 1.0, &x.p[x.p_count]);
+            x.p_count += ok;
             break;
-        case 'm': x.min_q = strtoull(optarg, NULL, 10); break;
-        case 'M': x.max_q = strtoull(optarg, NULL, 10); break;
-        case 'b': x.burst = strtoull(optarg, NULL, 10); break;
-        case 'k': x.lines = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'l': x.lcores = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'r': x.rx_desc = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'x': x.tx_desc = (unsigned)strtoul(optarg, NULL, 10); break;
-        case 'T': x.trace = true; x.trace_delay_ns = ms_to_ns(optarg); break;
-        case 'H': x.trace = true; x.trace_hold_ns = ms_to_ns(optarg); break;
-        case 'g': x.page = strtoull(optarg, NULL, 10); break;
+        case 'm': ok = parse_u64(optarg, UINT64_MAX, &x.min_q); break;
+        case 'M': ok = parse_u64(optarg, UINT64_MAX, &x.max_q); break;
+        case 'b': ok = parse_u64(optarg, UINT64_MAX, &x.burst); break;
+        case 'k': ok = parse_u64(optarg, UINT_MAX, &v); x.lines = (unsigned)v; break;
+        case 'l': ok = parse_u64(optarg, UINT_MAX, &v); x.lcores = (unsigned)v; break;
+        case 'r': ok = parse_u64(optarg, UINT_MAX, &v); x.rx_desc = (unsigned)v; break;
+        case 'x': ok = parse_u64(optarg, UINT_MAX, &v); x.tx_desc = (unsigned)v; break;
+        case 'T': x.trace = true; ok = parse_ms(optarg, &x.trace_delay_ns); break;
+        case 'H': x.trace = true; ok = parse_ms(optarg, &x.trace_hold_ns); break;
+        case 'g': ok = parse_u64(optarg, UINT64_MAX, &x.page); break;
         case 'v': do_verify = true; break;
         default:
             fprintf(stderr, "usage: hng-pool-calc [EAL_ARGS --] [--c-bps C] [--t-ms T] [--delta-ms D]"
                 " [--q-ms Q] [--p P]... [--min-frame L2] [--max-frame L2] [--burst N]"
-                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--trace-max-delay-ms D --trace-max-hold-ms H] [--verify]\n");
+                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--trace-max-delay-ms D --trace-max-hold-ms H] [--verify]\n"
+                "integers: decimal digits, optionally with an exponent (100e9 = 100000000000); no sign, space or fraction.\n"
+                "-ms options: non-negative decimal; --p: 0 to 1, at most 8 values. Any invalid value exits with status 2.\n");
+            return 2;
+        }
+        if (!ok) {
+            fprintf(stderr, "invalid value for --%s: '%s'\n", options[index].name, optarg);
             return 2;
         }
     }
