@@ -6,7 +6,8 @@ cd "$(git rev-parse --show-toplevel)"
 # The policy scan lives in the pinned core; it checks this repository's tree.
 dpds-core/scripts/check-policy.sh
 # Pinned core revision: its own policy scan, fmt, clippy --locked and tests.
-(cd dpds-core && scripts/check.sh)
+# A pre-push hook in a worktree exports GIT_DIR, which would make the core's git commands see this repository.
+(cd dpds-core && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE scripts/check.sh)
 # Meson's core build target calls cargo by name.
 . dpds-core/scripts/find-cargo.sh
 if [ ! -f build/build.ninja ]; then
