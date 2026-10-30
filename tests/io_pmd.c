@@ -316,7 +316,7 @@ int main(int argc,char **argv)
     stepped=strncmp(mode,"ring-stepped",12)==0; ring_mode=stepped || strncmp(mode,"ring",4)==0;
     unsigned ring_size=stepped?64:4096; /* Small rings make every producer block. */ epochs=ring_mode?32*153:1;
     assert(rte_eal_init(argc,argv)>=0 && rte_lcore_count()==1+stages());
-    { cpu_set_t allowed; assert(!sched_getaffinity(0,sizeof(allowed),&allowed)); oversubscribed=rte_lcore_count()>(unsigned)CPU_COUNT(&allowed); }
+    { cpu_set_t allowed; int rc=sched_getaffinity(0,sizeof(allowed),&allowed); assert(!rc); (void)rc; oversubscribed=rte_lcore_count()>(unsigned)CPU_COUNT(&allowed); }
     if(ring_mode) for(unsigned p=0;p<2;++p) {
         char a[32],b[32],port[32]; snprintf(a,sizeof(a),"source%u",p); snprintf(b,sizeof(b),"sink%u",p);
         struct rte_ring *rx=rte_ring_create(a,ring_size,rte_socket_id(),RING_F_SP_ENQ|RING_F_SC_DEQ);
