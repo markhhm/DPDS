@@ -79,31 +79,36 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
             struct mbuf_table *table = &s->pending[line];
             if (!table->len || pending_at(table)[0]->port != port) continue;
-            struct rte_mbuf *m = pending_at(table)[0];
-            uint32_t gate = host.policies[line] ? hng_tx_policy_gate(host.policies[line], now) : 0;
-            if (gate == 1) {
-                if (now - packet_meta(m)->pending_since_ns > SHUTDOWN_TIMEOUT_NS) {
-                    host_invalidate("TX outage hold exceeded bounded backlog time");
-                    terminal_drop(s, line);
+            /* Every replacement head must pass validation before the merge can include it. */
+            while (table->len) {
+                struct rte_mbuf *m = pending_at(table)[0];
+                uint32_t gate = host.policies[line] ? hng_tx_policy_gate(host.policies[line], now) : 0;
+                if (gate == 1) {
+                    if (now - packet_meta(m)->pending_since_ns > SHUTDOWN_TIMEOUT_NS) {
+                        host_invalidate("TX outage hold exceeded bounded backlog time");
+                        terminal_drop(s, line);
+                        continue;
+                    }
+                    break;
                 }
-                continue;
+                if (gate == 2) {
+                    host_invalidate("missed-deadline outage drop after model release");
+                    s->stats->trace_outage_drops++;
+                    s->stats->trace_outage_bytes += m->pkt_len;
+                    s->stats->line_outage_drops[line]++;
+                    rte_pktmbuf_free(m);
+                    remove_head(table);
+                    continue;
+                }
+                if (gate != 0 || (packet_meta(m)->retry_active &&
+                    now - packet_meta(m)->retry_since_ns > TERMINAL_TIMEOUT_NS)) {
+                    host_invalidate(gate ? "TX trace coverage expired" : "TX retry timeout");
+                    terminal_drop(s, line);
+                    continue;
+                }
+                if (chosen == HNG_MAX_LINES || key_before(m, pending_at(&s->pending[chosen])[0])) chosen = line;
+                break;
             }
-            if (gate == 2) {
-                host_invalidate("missed-deadline outage drop after model release");
-                s->stats->trace_outage_drops++;
-                s->stats->trace_outage_bytes += m->pkt_len;
-                s->stats->line_outage_drops[line]++;
-                rte_pktmbuf_free(m);
-                remove_head(table);
-                continue;
-            }
-            if (gate != 0 || (packet_meta(m)->retry_active &&
-                now - packet_meta(m)->retry_since_ns > TERMINAL_TIMEOUT_NS)) {
-                host_invalidate(gate ? "TX trace coverage expired" : "TX retry timeout");
-                terminal_drop(s, line);
-                continue;
-            }
-            if (chosen == HNG_MAX_LINES || key_before(m, pending_at(&s->pending[chosen])[0])) chosen = line;
         }
         if (chosen == HNG_MAX_LINES) continue;
         /* Gather one burst for this port: merge the eligible lines' pending frames in
