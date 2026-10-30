@@ -10,12 +10,13 @@ core = declare_dependency(
   compile_args: ['-I' + meson.project_source_root() / 'dpds-core/target'], sources: cargo_build)
 python = find_program('python3')
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
-common_sources = ['common/common.c', 'core/worker.c', 'core/transmit.c']
+threads = dependency('threads')
+common_sources = ['common/observer.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
-  dependencies: [dpdk, core], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending']
+  dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'observer', 'observer_split']
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
-    dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
+    dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--file-prefix=hng-' + name]
   if name == 'rings'
@@ -45,7 +46,6 @@ test('g2-software', python,
          'tools.g2.tests.test_live_custody'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
-threads = dependency('threads')
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
 io_oracle = executable('io-oracle-test', ['tests/io_oracle_test.c', 'tests/io_oracle.c'], c_args: ['-UNDEBUG'])
 test('io-oracle', io_oracle)
@@ -67,15 +67,20 @@ test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_r
   timeout: 60, is_parallel: false)
 test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--split', ring_rate],
   timeout: 60, is_parallel: false)
-pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c'],
-  dependencies: [dpdk, core], link_args: ['-lm'],
+pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/observer.c'],
+  dependencies: [dpdk, core, threads], link_args: ['-lm'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
   timeout: 60, is_parallel: false)
 configure_file(input: 'perf/sched_bench.json', output: 'sched_bench.json', copy: true)
 configure_file(input: 'perf/sched_bench_prod.json', output: 'sched_bench_prod.json', copy: true)
 sched_bench = executable('hng-sched-bench', ['perf/sched_bench.c'] + common_sources,
-  dependencies: [dpdk, core],
+  dependencies: [dpdk, core, threads],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-sched-bench', python, args: [meson.project_source_root() / 'perf/sched_bench.py', sched_bench,
   '--', '-n', '50000', '-w', '0', '-r', '1'], workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
+
+test('observer-export', python, args: [meson.project_source_root() / 'tests/observer_export.py', dpds_exe],
+  timeout: 90, is_parallel: false)
+test('observer-adapter', python, args: [meson.project_source_root() / 'tests/observer_adapter.py'],
+  timeout: 30, is_parallel: false)

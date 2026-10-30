@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <string.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
@@ -99,10 +100,26 @@ int main(int argc, char **argv)
     argc -= eal_args; argv += eal_args;
     const char *config = "config.json", *stats_path = NULL;
     optind = 1;
-    int option;
-    while ((option = getopt(argc, argv, "c:o:")) != -1) {
+    int option, observe_fd = -1;
+    unsigned observe_capacity = 4096, observe_port = 9000;
+    bool observe_software = false;
+    const char *observe_identity = NULL;
+    static const struct option options[] = {
+        {"observe-fd", required_argument, NULL, 1000}, {"observe-software", no_argument, NULL, 1001},
+        {"observe-identity", required_argument, NULL, 1002}, {"observe-capacity", required_argument, NULL, 1003},
+        {"observe-probe-port", required_argument, NULL, 1004}, {NULL, 0, NULL, 0}};
+    while ((option = getopt_long(argc, argv, "c:o:", options, NULL)) != -1) {
         if (option == 'c') config = optarg;
         else if (option == 'o') stats_path = optarg;
+        else if (option == 1001) observe_software = true;
+        else if (option == 1002) observe_identity = optarg;
+        else if (option == 1000 || option == 1003 || option == 1004) {
+            char *end; unsigned long value = strtoul(optarg, &end, 10);
+            if (!*optarg || *end || optarg[0] == '-' || value > INT_MAX) rte_exit(EXIT_FAILURE, "Invalid observer integer\n");
+            if (option == 1000) observe_fd = (int)value;
+            if (option == 1003) observe_capacity = (unsigned)value;
+            if (option == 1004) observe_port = (unsigned)value;
+        }
         else rte_exit(EXIT_FAILURE, "Usage: ... -- [-c config.json] [-o stats.txt]\n");
     }
     if (rte_lcore_count() < 2 || rte_lcore_count() > 5)
@@ -133,6 +150,21 @@ int main(int argc, char **argv)
         printf("pool port=%u numa=%d objects=%"PRIu64" object_bytes=%u total_object_bytes=%"PRIu64"\n",
             port, socket, count, size.total_size, count * size.total_size);
     }
+    if (observe_fd >= 0) {
+        if (observe_fd <= STDERR_FILENO) rte_exit(EXIT_FAILURE, "Observer FD must be separate from standard streams\n");
+        if (!observe_software || !observe_identity ||
+            (strcmp(observe_identity, "stage1") && strcmp(observe_identity, "software-l2")))
+            rte_exit(EXIT_FAILURE, "Capture requires --observe-software and --observe-identity stage1|software-l2\n");
+        for (unsigned p = 0; p < host.port_count; ++p) {
+            struct rte_eth_dev_info info;
+            if (rte_eth_dev_info_get(host.ports[p], &info) || !info.driver_name ||
+                (strcmp(info.driver_name, "net_pcap") && strcmp(info.driver_name, "net_ring") && strcmp(info.driver_name, "net_null")))
+                rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
+        }
+        if (!observer_open(observe_fd, !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2,
+            observe_port, observe_capacity)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
+    } else if (observe_software || observe_identity)
+        rte_exit(EXIT_FAILURE, "Observer options require --observe-fd\n");
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
         if (initialize_port(port, pools[port]) != 0) rte_exit(EXIT_FAILURE, "Port %u initialization failed\n", port);
@@ -145,7 +177,7 @@ int main(int argc, char **argv)
     bool split = workers == 4;
     if (split && (host.port_count != 2 || !host_split_valid()))
         rte_exit(EXIT_FAILURE, "5 lcores need two ports, each egress fed by one ingress port\n");
-    struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0};
+    struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0}, *tx_owner_rings[2] = {0};
     if (workers >= 2 && !split) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     for (unsigned k = 0; split && k < 2; ++k) {
         char name[32];
@@ -153,9 +185,14 @@ int main(int argc, char **argv)
         owner_rings[k] = rte_ring_create(name, SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
         if (!owner_rings[k]) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
     }
-    /* Two schedulers share the TX handoff ring as producers. */
-    if (workers >= 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | (split ? 0 : RING_F_SP_ENQ));
-    if ((workers >= 2 && !split && !rx_ring) || (workers >= 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
+    /* Each scheduler has a single-producer handoff with a provable item ordinal. */
+    if (workers == 3) tx_ring = rte_ring_create("tx_ring", SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+    for (unsigned k = 0; split && k < 2; ++k) {
+        char name[32]; snprintf(name, sizeof(name), "tx_owner_%u", k);
+        tx_owner_rings[k] = rte_ring_create(name, SCHED_TX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
+        if (!tx_owner_rings[k]) rte_exit(EXIT_FAILURE, "Cannot allocate TX owner handoff ring\n");
+    }
+    if ((workers >= 2 && !split && !rx_ring) || (workers == 3 && !tx_ring)) rte_exit(EXIT_FAILURE, "Cannot allocate handoff ring\n");
     unsigned cores[4], index = 0, core;
     RTE_LCORE_FOREACH_WORKER(core) cores[index++] = core;
     lcore_function_t *functions[4];
@@ -174,6 +211,12 @@ int main(int argc, char **argv)
         host.schedulers_running = 2;
     }
     host.epoch_cycles = rte_get_timer_cycles();
+    if (observer_enabled()) for (unsigned p = 0; p < host.port_count; ++p) {
+        port = host.ports[p]; struct rte_eth_stats nic;
+        observer_resources(port, false, pools[port]->size, rte_mempool_avail_count(pools[port]),
+            rte_eth_stats_get(port, &nic) == 0 ? &nic : NULL);
+    }
+    if (observer_enabled() && !observer_start()) rte_exit(EXIT_FAILURE, "Cannot start observer consumer\n");
     host_mark_launched();
     for (unsigned i = 0; i < workers; ++i) {
         struct lcore_parameters *parameters = rte_zmalloc(NULL, sizeof(*parameters), 0);
@@ -184,8 +227,13 @@ int main(int argc, char **argv)
             parameters->split = true;
             parameters->owner_rings[0] = owner_rings[0];
             parameters->owner_rings[1] = owner_rings[1];
+            parameters->tx_owner_rings[0] = tx_owner_rings[0];
+            parameters->tx_owner_rings[1] = tx_owner_rings[1];
             parameters->owner_index = (uint16_t)(i - 1);
-            if (i == 1 || i == 2) parameters->receive_worker_ring = owner_rings[i - 1];
+            if (i == 1 || i == 2) {
+                parameters->receive_worker_ring = owner_rings[i - 1];
+                parameters->worker_transmit_ring = tx_owner_rings[i - 1];
+            }
         }
         if (rte_eal_remote_launch(functions[i], parameters, cores[i]) != 0)
             rte_exit(EXIT_FAILURE, "Cannot launch lcore\n");
@@ -193,7 +241,7 @@ int main(int argc, char **argv)
     printf("layout=%u-lcore%s\n", workers + 1, split ? " schedulers=per-ingress-port" : "");
     fflush(stdout);
     RTE_LCORE_FOREACH_WORKER(core) {
-        if (rte_eal_wait_lcore(core) < 0) host_invalidate("lcore failed");
+        if (rte_eal_wait_lcore(core) < 0) { observer_abort(OBS_ABORT_PRODUCER); host_invalidate("lcore failed"); }
     }
     for (unsigned k = 0; split && k < 2; ++k) worker_stats_merge(&stats->worker, &stats->owners[k], host.ports[k]);
     report(stdout, stats);
@@ -204,16 +252,20 @@ int main(int argc, char **argv)
     }
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
-        if (close_port(port) != 0) host_invalidate("port cleanup failed");
+        struct rte_eth_stats nic; bool nic_valid = rte_eth_stats_get(port, &nic) == 0;
+        if (close_port(port) != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
         unsigned free_count = rte_mempool_avail_count(pools[port]);
         printf("pool port=%u free=%u total=%u owned=%u\n", port, free_count,
             pools[port]->size, pools[port]->size - free_count);
-        if (free_count != pools[port]->size) host_invalidate("mbuf ownership not fully reclaimed");
+        if (free_count != pools[port]->size) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("mbuf ownership not fully reclaimed"); }
+        observer_resources(port, true, pools[port]->size, free_count, nic_valid ? &nic : NULL);
         rte_mempool_free(pools[port]);
     }
     host_cleanup();
+    if (!observer_close(true)) host_invalidate("native observation incomplete");
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
     rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
+    rte_ring_free(tx_owner_rings[0]); rte_ring_free(tx_owner_rings[1]);
     bool invalid = host.invalid;
     rte_eal_cleanup();
     return invalid ? EXIT_FAILURE : EXIT_SUCCESS;

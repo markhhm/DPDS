@@ -74,6 +74,7 @@ void host_cleanup(void)
 {
     for (size_t i = 0; i < host.line_count; ++i) hng_tx_policy_destroy(host.policies[i]);
     if (!hng_engine_destroy(host.engine)) {
+        observer_abort(OBS_ABORT_DRAIN);
         host_invalidate("forced service ledger abort at final destroy");
         for (size_t line = 0; line < host.line_count; ++line) {
             struct HngStats stats;

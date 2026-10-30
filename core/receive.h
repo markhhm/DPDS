@@ -5,7 +5,7 @@ struct rx_state {
     uint16_t next_port, last_port, last_index;
     /* Split layouts hand each port to its own scheduler ring; enqueued counts per ring. */
     bool split;
-    uint64_t sequence[RTE_MAX_ETHPORTS], last_watermark, enqueued[2];
+    uint64_t sequence[RTE_MAX_ETHPORTS], last_arrival[RTE_MAX_ETHPORTS], last_watermark, enqueued[2];
     struct rx_stats *stats;
 };
 void rx_state_init(struct rx_state *s, struct pipeline_stats *stats);
