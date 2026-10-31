@@ -18,6 +18,8 @@ foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'ri
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
     link_args: name == 'tx_trace' ? ['-Wl,--wrap=host_now_ns'] : [],
+    # LTO can resolve the clock internally before the linker applies --wrap.
+    override_options: name == 'tx_trace' ? ['b_lto=false'] : [],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-' + name]
   if name == 'rings'
