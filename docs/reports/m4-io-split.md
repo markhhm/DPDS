@@ -199,3 +199,86 @@ error 0.03% (gate 5%: PASS).
 
 NICs, hugepages, NUMA, 100G, an isolated fixed-frequency core, and the 7-lcore
 layout with an open-loop generator.
+
+## 2 MiB hugepage allocation and virtual I/O checks (2026-11-01)
+
+This section adds a small real-allocation check and software PMD integrity
+checks with hugepages. It supersedes the earlier "hugepages not tested"
+limitation only for these cases. The host source was `749d554`, with core
+`2afe493` (merged M4 scheduler and M2 observation support). The environment
+was WSL2, kernel `6.18.33.2-microsoft-standard-WSL2`, on the shared development
+machine.
+
+The system had 1,024 reserved 2 MiB pages and a hugetlbfs mount at
+`/dev/hugepages`. No reservation or mount setting changed during these checks.
+These results do not establish physical NIC accuracy, NUMA behavior or 100G.
+
+### Pool calculator: actual allocation
+
+Reproduce with an available CPU and a unique prefix:
+
+```sh
+build/hng-pool-calc -l "$CPU" --no-pci --no-telemetry -m 512 \
+  --in-memory --huge-dir="$HUGE_DIR" --file-prefix="$RUN_PREFIX" \
+  --vdev=net_null0 --vdev=net_null1 -- \
+  --c-bps 1000000000 --t-ms 20 --delta-ms 40 --q-ms 5 --burst 256 \
+  --lines-per-port 2 --page-bytes 4096 --verify
+```
+
+There is no `--no-huge` argument. The planning input of 4,096 bytes
+deliberately exercises the verifier's actual-page detection. It reported
+`verify page_bytes=2097152 (from the EAL memory segment list)` and recomputed
+the plan for that page size before comparison. Core metadata was 144 bytes
+per slot. The plan reserves seven lcores' pool caches. The allocation verifier
+itself uses one EAL lcore. Each port had 18,772 objects, all populated, with
+calculated and actual stride both 2,496 bytes.
+
+| Allocation | Calculated bytes | Actual bytes | Relative error |
+|---|---:|---:|---:|
+| Port 0 mempool | 49,553,984 | 48,189,184 | 2.83% |
+| Port 1 mempool | 49,553,984 | 48,189,184 | 2.83% |
+| Core metadata | 3,185,280 | 3,185,280 reserved; 3,189,872 process-heap growth | 0.14% against heap growth |
+| Both pools plus core | 102,293,248 | 99,568,240 | **2.74%: PASS**, limit 5% |
+
+The error uses `abs(calculated - actual) / actual`, as in
+`perf/pool_calc.c`. It compares allocated pool/core bytes, not the whole
+512 MiB EAL reservation. This verifies the small 2 MiB allocation case.
+Production-sized long-delay pools and 1 GiB pages remain unverified.
+
+### Null and ring PMDs with hugepages
+
+The existing `tests/null_smoke.py` and `tests/io_pmd.py` assertions ran
+unchanged. A local invocation adapter replaced only the EAL argument
+`--no-huge` with `--huge-dir=/dev/hugepages` and retained `--in-memory`.
+Null runs retained their 256 MiB EAL budget. Ring runs used an explicit
+512 MiB budget. CPU mapping still came from `tests/eal_args.py`.
+
+The adapter recorded every actual command and checked these argument
+conditions. No repository test or production source changed for this run.
+One-minute load samples before/after the null/ring invocations ranged
+from 6.42 to 7.39. These are integrity checks, not performance comparisons.
+
+| Existing test mode | Lcores | Result |
+|---|---:|---|
+| `null_smoke.py`: RX enabled/disabled and startup/shutdown signals | 2, 3, 4, 5, 7 | All 22 cases passed; conservation, byte conservation, DRAINED and zero owned mbufs |
+| `ring` | 4 | PASS |
+| `ring-stepped` | 4 | PASS |
+| `ring-split` | 5 | PASS |
+| `ring-stepped-split` | 5 | PASS |
+| `ring-io-split` | 7 | PASS |
+| `ring-stepped-io-split` | 7 | PASS |
+| `ring-io-split-lcores` | 7 | PASS, including production RX/TX functions and the shutdown release chain |
+
+Each of the first six ring modes completed 32 seeds and 153 epochs per seed:
+10,027,008 inputs, 9,321,984 outputs and 705,024 intentional Q drops.
+Every seed reported full identity/bytes/order agreement, conservation and
+complete drain.
+
+The production-lcore mode completed 32 seeds with 65,536 inputs, 60,928
+outputs and 4,608 intentional Q drops. Its oracle and release-chain checks
+also passed. Null PMDs establish lifecycle behavior. Their synthetic
+zero-content RX is not valid-traffic evidence.
+The ring oracle provides the valid-frame integrity evidence here.
+
+No A/B experiment ran. The large memory-envelope figures remain estimates.
+This section does not qualify hardware G2 or sustained packet rate.
