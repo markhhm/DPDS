@@ -10,6 +10,12 @@ core = declare_dependency(
   compile_args: ['-I' + meson.project_source_root() / 'dpds-core/target'], sources: cargo_build)
 python = find_program('python3')
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
+core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/core_pcap_replay.py'],
+  env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
+  workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
 common_sources = ['common/observer.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
