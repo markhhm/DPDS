@@ -47,7 +47,7 @@ test('g2-software', python,
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
          'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index',
          'tools.g2.tests.test_bundle', 'tools.g2.tests.test_serializer',
-         'tools.g2.tests.test_live_custody'],
+         'tools.g2.tests.test_live_custody', 'tools.g2.tests.test_matrix'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
@@ -91,3 +91,6 @@ test('observer-export', python, args: [meson.project_source_root() / 'tests/obse
   timeout: 90, is_parallel: false)
 test('observer-adapter', python, args: [meson.project_source_root() / 'tests/observer_adapter.py'],
   timeout: 30, is_parallel: false)
+
+test('m6-smoke', python, args: [meson.project_source_root() / 'tests/m6_smoke.py', dpds_exe],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)

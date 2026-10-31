@@ -25,8 +25,9 @@ except ImportError:
     build_bundle_report = None
 
 
-def fixture(root, count=400, mutate=None, mode="stream", lines=1):
+def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo"):
     cfg, reg, cal = config(), manifest(), document()
+    reg["run"] = cal["run"] = run
     # Extra lines share the first line's ingress and egress port and differ by VLAN.
     names, vlans = ["cable", "leo"][:lines], {"cable": 100, "leo": 200}
     for name in names[1:]:
@@ -49,9 +50,9 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1):
     cal["clocks"].append(dict(clock_id="engine", kind="fake", unit="ns", width_bits=64,
                               device_token="fake-engine", mode="synthetic"))
     rows = {role:[] for role in ("ingress", "expected", "before", "receiver", "host", "counters")}
-    ref = Reference(cfg, "demo")
+    ref = Reference(cfg, run)
     for seq in range(count):
-        packet = dict(kind="packet", run="demo", stream_id="ingress", seq=seq+1,
+        packet = dict(kind="packet", run=run, stream_id="ingress", seq=seq+1,
             ingress_port=0, ingress_seq=seq, line=names[seq%lines], selection_seq=seq//lines,
             external_identity=f"f:{seq}", flow_id="f", arrival_ns=100+seq*1000,
             length=60, vlan_id=vlans[names[seq%lines]], segments=1,
@@ -79,7 +80,7 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1):
             rows[role].append(dict(common, kind="before" if role=="before" else "receive", **{
                 time_key:time, ordinal:seq}, timestamp=dict(raw=time, clock_id=clock,
                     mapping_id=mapping, point="fake", uncertainty_ns=0)))
-    end = dict(kind="end", run="demo", stream_id="ingress", seq=count+1,
+    end = dict(kind="end", run=run, stream_id="ingress", seq=count+1,
                ingress_port=0, next_ingress_seq=count)
     rows["ingress"].append(end)
     ref.consume(end)
@@ -108,7 +109,7 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1):
     sources, input_integrity = {}, []
     for role, events in rows.items():
         path = root / f"{role}.jsonl"
-        writer = StreamWriter(path, "demo", role, role, "engine" if role not in {"before", "receiver"} else "obs")
+        writer = StreamWriter(path, run, role, role, "engine" if role not in {"before", "receiver"} else "obs")
         digest = hashlib.sha256()
         for event in events:
             values = {key:value for key,value in event.items() if key not in {"kind", "run", "stream_id", "seq"}}
