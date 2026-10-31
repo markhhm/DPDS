@@ -55,7 +55,7 @@ meson test -C build m6-smoke --print-errorlogs
 ```
 
 This test acquires three real bidirectional PCAP PMD runs using the production
-two-lcore application: fixed delay, two-point delay, and a synthetic trace.
+five-lcore application: fixed delay, two-point delay, and a synthetic trace.
 Each run has 400 frames per direction. It checks actual accepted identities,
 complete native observer capture, shutdown conservation, and every output byte
 against the input, then invokes the matrix CLI. The independent Fraction
