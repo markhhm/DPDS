@@ -21,10 +21,12 @@ struct queue {
     _Atomic uint64_t head, tail, attempted, emitted, dropped, capture_drops, high_water, identity_errors, malformed_records;
 };
 struct published_snapshot {
-    _Atomic uint64_t version, seen[OBS_PORTS], lower_bound[OBS_PORTS];
-    _Atomic uint16_t ports[OBS_PORTS], count;
-    _Atomic bool ended[OBS_PORTS];
+    struct observer_snapshot slots[3];
+    _Atomic unsigned middle;
+    unsigned front, back; /* One TX reader owns front; this scheduler owns back. */
 };
+#define SNAPSHOT_DIRTY 4u
+#define SNAPSHOT_INDEX 3u
 static struct {
     struct published_snapshot snapshots[OBS_QUEUES];
     struct queue queues[OBS_PRODUCERS];
@@ -63,6 +65,10 @@ bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_
     capture.fd = -1;
     capture.capacity = capacity; capture.policy = policy; capture.probe_port = probe_port;
     capture.per_direction = per_direction;
+    for (unsigned owner = 0; owner < OBS_QUEUES; ++owner) {
+        capture.snapshots[owner].back = 2;
+        atomic_init(&capture.snapshots[owner].middle, 1);
+    }
     for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
         capture.queues[p].records = calloc(capacity, sizeof(struct observer_record));
         if (!capture.queues[p].records) goto fail;
@@ -339,37 +345,37 @@ void observer_publish_snapshot(unsigned owner, const struct observer_snapshot *s
 {
     if (!capture.enabled) return;
     struct published_snapshot *p = &capture.snapshots[owner];
-    atomic_fetch_add(&p->version, 1);
-    atomic_store(&p->count, snapshot->count);
-    for (unsigned i = 0; i < snapshot->count; ++i) {
-        atomic_store(&p->ports[i], snapshot->ports[i]); atomic_store(&p->seen[i], snapshot->seen[i]);
-        atomic_store(&p->lower_bound[i], snapshot->lower_bound[i]); atomic_store(&p->ended[i], snapshot->ended[i]);
-    }
-    atomic_fetch_add(&p->version, 1);
+    p->slots[p->back] = *snapshot;
+    /* Publish the completed slot and acquire a slot the reader no longer owns. */
+    p->back = atomic_exchange_explicit(&p->middle, p->back | SNAPSHOT_DIRTY,
+                                      memory_order_acq_rel) & SNAPSHOT_INDEX;
 }
 bool observer_load_snapshot(enum observer_producer producer, struct observer_snapshot *snapshot)
 {
     struct observer_snapshot result = {0};
     for (unsigned owner = 0; owner < OBS_QUEUES; ++owner) {
+        /* Dedicated TX owners consume only their scheduler's SPSC mailbox. */
+        if (capture.per_direction && owner != (producer == OBS_TX1 ? 1u : 0u)) continue;
         struct published_snapshot *p = &capture.snapshots[owner];
-        uint64_t version = atomic_load(&p->version);
-        if (version & 1) goto unstable;
-        unsigned count = atomic_load(&p->count);
-        for (unsigned i = 0; i < count; ++i) {
-            uint16_t port = atomic_load(&p->ports[i]);
+        if (atomic_load_explicit(&p->middle, memory_order_acquire) & SNAPSHOT_DIRTY)
+            p->front = atomic_exchange_explicit(&p->middle, p->front,
+                                               memory_order_acq_rel) & SNAPSHOT_INDEX;
+        const struct observer_snapshot *value = &p->slots[p->front];
+        if (value->count > OBS_PORTS) goto invalid;
+        for (unsigned i = 0; i < value->count; ++i) {
+            uint16_t port = value->ports[i];
             unsigned k = 0; while (k < result.count && result.ports[k] != port) ++k;
-            if (k == result.count) { if (k == OBS_PORTS) goto unstable; result.ports[result.count++] = port; }
-            uint64_t seen = atomic_load(&p->seen[i]), lower = atomic_load(&p->lower_bound[i]);
-            bool ended = atomic_load(&p->ended[i]);
+            if (k == result.count) { if (k == OBS_PORTS) goto invalid; result.ports[result.count++] = port; }
+            uint64_t seen = value->seen[i], lower = value->lower_bound[i];
+            bool ended = value->ended[i];
             if (seen > result.seen[k] || (seen == result.seen[k] && (lower > result.lower_bound[k] || ended))) {
                 result.seen[k] = seen; result.lower_bound[k] = lower; result.ended[k] = ended;
             }
         }
-        if (version != atomic_load(&p->version)) goto unstable;
     }
     *snapshot = result;
     return true;
-unstable:
+invalid:
     atomic_fetch_add(&capture.queues[producer].malformed_records, 1);
     return false;
 }

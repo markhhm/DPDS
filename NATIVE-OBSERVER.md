@@ -65,8 +65,15 @@ physical handoff queue, which can contain both egress ports. The fused layouts
 use a declared local queue with the same item ordinal and consumed-prefix rules.
 TX records freeze consumed handoff prefixes before arbitration. They include
 coherent, completed-step scheduler input/frontier publications read before the
-actual gate checks. A busy or unstable publication latches malformed evidence;
-it never becomes an invented frontier. Each offered item records the actual
+actual gate checks. Each scheduler publishes through its own three-slot SPSC
+mailbox with one TX reader. A shared TX reads both scheduler mailboxes; dedicated
+TX owners read only their own scheduler's mailbox. Unrelated port frontiers
+remain unknown in dedicated-owner snapshots. The writer, reader, and atomic middle slot have
+distinct ownership; an acquire/release exchange transfers a completed slot.
+A writer paused during its next copy leaves its last completed publication
+readable. Neither path waits or retries, and no frontier or input prefix is
+invented. Invalid snapshot port sets still latch malformed evidence.
+Each offered item records the actual
 final whole-burst gate-check time for its line. The submit call has separate
 before/after times and the actual accepted prefix, including zero and retries.
 

@@ -50,8 +50,9 @@ bool observer_emit(enum observer_producer producer, const struct observer_record
 /* Reserve before publishing a handoff; commit after its successful prefix is known. */
 struct observer_record *observer_reserve(enum observer_producer producer);
 void observer_commit(enum observer_producer producer);
+/* One scheduler writer per owner; completed publications use a three-slot SPSC mailbox. */
 void observer_publish_snapshot(unsigned owner, const struct observer_snapshot *snapshot);
-/* One bounded read, before arbitration; an unstable publication latches invalidity. */
+/* One TX reader per mailbox; bounded reads retain the last completed publication. */
 bool observer_load_snapshot(enum observer_producer producer, struct observer_snapshot *snapshot);
 struct observer_health observer_health(enum observer_producer producer);
 struct observer_packet observer_packet(const struct rte_mbuf *packet);

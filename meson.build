@@ -10,14 +10,22 @@ core = declare_dependency(
   compile_args: ['-I' + meson.project_source_root() / 'dpds-core/target'], sources: cargo_build)
 python = find_program('python3')
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
+core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/core_pcap_replay.py'],
+  env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
+  workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
 common_sources = ['common/observer.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7']
+foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
     link_args: name == 'tx_trace' ? ['-Wl,--wrap=host_now_ns'] : [],
+    # LTO can resolve the clock internally before the linker applies --wrap.
+    override_options: name == 'tx_trace' ? ['b_lto=false'] : [],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-' + name]
   if name == 'rings'
@@ -45,7 +53,7 @@ test('g2-software', python,
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
          'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index',
          'tools.g2.tests.test_bundle', 'tools.g2.tests.test_serializer',
-         'tools.g2.tests.test_live_custody'],
+         'tools.g2.tests.test_live_custody', 'tools.g2.tests.test_matrix'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
@@ -89,3 +97,6 @@ test('observer-export', python, args: [meson.project_source_root() / 'tests/obse
   timeout: 90, is_parallel: false)
 test('observer-adapter', python, args: [meson.project_source_root() / 'tests/observer_adapter.py'],
   timeout: 30, is_parallel: false)
+
+test('m6-smoke', python, args: [meson.project_source_root() / 'tests/m6_smoke.py', dpds_exe],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
