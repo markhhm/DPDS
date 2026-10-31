@@ -4,8 +4,9 @@ import copy
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 
-from tools.g2.online import OnlineCells, ReceiveOrder, Retention
+from tools.g2.online import Histogram, OnlineCells, ReceiveOrder, Retention, sample
 from tools.g2.report import timing_sample
 
 
@@ -30,6 +31,23 @@ def expected(seq,line="cable",**changes):
 
 
 class OnlineTests(unittest.TestCase):
+    def test_online_sampling_and_histograms_have_bounded_per_record_cost(self):
+        cells=OnlineCells(manifest())
+        with patch("tools.g2.online.sample", wraps=sample) as sampled, \
+                patch("tools.g2.online.Histogram", wraps=Histogram) as histogram:
+            for seq in range(16):
+                row=expected(seq)
+                cells.expect(row)
+                cells.delivery(row,1000,0)
+            with self.subTest(cost="histogram allocation"):
+                self.assertEqual(histogram.call_count,4*sum(len(cell["groups"]) for cell in cells.cells.values()))
+            with self.subTest(cost="sampling hash"):
+                self.assertEqual(sampled.call_count,32)
+        row=cells.finish()["rows"][0]
+        self.assertEqual(row["counts"]["received"],16)
+        self.assertEqual(sum(group.get("population",0) for name,group in row["timing"].items()
+                             if name in ("main","app_extra:app-a")),16)
+
     def test_line_gates_cannot_be_masked_and_retained_records_are_only_main(self):
         cells=OnlineCells(manifest())
         n=500_000

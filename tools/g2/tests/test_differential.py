@@ -37,6 +37,24 @@ def replay(header, events, *, check=True):
 
 
 class DifferentialTests(unittest.TestCase):
+    def test_seed_ordered_differential_digest_and_population_are_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parents = Path(directory) / "parents"
+            adapter = Path(directory) / "record-parent"
+            adapter.write_text(
+                f"#!{sys.executable}\nimport os\n"
+                f"with open({str(parents)!r}, 'a') as stream:\n"
+                "    stream.write(str(os.getppid()) + '\\n')\n"
+                f"os.execv({str(executable())!r}, [{str(executable())!r}])\n")
+            adapter.chmod(0o755)
+            result = compare(adapter, total=65536, seeds=32)
+            cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+            self.assertEqual(len(set(parents.read_text().splitlines())), min(4, cpus))
+        self.assertEqual(result["production_output_sha256"],
+                         "51228f767b9929e5bd9c93ee3903f3c25a2991f05284ee96bc5f0603e1b55e95")
+        self.assertEqual(result["outcomes"], dict(accepted=50525, q_drop=13830, trace_loss=1181))
+        self.assertEqual((result["events"], result["cases"], result["mismatches"]), (65536, 32, 0))
+
     def test_legacy_replay_reports_exact_drain_and_q_reject_selection(self):
         rows = replay(dict(model=model(c_bps=3_000_000_000, p="1")), [
             dict(ingress_seq=i, arrival_ns=arrival, length=length)
@@ -179,6 +197,8 @@ class DifferentialTests(unittest.TestCase):
         self.assertEqual(result["events"], 1048576)
         self.assertEqual(result["cases"], 32)
         self.assertEqual(result["mismatches"], 0)
+        self.assertEqual(result["production_output_sha256"],
+                         "06358320bb13231932b49badf56cf5d8b8ac361ff673506afc81af97b1635f5b")
         self.assertEqual(result["coverage"]["directions"], [[0, 1], [1, 0]])
         self.assertEqual(result["coverage"]["fixed_states"], [[0, 0], [0, 32000], [6500, 0], [6500, 32000]])
         self.assertEqual(result["coverage"]["trace_actions"], ["drop", "hold"])
