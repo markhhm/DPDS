@@ -37,7 +37,7 @@ static struct {
     int fd;
     unsigned capacity, probe_port;
     enum observer_identity_policy policy;
-    bool enabled, started, complete, write_failed;
+    bool enabled, started, complete, write_failed, per_direction;
     uint64_t intended[HNG_MAX_LINES];
 } capture;
 static struct observer_health last_health[OBS_PRODUCERS];
@@ -52,14 +52,17 @@ struct observer_health observer_health(enum observer_producer producer)
         capture.capacity, atomic_load(&q->identity_errors), atomic_load(&q->malformed_records)};
 }
 
-bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity)
+bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
 {
     struct stat st;
     if (capture.enabled || !capacity || capacity > 65536 || policy > OBS_ID_SOFTWARE_L2 ||
+        !host.port_count || host.port_count > OBS_PORTS || (per_direction && host.port_count != 2) ||
+        (host.port_count == 2 && host.ports[0] == host.ports[1]) ||
         !probe_port || probe_port > 65535 || fstat(fd, &st) || (!S_ISFIFO(st.st_mode) && !S_ISSOCK(st.st_mode))) return false;
     memset(&capture, 0, sizeof(capture));
     capture.fd = -1;
     capture.capacity = capacity; capture.policy = policy; capture.probe_port = probe_port;
+    capture.per_direction = per_direction;
     for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
         capture.queues[p].records = calloc(capacity, sizeof(struct observer_record));
         if (!capture.queues[p].records) goto fail;
@@ -68,7 +71,6 @@ bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_
     if (flags < 0 || (flags & O_ACCMODE) == O_RDONLY) goto fail;
     capture.fd = dup(fd);
     if (capture.fd < 0 || fcntl(capture.fd, F_SETFL, fcntl(capture.fd, F_GETFL) | O_NONBLOCK) < 0) goto fail;
-    if (host.port_count > OBS_PORTS) goto fail;
     capture.port_count = host.port_count;
     for (unsigned i = 0; i < host.port_count; ++i) capture.ports[i] = host.ports[i];
     capture.enabled = true;
@@ -161,8 +163,11 @@ static void *consumer(void *unused)
     (void)unused;
     sigset_t blocked; sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE); pthread_sigmask(SIG_BLOCK, &blocked, NULL);
     char header[256];
-    int n = snprintf(header, sizeof(header), "{\"schema\":\"hng-native-v1\",\"identity_policy\":%u,\"probe_port\":%u,\"capacity\":%u,\"record_bytes\":%zu}\n",
-        capture.policy, capture.probe_port, capture.capacity, sizeof(struct observer_record));
+    int n = snprintf(header, sizeof(header), "{\"schema\":\"hng-native-v2\",\"identity_policy\":%u,\"probe_port\":%u,\"capacity\":%u,\"record_bytes\":%zu,\"layout\":\"%s\",\"ports\":[%u",
+        capture.policy, capture.probe_port, capture.capacity, sizeof(struct observer_record),
+        capture.per_direction ? "per-direction" : "shared", capture.ports[0]);
+    if (capture.port_count == 2) n += snprintf(header + n, sizeof(header) - n, ",%u", capture.ports[1]);
+    n += snprintf(header + n, sizeof(header) - n, "]}\n");
     output(header, (size_t)n);
     uint64_t next_order = 0;
     for (;;) {
@@ -252,10 +257,19 @@ static uint64_t decode(const uint8_t *d, unsigned n, bool big)
     return result;
 }
 struct observer_packet observer_packet(const struct rte_mbuf *packet) { return packet_meta((struct rte_mbuf *)packet)->observation; }
-void observer_input(struct rte_mbuf *m)
+static int input_index(enum observer_producer producer, uint16_t port)
+{
+    unsigned i = 0; while (i < capture.port_count && capture.ports[i] != port) ++i;
+    if (i == capture.port_count) { observer_abort(OBS_ABORT_RESOURCE); return -1; }
+    if (producer != (capture.per_direction && i ? OBS_RX1 : OBS_RX))
+        { observer_abort(OBS_ABORT_PRODUCER); return -1; }
+    return (int)i;
+}
+void observer_input(enum observer_producer producer, struct rte_mbuf *m)
 {
     if (!capture.enabled) return;
     struct packet_meta *meta = packet_meta(m);
+    if (input_index(producer, meta->ingress_port) < 0) return;
     struct observer_packet *x = &meta->observation;
     *x = (struct observer_packet){.ingress_port = meta->ingress_port, .ingress_seq = meta->ingress_seq,
         .arrival_ns = meta->arrival_ns, .length = m->pkt_len, .segments = m->nb_segs,
@@ -290,8 +304,8 @@ void observer_input(struct rte_mbuf *m)
         }
     }
     if (!x->classified) x->input_error = 1;
-    if (!x->identity_kind) { x->input_error = 2; atomic_fetch_add(&capture.queues[OBS_RX].identity_errors, 1); }
-    struct observer_record r = {.kind = OBS_PACKET, .count = 1}; r.items[0] = *x; observer_emit(OBS_RX, &r);
+    if (!x->identity_kind) { x->input_error = 2; atomic_fetch_add(&capture.queues[producer].identity_errors, 1); }
+    struct observer_record r = {.kind = OBS_PACKET, .count = 1}; r.items[0] = *x; observer_emit(producer, &r);
 }
 void observer_terminal(enum observer_producer producer, const struct rte_mbuf *m, enum observer_reason reason, uint64_t at_ns)
 {
@@ -299,16 +313,13 @@ void observer_terminal(enum observer_producer producer, const struct rte_mbuf *m
     struct observer_record r = {.kind = OBS_TERMINAL, .reason = reason, .at_ns = at_ns, .count = 1};
     r.items[0] = observer_packet(m); observer_emit(producer, &r);
 }
-void observer_input_end(uint16_t port, uint64_t next)
+void observer_input_end(enum observer_producer producer, uint16_t port, uint64_t next)
 {
     if (!capture.enabled) return;
-    unsigned i = 0; while (i < capture.port_count && capture.ports[i] != port) ++i;
-    if (i == capture.port_count) {
-        if (i == OBS_PORTS) { observer_abort(OBS_ABORT_RESOURCE); return; }
-        capture.ports[capture.port_count++] = port;
-    }
+    int i = input_index(producer, port);
+    if (i < 0) return;
     capture.input_ended[i] = true;
-    struct observer_record r = {.kind = OBS_END, .port = port, .actual_selection_seq = next}; observer_emit(OBS_RX, &r);
+    struct observer_record r = {.kind = OBS_END, .port = port, .actual_selection_seq = next}; observer_emit(producer, &r);
 }
 
 void observer_resources(uint16_t port, bool end, uint64_t total, uint64_t free_count, const struct rte_eth_stats *nic)
@@ -336,7 +347,7 @@ void observer_publish_snapshot(unsigned owner, const struct observer_snapshot *s
     }
     atomic_fetch_add(&p->version, 1);
 }
-bool observer_load_snapshot(struct observer_snapshot *snapshot)
+bool observer_load_snapshot(enum observer_producer producer, struct observer_snapshot *snapshot)
 {
     struct observer_snapshot result = {0};
     for (unsigned owner = 0; owner < OBS_QUEUES; ++owner) {
@@ -359,7 +370,7 @@ bool observer_load_snapshot(struct observer_snapshot *snapshot)
     *snapshot = result;
     return true;
 unstable:
-    atomic_fetch_add(&capture.queues[OBS_TX].malformed_records, 1);
+    atomic_fetch_add(&capture.queues[producer].malformed_records, 1);
     return false;
 }
 

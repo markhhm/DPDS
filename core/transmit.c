@@ -7,6 +7,7 @@
 void tx_state_init(struct tx_state *s, struct pipeline_stats *stats)
 {
     memset(s, 0, sizeof(*s));
+    s->producer = OBS_TX; s->handoff_mask = (1U << OBS_QUEUES) - 1;
     s->stats = &stats->tx;
     s->burst = rte_eth_tx_burst;
 }
@@ -24,7 +25,7 @@ static void terminal_drop(struct tx_state *s, unsigned line, uint64_t now)
     s->stats->tx_drops++;
     s->stats->tx_drop_bytes += m->pkt_len;
     s->stats->line_invalid_drops[line]++;
-    observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
+    observer_terminal(s->producer, m, OBS_TERMINAL_TX, now);
     rte_pktmbuf_free(m);
     remove_head(table);
 }
@@ -45,16 +46,17 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         unsigned line = packet_meta(m)->line;
         if (observer_enabled()) {
             struct observer_packet *x = &packet_meta(m)->observation;
-            if (x->handoff_queue < OBS_QUEUES && x->handoff_seq == s->consumed_dispatch[x->handoff_queue]) {
+            if (x->handoff_queue < OBS_QUEUES && (s->handoff_mask & (1U << x->handoff_queue)) &&
+                x->handoff_seq == s->consumed_dispatch[x->handoff_queue]) {
                 s->consumed_dispatch[x->handoff_queue]++;
-            } else host_invalidate("observer handoff prefix is not contiguous");
+            } else { observer_abort(OBS_ABORT_PRODUCER); host_invalidate("observer handoff prefix is not contiguous or owned"); }
         }
         s->stats->received_bytes += m->pkt_len;
         if (line >= HNG_MAX_LINES || m->port >= RTE_MAX_ETHPORTS) {
             host_invalidate("invalid TX metadata");
             s->stats->tx_drops++;
             s->stats->tx_drop_bytes += m->pkt_len;
-            observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
+            observer_terminal(s->producer, m, OBS_TERMINAL_TX, now);
             rte_pktmbuf_free(m);
             continue;
         }
@@ -64,7 +66,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             s->stats->tx_drops++;
             s->stats->tx_drop_bytes += m->pkt_len;
             s->stats->line_invalid_drops[line]++;
-            observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
+            observer_terminal(s->producer, m, OBS_TERMINAL_TX, now);
             rte_pktmbuf_free(m);
             continue;
         }
@@ -84,7 +86,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         if (!s->pending[start].len) continue;
         uint16_t port = pending_at(&s->pending[start])[0]->port;
         if (blocked_port[port]) continue;
-        if (observer_enabled()) observer_load_snapshot(&s->snapshot);
+        if (observer_enabled()) observer_load_snapshot(s->producer, &s->snapshot);
         if (live_clock) now = host_now_ns();
         unsigned chosen = HNG_MAX_LINES;
         for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
@@ -108,7 +110,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                     s->stats->trace_outage_drops++;
                     s->stats->trace_outage_bytes += m->pkt_len;
                     s->stats->line_outage_drops[line]++;
-                    observer_terminal(OBS_TX, m, OBS_MISSED_OUTAGE, now);
+                    observer_terminal(s->producer, m, OBS_MISSED_OUTAGE, now);
                     rte_pktmbuf_free(m);
                     remove_head(table);
                     continue;
@@ -175,7 +177,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         uint16_t sent = s->burst(port, 0, burst, n);
         if (observer_enabled()) {
             event.submit_after_ns = live_clock ? host_now_ns() : now; event.accepted_count = sent;
-            observer_emit(OBS_TX, &event);
+            observer_emit(s->producer, &event);
         }
         s->stats->burst_hist[31 - __builtin_clz(n)]++;
         if (sent > n) {
@@ -246,10 +248,14 @@ int lcore_transmit(struct lcore_parameters *parameters)
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     bool owner_queues = parameters->tx_owner_rings[0] && parameters->tx_owner_rings[1];
-    if (observer_enabled() && parameters->split && !owner_queues)
+    if (observer_enabled() && parameters->split && !parameters->io_split && !owner_queues)
         { observer_abort(OBS_ABORT_RESOURCE); host_invalidate("observation requires single-producer TX queues"); }
     tx_state_init(&tx, parameters->stats);
-    if (parameters->io_split) tx.stats = &parameters->stats->tx_owners[parameters->owner_index];
+    if (parameters->io_split) {
+        tx.stats = &parameters->stats->tx_owners[parameters->owner_index];
+        tx.producer = parameters->owner_index ? OBS_TX1 : OBS_TX;
+        tx.handoff_mask = 1U << parameters->owner_index;
+    }
     /* quit_signal_transmit follows the last scheduler's final enqueue. */
     while (!quit_signal_transmit ||
         (owner_queues ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :

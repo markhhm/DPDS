@@ -111,7 +111,7 @@ def run(binary, cores, enabled, directory):
     for p in (0, 1):
         assert output_frames(outputs[p]) == frames(1-p), output
     if enabled:
-        assert rows[0]['schema'] == 'hng-native-v1'
+        assert rows[0]['schema'] == 'hng-native-v2'
         assert rows[-1]['kind'] == 'health' and rows[-1]['complete'], rows[-1]
         events = rows[1:-1]
         assert [r['order'] for r in events] == list(range(len(events)))
@@ -145,7 +145,7 @@ def run(binary, cores, enabled, directory):
             streams=[dict(stream_id=f'native-{role}', role=role) for role in ('ingress', 'host', 'counters')])
         counter_result = normalize_counters(validated[2], manifest)
         assert counter_result['measurement_status'] == 'PASS', counter_result
-        assert all('native_observer_v1' in r.get('extensions', {}) for r in validated[1])
+        assert all('native_observer_v2' in r.get('extensions', {}) for r in validated[1])
         print(f'native export {cores} lcores complete custody and preserved frame bytes: PASS')
     else:
         assert rows == []

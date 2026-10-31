@@ -164,7 +164,7 @@ int main(int argc, char **argv)
                 rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
         }
         if (!observer_open(observe_fd, !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2,
-            observe_port, observe_capacity)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
+            observe_port, observe_capacity, rte_lcore_count() == 7)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
     } else if (observe_software || observe_identity)
         rte_exit(EXIT_FAILURE, "Observer options require --observe-fd\n");
     for (uint16_t i = 0; i < host.port_count; ++i) {

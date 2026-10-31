@@ -2,6 +2,7 @@
 #define RECEIVE_H
 #include "../common/common.h"
 struct rx_state {
+    enum observer_producer producer;
     uint16_t next_port, last_port, last_index;
     /* Split layouts hand each port to its own scheduler ring; enqueued counts per ring. */
     bool split;
