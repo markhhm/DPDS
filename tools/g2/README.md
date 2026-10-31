@@ -292,6 +292,10 @@ FAIL/FAIL/INCONCLUSIVE verdicts.
 
 ## Native v2 ownership
 
+Native software-PMD capture supports 2, 3, 4, 5 and 7 lcores. Each RX and
+TX writer has its own SPSC observer queue; the seven-lcore layout uses two
+RX writers and two TX writers. This remains software-only observation.
+
 The native adapter reads both `hng-native-v1` (five producers) and
 `hng-native-v2` (seven producers). V2 adds `layout` (`shared` or
 `per-direction`) and an ordered `ports` array to the header. IDs 0–4 retain

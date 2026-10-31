@@ -80,31 +80,18 @@ def run(binary, cores, enabled, directory):
         command += ['--observe-fd', str(writer), '--observe-software', '--observe-identity', 'software-l2']
     process = subprocess.Popen(command, pass_fds=(writer,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     os.close(writer)
-    reject = cores == 7 and enabled
     try:
-        if reject:
-            try:
-                output, _ = process.communicate(timeout=8)
-            except subprocess.TimeoutExpired as error:
-                raise AssertionError('7-lcore observation did not reject startup') from error
-        else:
-            prefix = wait_for_output(process, f'layout={cores}-lcore'.encode())
-            time.sleep(0.05)
-            process.send_signal(signal.SIGINT)
-            output, _ = process.communicate(timeout=10)
-            output = prefix + output
+        prefix = wait_for_output(process, f'layout={cores}-lcore'.encode())
+        time.sleep(0.05)
+        process.send_signal(signal.SIGINT)
+        output, _ = process.communicate(timeout=10)
+        output = prefix + output
     finally:
         if process.poll() is None:
             process.kill()
             process.communicate()
     thread.join(timeout=3)
     assert not thread.is_alive(), 'export descriptor was not closed'
-    if reject:
-        assert process.returncode != 0, output
-        assert 'layout=' not in output and 'pool port=' not in output, output
-        assert rows == [], rows
-        print('native export 7 lcores rejected before pools or producers: PASS')
-        return
     assert process.returncode == 0, output
     assert 'rx=8 ' in output and 'tx_accepted=8 ' in output, output
     assert 'status=DRAINED' in output and output.count('owned=0') == 2, output
@@ -121,9 +108,19 @@ def run(binary, cores, enabled, directory):
         assert sum(r['kind'] == 4 for r in events) == 2
         attempts = [r for r in events if r['kind'] == 6]
         assert sum(r['accepted_count'] for r in attempts) == 8
+        assert rows[0]['ports'] == [0, 1] and len(rows[-1]['producers']) == 7
+        assert rows[0]['layout'] == ('per-direction' if cores == 7 else 'shared')
+        if cores == 7:
+            for owner, rx, tx in ((0, 0, 3), (1, 5, 6)):
+                assert sum(r['producer'] == rx and r['kind'] == 0 for r in events) == 4
+                assert any(r['producer'] == rx and r['kind'] == 4 and r['port'] == owner for r in events)
+                owned = [r for r in attempts if r['producer'] == tx]
+                assert owned and sum(r['accepted_count'] for r in owned) == 4
+                assert all(r['port'] == 1-owner and r['consumed_dispatch'][1-owner] == 0 for r in owned)
+                assert max(r['consumed_dispatch'][owner] for r in owned) == 4
         assert all(r['gate_ns'] <= r['submit_before_ns'] <= r['submit_after_ns'] for r in attempts)
         queues = {r['handoff_queue'] for r in events if r['kind'] == 5}
-        assert queues == ({0, 1} if cores == 5 else {0}), queues
+        assert queues == ({0, 1} if cores in (5, 7) else {0}), queues
         streams = [io.StringIO() for _ in range(3)]
         config_value = json.loads(config.read_text())
         result = NativeAdapter(io.StringIO(''.join(json.dumps(r)+'\n' for r in rows)), *streams,
