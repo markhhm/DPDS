@@ -46,8 +46,10 @@ class NativeAdapter:
         self.writers = [StreamWriter(target, run, f'native-{role}', role, clock_id,
                         producer='native-adapter', producer_commit=producer_commit)
                         for role, target in zip(('ingress', 'host', 'counters'), (ingress, host, counters))]
-        self.seen = [0]*PRODUCERS
-        self.counts = [0]*PRODUCERS
+        self.producers = PRODUCERS
+        self.provenance_key = "native_observer_v1"
+        self.seen = [0]*self.producers
+        self.counts = [0]*self.producers
         self.order, self.at_ns = 0, 0
         self.errors = Counter()
         self.raw_hash = hashlib.sha256()
@@ -66,7 +68,7 @@ class NativeAdapter:
 
     def _emit(self, index, kind, **values):
         if self.provenance is not None:
-            values.setdefault('extensions', {})['native_observer_v1'] = dict(self.provenance)
+            values.setdefault('extensions', {})[self.provenance_key] = dict(self.provenance)
         result = self.writers[index].emit(kind, **values)
         self.logical_emitted[index] += 1
         return result
@@ -107,7 +109,7 @@ class NativeAdapter:
             records_dropped=sum(p['dropped'] for p in h['producers']) if h else 0,
             capture_drops=sum(p['capture_drops'] for p in h['producers']) if h else 0,
             queue_high_water=sum(p['high_water'] for p in h['producers']) if h else 0,
-            queue_capacity=self.header['capacity']*PRODUCERS,
+            queue_capacity=self.header['capacity']*self.producers,
             identity_errors=sum(p['identity_errors'] for p in h['producers']) if h else 0,
             malformed_records=self.errors['malformed_native_record']+(sum(p['malformed_records'] for p in h['producers']) if h else 0), timestamp_missing=0, clock_invalid=0)
         if not h and phase == 'end':
@@ -115,7 +117,7 @@ class NativeAdapter:
                 if name != 'queue_capacity':
                     values[name] = None
         self._counter('observer', 'native', phase, self.at_ns if phase == 'end' else 0, values)
-        for producer in range(PRODUCERS):
+        for producer in range(self.producers):
             native = h['producers'][producer] if h else {}
             values = dict(records_attempted=native.get('attempted', 0), records_emitted=native.get('emitted', 0),
                 records_dropped=native.get('dropped', 0), capture_drops=native.get('capture_drops', 0),
@@ -131,7 +133,7 @@ class NativeAdapter:
         h = self.health
         unknown = phase == 'end' and (h is None or self.errors['malformed_native_record'])
         for index, role in enumerate(('ingress', 'host')):
-            producers = (0,) if index == 0 else (0, 1, 2, 3)
+            producers = ((0, 5) if index == 0 else (0, 1, 2, 3, 5, 6)) if self.producers == 7 else ((0,) if index == 0 else (0, 1, 2, 3))
             raw_loss = unknown or (h and any(h['producers'][p]['dropped'] or h['producers'][p]['capture_drops'] for p in producers))
             values = dict(records_attempted=self.logical_emitted[index]+self.logical_dropped[index],
                 records_emitted=self.logical_emitted[index], records_dropped=self.logical_dropped[index],
@@ -247,12 +249,57 @@ class NativeAdapter:
                       dict(pool_total=total, pool_free=free_count, pool_owned=total-free_count),
                       semantics='gauge', units=dict.fromkeys(('pool_total', 'pool_free', 'pool_owned'), 'mbufs'))
 
+    def _validate_v2_actor(self, row, items):
+        p, kind = row['producer'], row['kind']
+        split = self.header['layout'] == 'per-direction'
+        ports = self.header['ports']
+        if kind == 7:
+            if p != 4:
+                raise ValueError('resources require the control actor')
+            return
+        if kind in (3, 4):
+            owner = ports.index(row['port']) if split else 0
+            if p != (5 if owner else 0):
+                raise ValueError('RX marker actor differs from port owner')
+            return
+        for index, x in enumerate(items):
+            owner = ports.index(x['ingress_port']) if split else 0
+            rx, tx = (5, 6) if owner else (0, 3)
+            workers = (1 + owner,) if split else ((1, 2) if x['ingress_port'] == ports[-1] else (1,))
+            if kind == 0:
+                allowed = (rx,)
+            elif kind in (1, 5):
+                allowed = workers
+            elif kind == 6:
+                allowed = (tx,)
+            else:
+                allowed = (rx, tx) + workers
+            if p not in allowed:
+                raise ValueError('packet actor differs from owner')
+            if kind in (5, 6) and row['port'] != self.lines[x['line']]['egress_port']:
+                raise ValueError('native egress differs from registered line')
+            if kind == 5 and (x['handoff_queue'] != row['handoff_queue'] or
+                              x['handoff_seq'] != row['first_handoff_seq'] + index):
+                raise ValueError('dispatch item differs from its queue prefix')
+            if kind == 6 and split and x['handoff_queue'] != owner:
+                raise ValueError('TX item belongs to another handoff owner')
+        if kind == 5 and p != 1 + row['handoff_queue']:
+            raise ValueError('dispatch queue differs from scheduler actor')
+        if kind == 6:
+            if p not in (3, 6) or (not split and p != 3) or row['accepted_count'] > len(items):
+                raise ValueError('invalid TX actor or accepted prefix')
+            if split:
+                owner = int(p == 6)
+                if row['consumed_dispatch'][1-owner] or not any(
+                        line['ingress_port'] == ports[owner] and line['egress_port'] == row['port'] for line in self.lines):
+                    raise ValueError('TX prefix or port belongs to another owner')
+
     def _event(self, row):
         fields(row, ROW_FIELDS)
         for name in ROW_FIELDS:
             if name not in ('consumed_dispatch', 'snapshot', 'items', 'resources'):
                 uint(row[name], name)
-        p = uint(row['producer'], 'producer', PRODUCERS-1)
+        p = uint(row['producer'], 'producer', self.producers-1)
         uint(row['kind'], 'kind', 7)
         self.provenance = {k: row[k] for k in ('producer', 'producer_seq', 'order')}
         if row['producer_seq'] != self.seen[p]+1:
@@ -274,6 +321,8 @@ class NativeAdapter:
             raise ValueError('invalid raw batch size')
         items = [self._item(item) for item in row['items']]
         kind = row['kind']
+        if self.producers == 7:
+            self._validate_v2_actor(row, items)
         if len(items) != (1 if kind in (0, 1, 2) else len(items)):
             raise ValueError('missing packet item')
         self.at_ns = max(self.at_ns, row['at_ns'], row['submit_after_ns'], *(i['arrival_ns'] for i in items))
@@ -341,13 +390,27 @@ class NativeAdapter:
     def process(self):
         try:
             self.header = self._read()
-            fields(self.header, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes'))
-            if self.header['schema'] != 'hng-native-v1':
+            version = self.header.get('schema') if isinstance(self.header, dict) else None
+            fields(self.header, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes') + (('layout', 'ports') if version == 'hng-native-v2' else ()))
+            if version not in ('hng-native-v1', 'hng-native-v2'):
                 raise ValueError('unknown native schema')
             uint(self.header['identity_policy'], 'identity policy', 1)
             uint(self.header['probe_port'], 'probe port', 65535)
             if not uint(self.header['capacity'], 'queue capacity', 65536) or not uint(self.header['record_bytes'], 'record size', 65536):
                 raise ValueError('native capacity/record width must be positive')
+            if version == 'hng-native-v2':
+                ports = self.header['ports']
+                if (self.header['layout'] not in ('shared', 'per-direction') or not isinstance(ports, list)
+                        or not 1 <= len(ports) <= 2 or len(set(ports)) != len(ports)
+                        or set(ports) != {line[p] for line in self.lines for p in ('ingress_port', 'egress_port')}):
+                    raise ValueError('invalid native v2 layout/ports')
+                for port in ports:
+                    uint(port, 'native port', 65535)
+                if self.header['layout'] == 'per-direction' and len(ports) != 2:
+                    raise ValueError('per-direction layout needs two ports')
+                self.producers = 7
+                self.provenance_key = 'native_observer_v2'
+                self.seen, self.counts = [0]*7, [0]*7
             self._observer_health('start')
             self._logical_health('start')
             while True:
@@ -357,7 +420,7 @@ class NativeAdapter:
                     self._fault('missing_native_health'); break
                 if row.get('kind') == 'health':
                     fields(row, ('kind', 'complete', 'abort_reasons', 'producers'))
-                    if type(row['complete']) is not bool or not isinstance(row['producers'], list) or len(row['producers']) != PRODUCERS:
+                    if type(row['complete']) is not bool or not isinstance(row['producers'], list) or len(row['producers']) != self.producers:
                         raise ValueError('invalid native health')
                     if uint(row['abort_reasons'], 'native abort reasons', 15):
                         self._fault('native_capture_aborted')
@@ -380,7 +443,7 @@ class NativeAdapter:
         except (ValueError, TypeError, KeyError, IndexError, UnicodeError, OSError):
             self._fault('malformed_native_record')
             self.normalization_drops += 1
-        if self.header and self.header.get('schema') == 'hng-native-v1' and type(self.header.get('capacity')) is int:
+        if self.header and self.header.get('schema') in ('hng-native-v1', 'hng-native-v2') and type(self.header.get('capacity')) is int:
             self.provenance = None
             self._observer_health('end')
             self._logical_health('end')

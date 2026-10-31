@@ -12,6 +12,69 @@ from tools.g2.protocol import StreamReader, StreamError
 
 
 class NativeBoundary(unittest.TestCase):
+    def fixture_v2(self):
+        old = [json.loads(line) for line in self.fixture().splitlines()]
+        header = dict(old[0], schema='hng-native-v2', layout='per-direction', ports=[7, 13])
+        events = []
+        for owner, (producer, port) in enumerate(((0, 7), (5, 13))):
+            packet = dict(old[1], producer=producer, order=len(events))
+            item = list(packet['items'][0])
+            item[11:13] = [port, owner]
+            packet['items'] = [item]
+            end = dict(old[2], producer=producer, order=len(events)+1, port=port)
+            events += [packet, end]
+        empty = old[-1]['producers'][1]
+        health = dict(old[-1], producers=[dict(old[-1]['producers'][0] if p in (0,5) else empty) for p in range(7)])
+        return [header, *events, health]
+
+    def normalize_v2(self, rows):
+        outputs = [io.StringIO() for _ in range(3)]
+        adapter = NativeAdapter(io.StringIO('\n'.join(map(json.dumps, rows))+'\n'), *outputs, run='demo',
+            lines=[dict(name='cable', ingress_port=7, egress_port=13, vlan_id=100),
+                   dict(name='reverse', ingress_port=13, egress_port=7, vlan_id=100)])
+        result = adapter.process()
+        return result, [[json.loads(r) for r in output.getvalue().splitlines()] for output in outputs]
+
+    def test_v2_two_rx_actors_preserve_ports_health_and_provenance(self):
+        result, streams = self.normalize_v2(self.fixture_v2())
+        self.assertTrue(result['complete'], result)
+        packets = [r for r in streams[0] if r['kind']=='packet']
+        self.assertEqual([r['ingress_port'] for r in packets], [7,13])
+        self.assertEqual([r['extensions']['native_observer_v2']['producer'] for r in packets], [0,5])
+        native = next(r for r in streams[2] if r.get('scope_id')=='native' and r.get('phase')=='end')
+        self.assertEqual(native['values']['queue_capacity'], 7*16)
+
+    def test_v2_rejects_wrong_rx_actor_and_duplicate_registered_ports(self):
+        for change in ('actor','ports'):
+            rows = self.fixture_v2()
+            if change=='actor': rows[3]['producer'] = 6
+            else: rows[0]['ports'] = [7,7]
+            result, _ = self.normalize_v2(rows)
+            self.assertFalse(result['complete'], result)
+
+    def test_v2_rx1_loss_is_not_hidden_in_logical_ingress_health(self):
+        rows=self.fixture_v2()
+        rows[-1]['producers'][5].update(attempted=3,dropped=1)
+        rows[-1]['complete']=False
+        result,streams=self.normalize_v2(rows)
+        self.assertFalse(result['complete'])
+        ingress=next(r for r in streams[2] if r.get('scope_id')=='native-ingress' and r.get('phase')=='end')
+        self.assertIsNone(ingress['values']['records_dropped'])
+        self.assertTrue(all(not stream[-1]['complete'] for stream in streams))
+
+    def test_shared_tx_layout_accepts_second_scheduler_offer_before_handoff_assignment(self):
+        rows=self.fixture_v2()
+        rows[0]['layout']='shared'
+        rows[3].update(producer=0,producer_seq=3)
+        rows[4].update(producer=0,producer_seq=4)
+        offer=dict(rows[3],producer=2,producer_seq=1,order=4,kind=1,at_ns=150)
+        rows.insert(-1,offer)
+        rows[-1]['producers'][0].update(attempted=4,emitted=4,high_water=4)
+        rows[-1]['producers'][5]=dict(rows[-1]['producers'][4])
+        rows[-1]['producers'][2].update(attempted=1,emitted=1,high_water=1)
+        result,_=self.normalize_v2(rows)
+        self.assertTrue(result['complete'],result)
+
     def fixture(self, *, dropped=0, sealed=True):
         item = [7, 0, 0, 100, 0, 0, 0, 0, 76, 0, 0, 0, 0, 100, 1, 0, 2, 2, 0, True, False, 0]
         row = dict(producer=0, producer_seq=1, order=0, kind=0, at_ns=0,

@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 
 from .reference import Trace, canonical, uint
+from .protocol import actor, handoff_actors
 
 
 MODEL_REASONS = {"q_drop": "q_drop", "trace_loss": "trace_loss_drop",
@@ -85,7 +86,7 @@ class _Replay:
             if name in self.queues or not row["producer"] or not row["consumer"]:
                 result.issue("handoff_mapping", "INVALID")
             self.queues[name] = dict(config=row, next=0, consumed=0, producer=None,
-                                     consumer=None)
+                                     consumer=None, actors=handoff_actors(row))
         self.attempts = {}
         self.snapshots = {}
         self.live = 0
@@ -229,7 +230,7 @@ class _Replay:
         for port in self.inputs:
             key, count = str(port), seen[str(port)]
             frontier = frontiers[key]
-            previous = self.snapshots.get((event["stream_id"], port))
+            previous = self.snapshots.get((actor(event), port))
             if count > self.totals[port] or (previous and count < previous[0]):
                 self.issue("ingress_prefix", "INVALID", event)
                 valid = False
@@ -248,7 +249,7 @@ class _Replay:
                 if unseen:
                     self.issue("frontier_unconsumed_input", "INVALID", event)
                     valid = False
-            self.snapshots[event["stream_id"], port] = (count, through, frontier["input_complete"])
+            self.snapshots[actor(event), port] = (count, through, frontier["input_complete"])
         return valid
 
     def safe(self, row, event):
@@ -296,9 +297,16 @@ class _Replay:
         if queue is None:
             self.issue("handoff_mapping", "INVALID", event)
             return
-        if queue["producer"] not in {None, event["stream_id"]}:
+        bindings = queue["actors"]
+        if "native_observer_v2" in event.get("extensions", {}) and not bindings:
+            self.issue("handoff_actor_missing", "INCONCLUSIVE", event)
+            return
+        if bindings and bindings["producer"] != actor(event):
+            self.issue("handoff_owner", "INCONCLUSIVE", event)
+            return
+        if queue["producer"] not in {None, actor(event)}:
             self.issue("handoff_multiple_producers", "INCONCLUSIVE", event)
-        queue["producer"] = event["stream_id"]
+        queue["producer"] = actor(event)
         if event["first_handoff_seq"] != queue["next"]:
             self.issue("dispatch_sequence", "INCONCLUSIVE", event)
         valid_snapshot = self.snapshot(event)
@@ -343,15 +351,23 @@ class _Replay:
         for name, queue in self.queues.items():
             if name not in prefixes:
                 continue
+            bindings = queue["actors"]
+            if "native_observer_v2" in event.get("extensions", {}) and not bindings:
+                self.issue("handoff_actor_missing", "INCONCLUSIVE", event)
+                continue
+            if bindings and bindings["consumer"] != actor(event):
+                if prefixes[name]:
+                    self.issue("handoff_owner", "INCONCLUSIVE", event)
+                continue
             end, start = prefixes[name], queue["consumed"]
             if end < start:
                 self.issue("consumed_dispatch_regression", "INCONCLUSIVE", event)
                 continue
             if end == start:
                 continue
-            if queue["consumer"] not in {None, event["stream_id"]}:
+            if queue["consumer"] not in {None, actor(event)}:
                 self.issue("handoff_multiple_consumers", "INCONCLUSIVE", event)
-            queue["consumer"] = event["stream_id"]
+            queue["consumer"] = actor(event)
             found = self.db.execute("SELECT COUNT(*) FROM dispatch_items WHERE handoff_queue_id=? AND handoff_seq>=? AND handoff_seq<?",
                                     (name, _number(start), _number(end))).fetchone()[0]
             if end > queue["next"] or found != end - start:
@@ -396,9 +412,9 @@ class _Replay:
             self.issue("attempt_time", "INVALID", event)
         if port not in self.ports or event["queue_id"] != self.ports[port]:
             self.issue("port_mapping", "INVALID", event)
-        if previous[2] not in {None, event["stream_id"]}:
+        if previous[2] not in {None, actor(event)}:
             self.issue("multiple_tx_owners", "INCONCLUSIVE", event)
-        self.attempts[port] = (event["attempt_id"] + 1, event["submit_after_ns"], event["stream_id"])
+        self.attempts[port] = (event["attempt_id"] + 1, event["submit_after_ns"], actor(event))
         self.snapshot(event)
         self.consume(event, event["consumed_dispatch"])
         if not 0 <= event["accepted_count"] <= len(event["offered"]):

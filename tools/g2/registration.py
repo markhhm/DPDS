@@ -5,7 +5,7 @@ import math
 import re
 
 from .online import Retention
-from .protocol import ROLES, boolean, digest, identifier, shape
+from .protocol import ROLES, boolean, digest, identifier, shape, handoff_actors
 from .reference import uint
 
 
@@ -249,6 +249,9 @@ def _validate(manifest, config):
             identifier(queue[key], key)
         if queue["handoff_queue_id"] in queues or not uint(queue["capacity"], "handoff capacity"):
             raise ValueError("duplicate/empty handoff queue")
+        for stream, _ in handoff_actors(queue).values():
+            if not any(row["stream_id"] == stream and row["role"] == "host" for row in manifest["streams"]):
+                raise ValueError("native actor requires a registered host stream")
         queues.add(queue["handoff_queue_id"])
     if not queues:
         raise ValueError("handoff queue registration is required")

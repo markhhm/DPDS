@@ -4,7 +4,7 @@ from collections import Counter
 
 from .custody import MODEL_REASONS
 from .reference import Trace
-from .protocol import actor
+from .protocol import actor, handoff_actors
 
 
 def key(row):
@@ -18,7 +18,7 @@ class LiveCustody:
         self.traces = {name:value if isinstance(value, Trace) else Trace(value) for name,value in traces.items()}
         self.ports = {row["egress_port"]:row["queue_id"] for row in manifest["ports"]}
         self.queues = {row["handoff_queue_id"]:dict(next=0, consumed=0, items={},
-            capacity=row["capacity"], producer=None, consumer=None, egress=None)
+            capacity=row["capacity"], producer=None, consumer=None, egress=None, actors=handoff_actors(row))
             for row in manifest["capacity"]["handoff_queues"]}
         self.attempts, self.snapshots = {}, {}
         self.offers, self.last_offer = Counter(), {}
@@ -100,6 +100,14 @@ class LiveCustody:
         for name, queue in self.queues.items():
             if name not in prefixes:
                 continue
+            bindings = queue["actors"]
+            if "native_observer_v2" in event.get("extensions", {}) and not bindings:
+                self.issue("handoff_actor_missing", "INCONCLUSIVE", event)
+                continue
+            if bindings and bindings["consumer"] != actor(event):
+                if prefixes[name]:
+                    self.issue("handoff_owner", "INCONCLUSIVE", event)
+                continue
             end, start = prefixes[name], queue["consumed"]
             if end<start or end>queue["next"]:
                 self.issue("consumed_dispatch_prefix", "INCONCLUSIVE", event)
@@ -154,6 +162,13 @@ class LiveCustody:
             if queue is None:
                 self.issue("handoff_mapping", "INVALID", event)
                 return
+            bindings = queue["actors"]
+            if "native_observer_v2" in event.get("extensions", {}) and not bindings:
+                self.issue("handoff_actor_missing", "INCONCLUSIVE", event)
+                return
+            if bindings and bindings["producer"] != actor(event):
+                self.issue("handoff_owner", "INCONCLUSIVE", event)
+                return
             if queue["producer"] not in {None, actor(event)}:
                 self.issue("handoff_multiple_producers", "INCONCLUSIVE", event)
             queue["producer"] = actor(event)
@@ -178,7 +193,10 @@ class LiveCustody:
                     self.issue("port_mapping", "INVALID", row)
                 if not state["offer"]:
                     self.issue("dispatch_before_offer", "INCONCLUSIVE", row)
-                if not all(front["input_complete"] or front["through_ns"] is not None and front["through_ns"]>=row["release_ns"] for front in event["frontiers"].values()):
+                relevant = {line["ingress_port"] for line in self.lines.values() if line["egress_port"] == event["egress_port"]}
+                if not all(event["frontiers"][str(port)]["input_complete"] or
+                           event["frontiers"][str(port)]["through_ns"] is not None and
+                           event["frontiers"][str(port)]["through_ns"] >= row["release_ns"] for port in relevant):
                     self.issue("unsafe_dispatch_frontier", "INCONCLUSIVE", row)
                 ordinal = event["first_handoff_seq"]+index
                 if len(queue["items"])>=queue["capacity"]:

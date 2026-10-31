@@ -68,6 +68,19 @@ def envelop(rows, stream="host"):
 
 
 class CustodyTests(unittest.TestCase):
+    def test_v2_two_owner_replay_keeps_prefixes_and_frontiers_separate(self):
+        from tools.g2.tests.test_live_custody import LiveCustodyTests
+        cfg,reg,rows,events=LiveCustodyTests().two_owner_history()
+        self.config=cfg
+        self.manifest=reg
+        self.manifest['retention']['mode']='full'
+        self.manifest['capacity']['join_disk_bytes']=8_000_000
+        events=[offer(row) for row in rows]+events
+        audit=self.audit(rows,events)
+        self.assertEqual(audit.issues,[])
+        for row in rows:
+            self.assertTrue(audit.was_accepted(row['ingress_port'],row['external_identity']))
+
     def setUp(self):
         self.assertTrue(callable(audit_host), "independent host custody checker is missing")
         self.directory = tempfile.TemporaryDirectory()

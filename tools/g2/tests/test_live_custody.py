@@ -15,6 +15,60 @@ def actor(row, producer):
 
 
 class LiveCustodyTests(unittest.TestCase):
+    def two_owner_history(self):
+        cfg, reg = config(), manifest()
+        cfg['lines'].append(dict(copy.deepcopy(cfg['lines'][0]), name='reverse', ingress_port=1, egress_port=0))
+        reg['ports'].append(dict(reg['ports'][0], ingress_port=1, egress_port=0))
+        reg['capacity']['handoff_queues'] = [dict(handoff_queue_id=f'handoff-{i}',producer=f'w{i}',consumer=f't{i}',capacity=8,
+            extensions=dict(native_actors=dict(producer=dict(stream_id='host',producer=1+i),
+                                               consumer=dict(stream_id='host',producer=3 if i==0 else 6)))) for i in (0,1)]
+        rows = [expected(), dict(expected(line='reverse'), ingress_port=1, egress_port=0)]
+        events=[]
+        for i,row in enumerate(rows):
+            e=dict(dispatch([row],queue=f'handoff-{i}'),egress_port=row['egress_port'])
+            e['extensions']=dict(native_observer_v2=dict(producer=1+i,producer_seq=1,order=i))
+            events.append(e)
+        for i,row in enumerate(rows):
+            e=dict(attempt([row]),egress_port=row['egress_port'],consumed_dispatch={f'handoff-{q}':int(q==i) for q in (0,1)})
+            e['offered'][0]['handoff_queue_id']=f'handoff-{i}'
+            e['extensions']=dict(native_observer_v2=dict(producer=3 if i==0 else 6,producer_seq=1,order=2+i))
+            events.append(e)
+        for i,e in enumerate(events):
+            owner=i%2
+            e.update(seen_next_ingress_seq={str(p):int(p==owner) for p in (0,1)},
+                     frontiers={str(p):dict(through_ns=None,input_complete=p==owner) for p in (0,1)})
+        return cfg,reg,rows,events
+
+    def test_two_tx_owners_do_not_claim_each_others_handoff_or_frontier(self):
+        cfg,reg,rows,events=self.two_owner_history()
+        checker,active,issues=self.audit(rows,events,cfg,reg)
+        self.assertEqual(issues,[])
+        self.assertEqual(checker.counts['tx_accepted'],2)
+        self.assertTrue(all(s['tx'] for s in active.values()))
+
+    def test_foreign_prefix_wrong_actor_and_missing_relevant_frontier_are_rejected(self):
+        for fault,code in [('foreign','handoff_owner'),('actor','handoff_owner'),('frontier','unsafe_dispatch_frontier'),('binding','handoff_actor_missing')]:
+            cfg,reg,rows,events=self.two_owner_history()
+            if fault=='foreign': events[2]['consumed_dispatch']['handoff-1']=1
+            elif fault=='actor': events[0]['extensions']['native_observer_v2']['producer']=2
+            elif fault=='binding': del reg['capacity']['handoff_queues'][0]['extensions']
+            else: events[0]['frontiers']['0']['input_complete']=False
+            with self.subTest(fault=fault):
+                _,_,issues=self.audit(rows,events,cfg,reg)
+                self.assertIn((code,'INCONCLUSIVE'),issues)
+
+    def test_v2_provenance_is_distinct_and_bounded(self):
+        row = envelop([attempt([expected()])])[0]
+        row['extensions'] = dict(native_observer_v2=dict(producer=6,producer_seq=1,order=0))
+        validate_record(row,'host')
+        from tools.g2.protocol import actor as native_actor
+        self.assertEqual(native_actor(row), ('host',6))
+        for change in ('overflow','conflict'):
+            broken = copy.deepcopy(row)
+            if change=='overflow': broken['extensions']['native_observer_v2']['producer'] = 7
+            else: broken['extensions']['native_observer_v1'] = dict(producer=3,producer_seq=1,order=0)
+            with self.assertRaises(StreamError): validate_record(broken,'host')
+
     def audit(self, rows, events, configuration=None, registration=None):
         active = {key(row):dict(expected=row, offer=True, terminal=None, tx=False,
                                dispatch=None, pending=False) for row in rows}
