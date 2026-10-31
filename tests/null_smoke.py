@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from eal_args import eal_arguments
+from startup import wait_for_output
 
 binary = os.path.abspath(sys.argv[1])
 cases = [(cores, no_rx, 0.25) for cores in (2, 3, 4, 5, 7) for no_rx in (True, False)]
@@ -23,13 +24,20 @@ for cores, no_rx, delay in cases:
     command = [binary]+eal_arguments(cores)+["--no-pci", "--no-huge",
                "--no-telemetry", "-m", "256", "--in-memory", f"--file-prefix=hng-null-{os.getpid()}-{cores}-{no_rx}-{delay}",
                f"--vdev=net_null0{suffix}", f"--vdev=net_null1{suffix}"]
+    if cores == 2 and no_rx and delay > 0:
+        # Readiness must also tolerate a delayed exec of the real DUT.
+        command = [sys.executable, "-c", "import os,sys,time\ntime.sleep(0.4)\nos.execv(sys.argv[1],sys.argv[1:])"]+command
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if delay < 0:
-        first = process.stdout.readline()
-        assert first.startswith("EAL"), first
-    time.sleep(abs(delay))
-    process.send_signal(signal.SIGINT)
-    output, _ = process.communicate(timeout=12)
+    try:
+        prefix = wait_for_output(process, b"EAL:" if delay < 0 else f"layout={cores}-lcore".encode())
+        time.sleep(abs(delay))
+        process.send_signal(signal.SIGINT)
+        output, _ = process.communicate(timeout=12)
+        output = prefix+output
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=2)
     assert process.returncode == 0, f"dpds returned {process.returncode} after SIGINT at {delay} s (negative: after the first EAL line):\n{output}"
     assert f"layout={cores}-lcore" in output, output
     assert "conservation=PASS byte_conservation=PASS status=DRAINED" in output, output

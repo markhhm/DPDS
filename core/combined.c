@@ -16,6 +16,9 @@ int lcore_worker_transmit(struct lcore_parameters *parameters)
             (void **)batch, MAX_BURST_SIZE, NULL);
         if (quit_signal_worker && rte_ring_empty(parameters->receive_worker_ring) && !count) worker_end_input(&wk);
         uint16_t out = worker_step(&wk, batch, count, output);
+        struct observer_record *reservations[MAX_BURST_SIZE];
+        worker_dispatch_prepare(&wk, output, out, reservations, host_now_ns());
+        worker_dispatch_done(&wk, reservations, out, out);
         tx_step(&tx, output, out);
     }
     tx_state_cleanup(&tx);
@@ -40,8 +43,15 @@ int lcore_receive_worker_transmit(struct lcore_parameters *parameters)
             count = rx_step(&rx, batch, MAX_BURST_SIZE);
             rx_publish(&rx, count);
             rx.stats->enqueued += count;
-        } else worker_end_input(&wk);
+        } else {
+            if (!wk.ended) for (unsigned p = 0; p < host.port_count; ++p)
+                observer_input_end(host.ports[p], rx.sequence[host.ports[p]]);
+            worker_end_input(&wk);
+        }
         uint16_t out = worker_step(&wk, batch, count, output);
+        struct observer_record *reservations[MAX_BURST_SIZE];
+        worker_dispatch_prepare(&wk, output, out, reservations, host_now_ns());
+        worker_dispatch_done(&wk, reservations, out, out);
         tx_step(&tx, output, out);
     }
     tx_state_cleanup(&tx);

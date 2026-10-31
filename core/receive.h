@@ -7,7 +7,7 @@ struct rx_state {
     bool split;
     /* Per-direction RX (7 lcores): poll only host.ports[next_port], never advance. */
     bool fixed;
-    uint64_t sequence[RTE_MAX_ETHPORTS], last_watermark, enqueued[2];
+    uint64_t sequence[RTE_MAX_ETHPORTS], last_arrival[RTE_MAX_ETHPORTS], last_watermark, enqueued[2];
     struct rx_stats *stats;
 };
 void rx_state_init(struct rx_state *s, struct pipeline_stats *stats);

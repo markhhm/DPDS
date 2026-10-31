@@ -10,6 +10,8 @@ struct mbuf_table {
 };
 static inline struct rte_mbuf **pending_at(struct mbuf_table *t) { return t->m_table + t->head; }
 struct tx_state {
+    struct observer_snapshot snapshot;
+    uint64_t consumed_dispatch[OBS_QUEUES], attempt_id[RTE_MAX_ETHPORTS];
     struct mbuf_table pending[HNG_MAX_LINES];
     struct tx_stats *stats;
     uint16_t (*burst)(uint16_t, uint16_t, struct rte_mbuf **, uint16_t);

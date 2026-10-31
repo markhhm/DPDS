@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 from eal_args import eal_arguments
+from startup import wait_for_output
 
 
 def config(seed, smoke=False):
@@ -81,10 +82,12 @@ def smoke(binary, directory):
     process = subprocess.Popen(command, cwd=directory, env=dict(os.environ, RUNTIME_DIRECTORY=str(directory)),
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     observed = [[], []]
+    expected = [[frame(0, 1-p, seq) for seq in range(32)] for p in range(2)]
+    prefix = ""
     try:
+        prefix = wait_for_output(process, b"layout=4-lcore")
         time.sleep(0.5)
         assert process.poll() is None, process.communicate()[0]
-        expected = [[frame(0, 1-p, seq) for seq in range(32)] for p in range(2)]
         seen = [[], []]
         for seq in range(32):
             for port in range(2):
@@ -113,6 +116,7 @@ def smoke(binary, directory):
     finally:
         process.send_signal(signal.SIGINT)
         output, _ = process.communicate(timeout=12)
+        output = prefix+output
         if observed != expected:
             print(output, file=sys.stderr)
         for sock in receivers:
