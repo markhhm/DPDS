@@ -98,6 +98,25 @@ static void retry_timeout_after_partial(void)
     host.invalid = false; quit_signal_receive = 0;
 }
 
+static void expired_retries_beside_fresh_frames(void)
+{
+    struct pipeline_stats stats; struct tx_state tx;
+    struct rte_mbuf *m[] = {frame(0, 0, 100, 0, 7), frame(0, 1, 101, 1, 7)};
+    start(&tx, &stats);
+    plan[0] = 0;
+    tx_step_at(&tx, m, 2, 0);
+    assert(calls == 1 && delivered == 0 && tx.pending[0].len == 2);
+    m[0] = frame(0, 2, 102, 2, 7);
+    m[1] = frame(1, 0, 103, 3, 7);
+    /* The PMD now accepts: expired retries must never rejoin the fresh frames. */
+    tx_step_at(&tx, m, 2, TERMINAL_TIMEOUT_NS + 1);
+    assert(delivered == 2 && got[0] == 2 && got[1] == 100);
+    assert(calls == 2 && sizes[1] == 2 && !tx_has_backlog(&tx) && host.invalid);
+    assert(stats.tx.tx_drops == 2 && stats.tx.tx_drop_bytes == 152 && stats.tx.transmitted == 2);
+    assert(stats.tx.line_invalid_drops[0] == 2 && stats.tx.line_invalid_drops[1] == 0);
+    host.invalid = false; quit_signal_receive = 0;
+}
+
 /* tx_trace.json, egress 13: line 0 cable, line 1 holds in [200, 2000000300), line 2 drops in [200, 300). */
 static void held_line_beside_merge(void)
 {
@@ -140,6 +159,7 @@ int main(int argc, char **argv)
     more_than_one_burst();
     four_lines_with_ties();
     retry_timeout_after_partial();
+    expired_retries_beside_fresh_frames();
     assert(host_load("tx_trace.json"));
     held_line_beside_merge();
     outage_drop_after_merge();
