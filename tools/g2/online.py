@@ -157,8 +157,8 @@ class OnlineCells:
         mask=cell["registration"].get("mask_bits",self.manifest["sampling"].get("mask_bits",10))
         return sample(row,self.manifest["sampling"]["seed"],mask)
 
-    def _strata(self,row,cell):
-        if self._main(row,cell):
+    def _strata(self,row,main):
+        if main:
             return ["main","late-main" if row["late"] else "ordinary-main"]
         return (["late_extra"] if row["late"] else [])+(
             ["app_extra:"+row["app"]] if row.get("app") in self.manifest["sampling"]["oversample_apps"] else [])
@@ -180,10 +180,11 @@ class OnlineCells:
         if row.get("selected_late") is not None:
             counts["probe_sent"]+=1
             counts["probe_selected_late"]+=row["late"]
-        if row["outcome"]=="accepted" and self._main(row,cell):
-            counts["main_selected"]+=1
         if row["outcome"]=="accepted":
-            cell["populations"].update(self._strata(row,cell))
+            main=self._main(row,cell)
+            if main:
+                counts["main_selected"]+=1
+            cell["populations"].update(self._strata(row,main))
 
     def delivery(self,row,owd_ns,uncertainty_ns,expected_ns=None,raw_owd_ns=None):
         cell=self._cell(row)
@@ -198,7 +199,8 @@ class OnlineCells:
         cell["counts"]["delivered_l2_bytes"]+=row["l2_bytes"]
         if row.get("selected_late") is not None:
             cell["counts"]["probe_received"]+=1
-        names=self._strata(row,cell)
+        main=self._main(row,cell)
+        names=self._strata(row,main)
         if owd_ns is None:
             return
         uint(uncertainty_ns,"pair uncertainty")
@@ -213,9 +215,11 @@ class OnlineCells:
         target=row["release_ns"]-row["arrival_ns"] if expected_ns is None else expected_ns
         error=owd_ns-target
         cell["uncertainty"]=max(cell["uncertainty"],uncertainty_ns)
-        main=self._main(row,cell)
         for name in names:
-            group=cell["groups"].setdefault(name,(Histogram(),Histogram(),Histogram(),Histogram()))
+            group=cell["groups"].get(name)
+            if group is None:
+                group=(Histogram(),Histogram(),Histogram(),Histogram())
+                cell["groups"][name]=group
             group[0].add(error)
             group[1].add(abs(error))
             group[2].add(owd_ns if raw_owd_ns is None else raw_owd_ns)
@@ -233,8 +237,9 @@ class OnlineCells:
         cell["counts"]["datapath_lost" if complete else "unresolved"]+=1
         if complete:
             cell["failures"][reason]+=1
-            cell["lost_groups"].update(self._strata(row,cell))
-            if self._main(row,cell):
+            main=self._main(row,cell)
+            cell["lost_groups"].update(self._strata(row,main))
+            if main:
                 cell["counts"]["main_datapath_lost"]+=1
         else:
             cell["incomplete"].add("observer_incomplete")

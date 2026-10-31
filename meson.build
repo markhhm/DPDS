@@ -37,9 +37,10 @@ test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_sm
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
 
 test('g2-software', python,
-  args: ['-m', 'unittest', 'tools.g2.tests.test_reference',
+  args: [meson.project_source_root() / 'scripts/run-unittest-groups.py',
+         'tools.g2.tests.test_online', '--', 'tools.g2.tests.test_reference',
          'tools.g2.tests.test_report', 'tools.g2.tests.test_probe', 'tools.g2.tests.test_differential',
-         'tools.g2.tests.test_protocol', 'tools.g2.tests.test_online',
+         'tools.g2.tests.test_protocol', 'tools.g2.tests.test_runner',
          'tools.g2.tests.test_calibration', 'tools.g2.tests.test_custody',
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
          'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index',
