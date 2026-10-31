@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -68,22 +69,23 @@ def capture(binary, family, root):
             frames[port, f'software-l2-{port}:{port*COUNT+seq}'] = bytes(frame)
             packets.append(frame)
         pcap(root / f'in-{port}.pcap', packets)
-    reader, writer = os.pipe()
+    reader, writer = socket.socketpair()
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4*1024*1024)
     def spool():
-        with os.fdopen(reader, 'rb') as source, (root / 'native.jsonl').open('wb') as target:
+        with reader, reader.makefile('rb') as source, (root / 'native.jsonl').open('wb') as target:
             shutil.copyfileobj(source, target, 65536)
     thread = threading.Thread(target=spool)
     thread.start()
-    command = [binary] + eal_arguments(2) + ['--no-pci', '--no-huge', '--no-telemetry',
+    command = [binary] + eal_arguments(5) + ['--no-pci', '--no-huge', '--no-telemetry',
         '-m', '256', '--in-memory', f'--file-prefix=hng-m6-{os.getpid()}-{family}']
     command += [f'--vdev=net_pcap{p},rx_pcap={root}/in-{p}.pcap,tx_pcap={root}/out-{p}.pcap' for p in (0, 1)]
-    command += ['--', '-c', str(config_path), '--observe-fd', str(writer),
+    command += ['--', '-c', str(config_path), '--observe-fd', str(writer.fileno()),
                 '--observe-software', '--observe-identity', 'software-l2']
-    process = subprocess.Popen(command, pass_fds=(writer,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    process = subprocess.Popen(command, pass_fds=(writer.fileno(),), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True)
-    os.close(writer)
+    writer.close()
     try:
-        prefix = wait_for_output(process, b'layout=2-lcore')
+        prefix = wait_for_output(process, b'layout=5-lcore')
         time.sleep(0.25)
         process.send_signal(signal.SIGINT)
         output, _ = process.communicate(timeout=10)
