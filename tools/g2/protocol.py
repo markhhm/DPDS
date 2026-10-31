@@ -76,6 +76,27 @@ TERMINALS = {"q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_dr
              "missed_deadline_outage_drop", "shutdown_drop"}
 
 
+def native_stage_allowed(kind, producer, reason=None):
+    """V2 actor IDs identify the stage that can attest each record."""
+    if type(producer) is not int:
+        return False
+    if kind in {"packet", "expected", "frontier", "end"}:
+        return producer in (0, 5)
+    if kind in {"offer", "dispatch"}:
+        return producer in (1, 2)
+    if kind == "attempt":
+        return producer in (3, 6)
+    if kind == "counter":
+        return producer == 4
+    if kind == "terminal":
+        if reason == "handoff_drop":
+            return producer in (0, 5, 1, 2)
+        if reason in {"terminal_tx_drop", "missed_deadline_outage_drop"}:
+            return producer in (3, 6)
+        return reason in TERMINALS and producer in (1, 2)
+    return True
+
+
 def _port_map(value, frontier=False):
     if not isinstance(value, dict):
         raise ValueError("port prefix/frontier must be an object")
@@ -154,6 +175,8 @@ def _validate_record(row, role):
             uint(native["producer"], "native producer", 4 if version.endswith("v1") else 6)
             uint(native["producer_seq"], "native producer sequence")
             uint(native["order"], "native reservation order")
+            if version.endswith("v2") and not native_stage_allowed(row["kind"], native["producer"], row.get("reason")):
+                raise ValueError("native actor cannot attest this stage/reason")
     kind = row["kind"]
     if not isinstance(kind, str) or kind not in ROLES[role] | {"gap"}:
         raise ValueError(f"unsupported {role} record kind {kind!r}")

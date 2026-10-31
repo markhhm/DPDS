@@ -13,7 +13,7 @@ import sqlite3
 import tempfile
 
 from .reference import Trace, canonical, uint
-from .protocol import actor, handoff_actors
+from .protocol import actor, handoff_actors, native_stage_allowed
 
 
 MODEL_REASONS = {"q_drop": "q_drop", "trace_loss": "trace_loss_drop",
@@ -153,6 +153,10 @@ class _Replay:
             kind = row["kind"]
             if kind not in {"offer", "terminal", "dispatch", "attempt"}:
                 self.issue("host_event_kind", "INVALID", row)
+                continue
+            native = row.get("extensions", {}).get("native_observer_v2")
+            if native is not None and not native_stage_allowed(kind, native["producer"], row.get("reason")):
+                self.issue("native_actor", "INCONCLUSIVE", row)
                 continue
             at = row["gate_ns"] if kind == "attempt" else row["at_ns"]
             try:

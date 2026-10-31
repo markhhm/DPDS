@@ -4,7 +4,7 @@ from collections import Counter
 
 from .custody import MODEL_REASONS
 from .reference import Trace
-from .protocol import actor, handoff_actors
+from .protocol import actor, handoff_actors, native_stage_allowed
 
 
 def key(row):
@@ -127,6 +127,10 @@ class LiveCustody:
     def event(self, event):
         kind = event["kind"]
         self.counts[kind] += 1
+        native = event.get("extensions", {}).get("native_observer_v2")
+        if native is not None and not native_stage_allowed(kind, native["producer"], event.get("reason")):
+            self.issue("native_actor", "INCONCLUSIVE", event)
+            return
         if kind in {"offer", "terminal"}:
             state = self.state(event)
             if state is None:

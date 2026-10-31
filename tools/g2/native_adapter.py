@@ -13,7 +13,7 @@ import os
 import stat
 import sys
 
-from .protocol import StreamWriter, identifier
+from .protocol import StreamWriter, identifier, native_stage_allowed
 from .reference import U64, fields, load_config, strict_json, uint
 
 # hng-native-v1 item-vector order. Raw indices are adapter-private, not interchange.
@@ -276,6 +276,9 @@ class NativeAdapter:
                 allowed = (rx, tx) + workers
             if p not in allowed:
                 raise ValueError('packet actor differs from owner')
+            if kind == 2 and not native_stage_allowed('terminal', p,
+                    REASONS[uint(row['reason'], 'terminal reason', len(REASONS)-1)]):
+                raise ValueError('terminal actor differs from reason stage')
             if kind in (5, 6) and row['port'] != self.lines[x['line']]['egress_port']:
                 raise ValueError('native egress differs from registered line')
             if kind == 5 and (x['handoff_queue'] != row['handoff_queue'] or

@@ -12,6 +12,36 @@ from tools.g2.protocol import StreamReader, StreamError
 
 
 class NativeBoundary(unittest.TestCase):
+    def test_v2_terminal_accepts_the_correct_stage_for_both_owners(self):
+        for owner in (0,1):
+            for reason in range(9):
+                actors=(0 if owner==0 else 5,1+owner) if reason==5 else (
+                    (3 if owner==0 else 6,) if reason in (6,7) else (1+owner,))
+                for producer in actors:
+                    rows=self.fixture_v2()
+                    rows.insert(2+2*owner,dict(rows[1+2*owner],kind=2,producer=producer,at_ns=150,reason=reason))
+                    counts=[0]*7
+                    for order,row in enumerate(rows[1:-1]):
+                        counts[row['producer']]+=1
+                        row.update(order=order,producer_seq=counts[row['producer']])
+                    for p,count in enumerate(counts):
+                        rows[-1]['producers'][p].update(attempted=count,emitted=count,high_water=count)
+                    with self.subTest(owner=owner,reason=reason,producer=producer):
+                        result,_=self.normalize_v2(rows)
+                        self.assertTrue(result['complete'],result)
+
+    def test_v2_terminal_reason_rejects_an_actor_from_the_wrong_stage(self):
+        for reason in range(9):
+            rows=self.fixture_v2()
+            producer=1 if reason in (6,7) else 3
+            row=dict(rows[1],kind=2,producer=producer,producer_seq=1,order=4,at_ns=150,reason=reason)
+            rows.insert(-1,row)
+            rows[-1]['producers'][producer].update(attempted=1,emitted=1,high_water=1)
+            with self.subTest(reason=reason):
+                result,streams=self.normalize_v2(rows)
+                self.assertFalse(result['complete'])
+                self.assertTrue(all(not stream[-1]['complete'] for stream in streams))
+
     def fixture_v2(self):
         old = [json.loads(line) for line in self.fixture().splitlines()]
         header = dict(old[0], schema='hng-native-v2', layout='per-direction', ports=[7, 13])

@@ -107,6 +107,15 @@ class CustodyTests(unittest.TestCase):
                           iter(envelop(events)) if not events or "stream_id" not in events[0]
                           else iter(events), Path(self.directory.name))
 
+    def test_native_v2_wrong_stage_cannot_make_a_model_drop_conclusive(self):
+        row=expected(outcome='q_drop')
+        events=envelop([offer(row),terminal(row,'q_drop')])
+        for i,event in enumerate(events):
+            event['extensions']=dict(native_observer_v2=dict(producer=3,producer_seq=i+1,order=i))
+        audit=self.audit([row],events)
+        self.assertIn('native_actor',self.codes(audit,'INCONCLUSIVE'))
+        self.assertNotEqual(audit.measurement_status,'PASS')
+
     def test_history_replay_requires_explicit_software_debug_retention(self):
         for change in [dict(retention=dict(mode="stream",debug_windows=[],mismatch_cap=64)),dict(scope="physical")]:
             registration=dict(self.manifest,**change)

@@ -5,7 +5,7 @@ import unittest
 
 from tools.g2.live_custody import LiveCustody, key
 from tools.g2.protocol import StreamError, validate_record
-from tools.g2.tests.test_custody import attempt, dispatch, envelop, expected
+from tools.g2.tests.test_custody import attempt, dispatch, envelop, expected, offer, terminal
 from tools.g2.tests.test_reference import config
 from tools.g2.tests.test_registration import manifest
 
@@ -15,6 +15,19 @@ def actor(row, producer):
 
 
 class LiveCustodyTests(unittest.TestCase):
+    def test_native_v2_wrong_stage_cannot_supply_an_offer_or_model_terminal(self):
+        row=expected(outcome='q_drop')
+        for event in (offer(row),terminal(row,'q_drop')):
+            event['extensions']=dict(native_observer_v2=dict(producer=3,producer_seq=1,order=0))
+            normalized=envelop([event])[0]
+            with self.subTest(kind=event['kind'],boundary='protocol'),self.assertRaises(StreamError):
+                validate_record(normalized,'host')
+            checker,active,issues=self.audit([row],[])
+            active[key(row)]['offer']=None
+            checker.event(normalized)
+            with self.subTest(kind=event['kind'],boundary='live'):
+                self.assertIn(('native_actor','INCONCLUSIVE'),issues)
+
     def two_owner_history(self):
         cfg, reg = config(), manifest()
         cfg['lines'].append(dict(copy.deepcopy(cfg['lines'][0]), name='reverse', ingress_port=1, egress_port=0))
