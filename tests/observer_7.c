@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,9 +15,19 @@
 #define PACKETS 8
 static struct rte_mempool *pool;
 static struct pipeline_stats stats;
-static pthread_barrier_t start, ready;
+static pthread_barrier_t start, ready, paused, resume;
 static unsigned calls[2];
 struct direction { unsigned owner; struct rte_mbuf *batch[PACKETS]; struct tx_state tx; };
+
+static void *paused_rx1(void *argument)
+{
+    bool reserve = *(bool *)argument;
+    if (reserve) assert(observer_reserve(OBS_RX1));
+    pthread_barrier_wait(&paused);
+    pthread_barrier_wait(&resume);
+    if (!reserve) observer_input_end(OBS_RX1, host.ports[1], 0);
+    return NULL;
+}
 
 static uint16_t partial(uint16_t port, uint16_t queue, struct rte_mbuf **batch, uint16_t count)
 {
@@ -116,6 +128,40 @@ int main(int argc, char **argv)
     assert(observer_health(OBS_RX).records_emitted == PACKETS + 2 && observer_health(OBS_RX1).records_emitted == PACKETS + 2);
     assert(observer_health(OBS_TX).records_emitted == 2 && observer_health(OBS_TX1).records_emitted == 2);
     assert(rte_mempool_avail_count(pool) == pool->size); rte_mempool_free(pool);
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+        if (mode == 2) {
+            /* A stalled reader must produce visible loss without a blocking drain. */
+            assert(fcntl(fd[0], F_SETFL, O_NONBLOCK) == 0);
+            char padding[4096] = {0};
+            while (write(fd[0], padding, sizeof(padding)) > 0) {}
+            assert(errno == EAGAIN || errno == EWOULDBLOCK);
+        }
+        assert(observer_open(fd[0], OBS_ID_SOFTWARE_L2, 9000, 16, true) && observer_start());
+        assert(!pthread_barrier_init(&paused, NULL, 2) && !pthread_barrier_init(&resume, NULL, 2));
+        bool reserve = mode == 0;
+        pthread_t delayed; assert(!pthread_create(&delayed, NULL, paused_rx1, &reserve));
+        pthread_barrier_wait(&paused);
+        if (reserve) {
+            struct observer_record later = {.kind = OBS_ATTEMPT, .port = 7};
+            assert(observer_emit(OBS_TX1, &later));
+            assert(observer_health(OBS_TX1).records_emitted == 0);
+        } else {
+            observer_input_end(OBS_RX, 7, 0);
+            assert(observer_health(OBS_RX).records_attempted == 1);
+            assert(observer_health(OBS_RX1).records_attempted == 0);
+        }
+        pthread_barrier_wait(&resume);
+        assert(!pthread_join(delayed, NULL));
+        assert(observer_close(!reserve) == (mode == 1));
+        if (reserve) {
+            assert(observer_health(OBS_RX1).capture_drops == 1 && observer_health(OBS_TX1).capture_drops == 1);
+        } else if (mode == 2) {
+            assert(observer_health(OBS_RX).capture_drops == 1 && observer_health(OBS_RX1).capture_drops == 1);
+        }
+        close(fd[0]); close(fd[1]);
+        assert(!pthread_barrier_destroy(&paused) && !pthread_barrier_destroy(&resume));
+    }
     /* Supplying every valid END must not hide an unknown port or a foreign writer. */
     for (unsigned mode = 0; mode < 2; ++mode) {
         host.port_count = mode + 1;
