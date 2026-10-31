@@ -199,3 +199,51 @@ error 0.03% (gate 5%: PASS).
 
 NICs, hugepages, NUMA, 100G, an isolated fixed-frequency core, and the 7-lcore
 layout with an open-loop generator.
+
+## 2 MiB hugepage validation (2026-11-01)
+
+One validation batch used host `749d554` and core `2afe493` on WSL2.
+The preflight check found 1,024 reserved 2 MiB pages and hugetlbfs mounted
+at `/dev/hugepages`. All runs retained `--in-memory` without `--no-huge`.
+
+The small calculator check used:
+
+```sh
+build/hng-pool-calc -l "$CPU" --no-pci --no-telemetry -m 512 \
+  --in-memory --huge-dir=/dev/hugepages --file-prefix="$RUN_PREFIX" \
+  --vdev=net_null0 --vdev=net_null1 -- \
+  --c-bps 1000000000 --t-ms 20 --delta-ms 40 --q-ms 5 --burst 256 \
+  --lines-per-port 2 --page-bytes 4096 --verify
+```
+
+The verifier detected 2,097,152-byte pages and recalculated the plan.
+Each port had 18,772 objects with matching 2,496-byte strides. The plan
+includes seven lcores' caches. The verifier itself uses one EAL lcore.
+
+| Allocation | Calculated bytes | Actual bytes | Error |
+|---|---:|---:|---:|
+| Each pool | 49,553,984 | 48,189,184 | 2.83% |
+| Core metadata | 3,185,280 | 3,189,872 heap growth; reservation matches plan | 0.14% |
+| Both pools plus core | 102,293,248 | 99,568,240 | **2.74%: PASS**, limit 5% |
+
+Per pool, 46,854,912 object bytes round to 23 pages (48,234,496 B).
+The plan adds 1,319,488 B for ring/header costs. Actual heap growth exceeds
+object bytes by 1,334,272 B. Memzone costs are not isolated. The error
+compares consumed pool/core bytes, not the full 512 MiB EAL reservation.
+
+The existing null/ring assertions ran unchanged through a local EAL argument
+adapter. Null retained its 256 MiB budget. Ring used 512 MiB.
+
+All 22 null
+lifecycle/signal cases passed on 2/3/4/5/7 lcores. All seven ring modes passed:
+`ring`, `ring-stepped`, `ring-split`, `ring-stepped-split`, `ring-io-split`,
+`ring-stepped-io-split` and `ring-io-split-lcores`.
+
+Each mode ran 32 seeds.
+The first six checked 10,027,008 inputs each. The production seven-lcore
+RX/TX mode checked 65,536. Identity, bytes, order, conservation and drain
+checks passed. Sampled one-minute load was 6.42–7.39.
+
+These are small-allocation and software PMD integrity results. They update
+the earlier hugepage limitation for these cases only. Physical NICs, NUMA,
+100G, production-sized pools and 1 GiB pages remain unverified.
