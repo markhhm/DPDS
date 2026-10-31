@@ -247,6 +247,23 @@ The error uses `abs(calculated - actual) / actual`, as in
 512 MiB EAL reservation. This verifies the small 2 MiB allocation case.
 Production-sized long-delay pools and 1 GiB pages remain unverified.
 
+For each pool, the page calculation is explicit:
+
+| Planning component | Bytes |
+|---|---:|
+| 18,772 objects times 2,496-byte stride | 46,854,912 |
+| 23 pages times 2,097,152 bytes, at 840 objects per page | 48,234,496 |
+| Page rounding above the object bytes | 1,379,584 |
+| Additional ring and mempool-header estimate | 1,319,488 |
+| Planned pool total | 49,553,984 |
+
+The measured pool heap growth exceeds the object bytes by 1,334,272 B.
+This is the combined overhead reported by the DPDK heap counter for the
+pool, ring and allocation padding. The verifier does not isolate memzone
+costs or charge every reserved EAL page to this pool. Thus the conservative page
+rounding and header estimate is not a measurement of memzone overhead alone.
+The planned total exceeds the measured total by 1,364,800 B per pool.
+
 ### Null and ring PMDs with hugepages
 
 The existing `tests/null_smoke.py` and `tests/io_pmd.py` assertions ran
