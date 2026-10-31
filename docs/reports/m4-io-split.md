@@ -229,7 +229,9 @@ There is no `--no-huge` argument. The planning input of 4,096 bytes
 deliberately exercises the verifier's actual-page detection. It reported
 `verify page_bytes=2097152 (from the EAL memory segment list)` and recomputed
 the plan for that page size before comparison. Core metadata was 144 bytes
-per slot. The plan reserves seven lcores' pool caches. The allocation verifier
+per slot.
+
+The plan reserves seven lcores' pool caches. The allocation verifier
 itself uses one EAL lcore. Each port had 18,772 objects, all populated, with
 calculated and actual stride both 2,496 bytes.
 
