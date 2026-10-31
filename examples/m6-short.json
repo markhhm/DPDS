@@ -1,0 +1,26 @@
+{
+  "schema": "hng-m6-matrix-v1",
+  "scope": "software-only",
+  "plan": {
+    "name": "G-short",
+    "inventory": "three representative runs; expand registered captures before physical M6",
+    "main": {"conditions": 72, "repeats": 3},
+    "boundary": {"conditions": 288, "repeats": 1},
+    "trace": {"conditions": 60, "repeats": 2},
+    "timing_mask_bits": 10,
+    "minimum_pairs": 368,
+    "planning_pairs_estimate": 431,
+    "fixed_exposure_seconds": 70,
+    "warmup_seconds": 2,
+    "drain_seconds": 1,
+    "reset_seconds": 5,
+    "trace_episode_seconds": 11,
+    "trace_episodes_typical": 10,
+    "trace_episodes_maximum": 20
+  },
+  "runs": [
+    {"id": "main-r0", "family": "main", "manifest": "captures/main-r0/manifest.json"},
+    {"id": "boundary-r0", "family": "boundary", "manifest": "captures/boundary-r0/manifest.json"},
+    {"id": "trace-r0", "family": "trace", "manifest": "captures/trace-r0/manifest.json"}
+  ]
+}
