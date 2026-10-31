@@ -7,6 +7,13 @@
 static uint64_t ids[16];
 static unsigned delivered;
 static bool blocked;
+static unsigned clock_reads;
+static uint64_t clock_before, clock_after;
+uint64_t __wrap_host_now_ns(void)
+{
+    /* Advance at the final pre-submit read, after the initial candidate selection. */
+    return ++clock_reads < 4 ? clock_before : clock_after;
+}
 static uint16_t transmit(uint16_t port, uint16_t queue, struct rte_mbuf **batch, uint16_t count)
 {
     (void)queue;
@@ -26,6 +33,18 @@ static struct rte_mbuf *packet(struct rte_mempool *pool, unsigned line, uint64_t
         .release_ns=deadline, .deadline_ns=deadline};
     m->port = 13; m->hash.usr = id;
     return m;
+}
+static void recovery_at_final_clock_read(struct rte_mempool *pool)
+{
+    struct pipeline_stats stats = {0};
+    struct tx_state tx;
+    tx_state_init(&tx, &stats); tx.burst = transmit;
+    struct rte_mbuf *batch[] = {packet(pool, 0, 200, 200), packet(pool, 1, 100, 100)};
+    blocked = false; delivered = clock_reads = 0;
+    clock_before = 2000000299; clock_after = 2000000300;
+    tx_step(&tx, batch, 2);
+    assert(delivered == 2 && ids[0] == 100 && ids[1] == 200);
+    assert(!tx_has_backlog(&tx) && stats.tx.transmitted == 2 && !host.invalid);
 }
 int main(int argc, char **argv)
 {
@@ -59,6 +78,8 @@ int main(int argc, char **argv)
     tx_step_at(&tx, NULL, 0, TERMINAL_TIMEOUT_NS + 1);
     assert(!tx_has_backlog(&tx) && stats.tx.tx_drops == 1 && stats.tx.tx_drop_bytes == 76);
     tx_state_cleanup(&tx);
+    host.invalid = false; quit_signal_receive = 0;
+    recovery_at_final_clock_read(pool);
     host_cleanup();
     assert(rte_mempool_avail_count(pool) == 255);
     rte_mempool_free(pool);

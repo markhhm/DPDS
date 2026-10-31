@@ -17,13 +17,14 @@ static void remove_head(struct mbuf_table *table)
     table->head = table->len ? table->head + 1 : 0;
 }
 
-static void terminal_drop(struct tx_state *s, unsigned line)
+static void terminal_drop(struct tx_state *s, unsigned line, uint64_t now)
 {
     struct mbuf_table *table = &s->pending[line];
     struct rte_mbuf *m = pending_at(table)[0];
     s->stats->tx_drops++;
     s->stats->tx_drop_bytes += m->pkt_len;
     s->stats->line_invalid_drops[line]++;
+    observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
     rte_pktmbuf_free(m);
     remove_head(table);
 }
@@ -42,11 +43,18 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
     for (uint16_t i = 0; i < count; ++i) {
         struct rte_mbuf *m = batch[i];
         unsigned line = packet_meta(m)->line;
+        if (observer_enabled()) {
+            struct observer_packet *x = &packet_meta(m)->observation;
+            if (x->handoff_queue < OBS_QUEUES && x->handoff_seq == s->consumed_dispatch[x->handoff_queue]) {
+                s->consumed_dispatch[x->handoff_queue]++;
+            } else host_invalidate("observer handoff prefix is not contiguous");
+        }
         s->stats->received_bytes += m->pkt_len;
         if (line >= HNG_MAX_LINES || m->port >= RTE_MAX_ETHPORTS) {
             host_invalidate("invalid TX metadata");
             s->stats->tx_drops++;
             s->stats->tx_drop_bytes += m->pkt_len;
+            observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
             rte_pktmbuf_free(m);
             continue;
         }
@@ -56,6 +64,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             s->stats->tx_drops++;
             s->stats->tx_drop_bytes += m->pkt_len;
             s->stats->line_invalid_drops[line]++;
+            observer_terminal(OBS_TX, m, OBS_TERMINAL_TX, now);
             rte_pktmbuf_free(m);
             continue;
         }
@@ -75,6 +84,8 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
         if (!s->pending[start].len) continue;
         uint16_t port = pending_at(&s->pending[start])[0]->port;
         if (blocked_port[port]) continue;
+        if (observer_enabled()) observer_load_snapshot(&s->snapshot);
+        if (live_clock) now = host_now_ns();
         unsigned chosen = HNG_MAX_LINES;
         for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
             struct mbuf_table *table = &s->pending[line];
@@ -85,8 +96,9 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                 uint32_t gate = host.policies[line] ? hng_tx_policy_gate(host.policies[line], now) : 0;
                 if (gate == 1) {
                     if (now - packet_meta(m)->pending_since_ns > SHUTDOWN_TIMEOUT_NS) {
+                        observer_abort(OBS_ABORT_DRAIN);
                         host_invalidate("TX outage hold exceeded bounded backlog time");
-                        terminal_drop(s, line);
+                        terminal_drop(s, line, now);
                         continue;
                     }
                     break;
@@ -96,6 +108,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                     s->stats->trace_outage_drops++;
                     s->stats->trace_outage_bytes += m->pkt_len;
                     s->stats->line_outage_drops[line]++;
+                    observer_terminal(OBS_TX, m, OBS_MISSED_OUTAGE, now);
                     rte_pktmbuf_free(m);
                     remove_head(table);
                     continue;
@@ -103,7 +116,7 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
                 if (gate != 0 || (packet_meta(m)->retry_active &&
                     now - packet_meta(m)->retry_since_ns > TERMINAL_TIMEOUT_NS)) {
                     host_invalidate(gate ? "TX trace coverage expired" : "TX retry timeout");
-                    terminal_drop(s, line);
+                    terminal_drop(s, line, now);
                     continue;
                 }
                 if (chosen == HNG_MAX_LINES || key_before(m, pending_at(&s->pending[chosen])[0])) chosen = line;
@@ -133,6 +146,24 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             burst[n] = pending_at(&s->pending[next])[taken[next]++];
             line_of[n++] = (uint8_t)next;
         }
+        if (live_clock) now = host_now_ns();
+        /* A newly recovered line can precede this burst, so rebuild if any port candidate changed. */
+        bool unchanged = true;
+        for (unsigned line = 0; line < HNG_MAX_LINES; ++line) {
+            if (!s->pending[line].len || pending_at(&s->pending[line])[0]->port != port) continue;
+            bool open = !host.policies[line] || hng_tx_policy_gate(host.policies[line], now) == 0;
+            if (eligible[line] != open) unchanged = false;
+        }
+        if (!unchanged) continue;
+        struct observer_record event = {.kind = OBS_ATTEMPT, .port = port, .count = n,
+            .gate_ns = now, .snapshot = s->snapshot};
+        if (observer_enabled()) {
+            event.attempt_id = s->attempt_id[port]++;
+            memcpy(event.consumed_dispatch, s->consumed_dispatch, sizeof(event.consumed_dispatch));
+            for (unsigned i = 0; i < n; ++i) {
+                event.items[i] = observer_packet(burst[i]); event.items[i].gate_ns = now;
+            }
+        }
         uint32_t bytes[MAX_BURST_SIZE];
         uint64_t lateness[MAX_BURST_SIZE];
         for (uint16_t i = 0; i < n; ++i) {
@@ -140,7 +171,12 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             uint64_t deadline = packet_meta(burst[i])->deadline_ns;
             lateness[i] = now > deadline ? now - deadline : 0;
         }
+        if (observer_enabled()) event.submit_before_ns = live_clock ? host_now_ns() : now;
         uint16_t sent = s->burst(port, 0, burst, n);
+        if (observer_enabled()) {
+            event.submit_after_ns = live_clock ? host_now_ns() : now; event.accepted_count = sent;
+            observer_emit(OBS_TX, &event);
+        }
         s->stats->burst_hist[31 - __builtin_clz(n)]++;
         if (sent > n) {
             /* The PMD contract cannot transfer more than the offered prefix. */
@@ -209,11 +245,20 @@ int lcore_transmit(struct lcore_parameters *parameters)
 {
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
+    bool owner_queues = parameters->tx_owner_rings[0] && parameters->tx_owner_rings[1];
+    if (observer_enabled() && parameters->split && !owner_queues)
+        { observer_abort(OBS_ABORT_RESOURCE); host_invalidate("observation requires single-producer TX queues"); }
     tx_state_init(&tx, parameters->stats);
     if (parameters->io_split) tx.stats = &parameters->stats->tx_owners[parameters->owner_index];
     /* quit_signal_transmit follows the last scheduler's final enqueue. */
-    while (!quit_signal_transmit || !rte_ring_empty(parameters->worker_transmit_ring) || tx_has_backlog(&tx)) {
-        uint16_t count = rte_ring_dequeue_burst(parameters->worker_transmit_ring,
+    while (!quit_signal_transmit ||
+        (owner_queues ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :
+            !rte_ring_empty(parameters->worker_transmit_ring)) || tx_has_backlog(&tx)) {
+        uint16_t count = 0;
+        if (owner_queues) {
+            for (unsigned q = 0; q < 2 && count < MAX_BURST_SIZE; ++q)
+                count += rte_ring_dequeue_burst(parameters->tx_owner_rings[q], (void **)(batch + count), MAX_BURST_SIZE - count, NULL);
+        } else count = rte_ring_dequeue_burst(parameters->worker_transmit_ring,
             (void **)batch, MAX_BURST_SIZE, NULL);
         tx_step(&tx, batch, count);
     }

@@ -336,6 +336,10 @@ checks below establish software integrity only.
 
 ## License
 
+Independent M2 reference/reporting software and its limitations are documented
+in [tools/g2/README.md](tools/g2/README.md). Meson includes its million-event
+core comparison and injected-fault checks. All results remain software-only.
+
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ## Checks, pre-push hook and CI

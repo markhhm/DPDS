@@ -7,6 +7,10 @@ void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats,
 {
     memset(s, 0, sizeof(*s));
     s->engine = host.engine;
+    s->handoff_queue = ingress_port >= 0 && host.port_count == 2 && ingress_port == host.ports[1] ? 1 : 0;
+    s->producer = s->handoff_queue ? OBS_WORKER1 : OBS_WORKER0;
+    s->snapshot.count = host.port_count;
+    for (unsigned p = 0; p < host.port_count; ++p) s->snapshot.ports[p] = host.ports[p];
     s->stats = stats;
     for (size_t i = 0; i < host.line_count; ++i) {
         if (ingress_port >= 0 && host.lines[i].ingress_port != ingress_port) continue;
@@ -48,10 +52,11 @@ void worker_stats_merge(struct worker_stats *dst, const struct worker_stats *src
         if (ingress_port < 0 || host.lines[i].ingress_port == ingress_port) dst->lines[i] = src->lines[i];
 }
 
-static void discard_invalid(struct worker_state *s, struct rte_mbuf *m)
+static void discard_invalid(struct worker_state *s, struct rte_mbuf *m, uint64_t now)
 {
     s->stats->invalid_drops++;
     s->stats->invalid_drop_bytes += m->pkt_len;
+    observer_terminal(s->producer, m, OBS_INVALID_INPUT, now);
     rte_pktmbuf_free(m);
 }
 
@@ -109,23 +114,31 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         for (uint16_t i = first; i < end; ++i) {
             struct rte_mbuf *m = in_batch[i];
             struct packet_meta *meta = packet_meta(m);
+            if (observer_enabled())
+                for (unsigned p = 0; p < s->snapshot.count; ++p)
+                    if (s->snapshot.ports[p] == meta->ingress_port) s->snapshot.seen[p] = meta->ingress_seq + 1;
             s->stats->received++;
             s->stats->received_bytes += m->pkt_len;
             if (meta->ingress_port >= RTE_MAX_ETHPORTS || s->ended || s->aborted) {
                 host_invalidate("invalid RX metadata or admission after end");
-                discard_invalid(s, m);
+                discard_invalid(s, m, now);
                 continue;
             }
             int line = classify(s, m);
             s->admitted_frontier[meta->ingress_port] = meta->arrival_ns;
             if (line == -2) host_invalidate("packet handed to a scheduler that does not own its line");
             if (line < 0) {
-                discard_invalid(s, m);
+                discard_invalid(s, m, now);
                 continue;
             }
             meta->line = (uint16_t)line;
             line_of[n] = (uint16_t)line; offer[n] = m; packets[n] = m; bytes[n] = m->pkt_len;
             arrivals[n] = meta->arrival_ns; seqs[n] = meta->ingress_seq;
+            if (observer_enabled()) {
+                struct observer_record event = {.kind = OBS_OFFER, .count = 1, .at_ns = now,
+                    .actual_selection_seq = s->actual_selection[line]++};
+                event.items[0] = observer_packet(m); observer_emit(s->producer, &event);
+            }
             n++;
         }
         hng_lines_offer_burst(handles, line_of, packets, bytes, arrivals, seqs, n, results, records);
@@ -147,9 +160,11 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
                 host_invalidate("core delay storage exhausted");
             } else {
                 host_invalidate("core rejected timestamp/sequence/length");
-                discard_invalid(s, m);
+                discard_invalid(s, m, now);
                 continue;
             }
+            observer_terminal(s->producer, m, result == QDrop ? OBS_Q_DROP : result == TraceLoss ? OBS_TRACE_LOSS :
+                result == TraceOutage ? OBS_TRACE_OUTAGE : OBS_STORAGE, now);
             rte_pktmbuf_free(m);
         }
     }
@@ -174,6 +189,17 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             if (bound < limit[g]) limit[g] = bound;
         }
     }
+    if (observer_enabled()) {
+        for (unsigned p = 0; p < s->snapshot.count; ++p) {
+            uint16_t port = s->snapshot.ports[p];
+            bool owned = false;
+            for (unsigned k = 0; k < s->owned_count; ++k) owned |= host.lines[s->owned_lines[k]].ingress_port == port;
+            if (owned) {
+                s->snapshot.lower_bound[p] = watermark(s, port);
+                s->snapshot.ended[p] = s->ended;
+            }
+        }
+    }
     unsigned open = s->group_count;
     uint16_t emitted = 0;
     for (size_t attempt = 0; open && attempt < (size_t)MAX_BURST_SIZE * s->owned_count; ++attempt) {
@@ -193,12 +219,14 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         s->stats->sent_bytes += candidate.packet_bytes;
         if (emitted == MAX_BURST_SIZE) break;
     }
+    if (count || emitted || s->ended) observer_publish_snapshot(s->handoff_queue, &s->snapshot);
     return emitted;
 }
 
 uint16_t worker_step(struct worker_state *s, struct rte_mbuf **in, uint16_t count, struct rte_mbuf **out)
 {
     if (s->ended && !s->aborted && host_now_ns() - s->shutdown_start > SHUTDOWN_TIMEOUT_NS) {
+        observer_abort(OBS_ABORT_DRAIN);
         host_invalidate("scheduler shutdown drain timeout");
         s->aborted = true;
         for (uint16_t k = 0; k < s->owned_count; ++k) {
@@ -206,6 +234,7 @@ uint16_t worker_step(struct worker_state *s, struct rte_mbuf **in, uint16_t coun
             while (hng_line_abort_pop(s->line[s->owned_lines[k]], &p)) {
                 s->stats->shutdown_drops++;
                 s->stats->shutdown_drop_bytes += p.packet_bytes;
+                observer_terminal(s->producer, p.packet_ptr, OBS_SHUTDOWN, host_now_ns());
                 rte_pktmbuf_free(p.packet_ptr);
             }
         }
@@ -231,12 +260,40 @@ void worker_state_cleanup(struct worker_state *s)
         while (hng_line_abort_pop(s->line[line], &p)) {
             s->stats->shutdown_drops++;
             s->stats->shutdown_drop_bytes += p.packet_bytes;
+            observer_terminal(s->producer, p.packet_ptr, OBS_SHUTDOWN, host_now_ns());
             rte_pktmbuf_free(p.packet_ptr);
             s->aborted = true;
+            observer_abort(OBS_ABORT_DRAIN);
             host_invalidate("forced scheduler cleanup");
         }
         hng_line_stats(s->line[line], &s->stats->lines[line]);
     }
+}
+
+void worker_dispatch_prepare(struct worker_state *s, struct rte_mbuf **batch, uint16_t count,
+    struct observer_record **reservations, uint64_t at_ns)
+{
+    if (!observer_enabled()) return;
+    for (unsigned i = 0; i < count; ++i) {
+        struct packet_meta *meta = packet_meta(batch[i]);
+        meta->observation.handoff_seq = s->handoff_next + i;
+        meta->observation.handoff_queue = s->handoff_queue;
+        struct observer_record *r = reservations[i] = observer_reserve(s->producer);
+        if (!r) continue;
+        r->kind = OBS_DISPATCH; r->port = batch[i]->port; r->count = 1; r->at_ns = at_ns;
+        r->handoff_queue = s->handoff_queue; r->first_handoff_seq = s->handoff_next + i;
+        r->snapshot = s->snapshot; r->items[0] = observer_packet(batch[i]);
+    }
+}
+void worker_dispatch_done(struct worker_state *s, struct observer_record **reservations, uint16_t count, uint16_t sent)
+{
+    if (!observer_enabled()) return;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!reservations[i]) continue;
+        if (i >= sent) reservations[i]->count = 0;
+        observer_commit(s->producer);
+    }
+    s->handoff_next += sent;
 }
 
 int lcore_worker(struct lcore_parameters *parameters)
@@ -252,13 +309,17 @@ int lcore_worker(struct lcore_parameters *parameters)
             (void **)batch, MAX_BURST_SIZE, NULL);
         if (quit_signal_worker && rte_ring_empty(parameters->receive_worker_ring) && !count) worker_end_input(&wk);
         uint16_t out = worker_step(&wk, batch, count, output);
+        struct observer_record *reservations[MAX_BURST_SIZE];
+        worker_dispatch_prepare(&wk, output, out, reservations, host_now_ns());
         uint16_t sent = rte_ring_enqueue_burst(parameters->worker_transmit_ring,
             (void **)output, out, NULL);
+        worker_dispatch_done(&wk, reservations, out, sent);
         if (sent != out) {
             host_invalidate("TX handoff ring exhausted");
             for (uint16_t i = sent; i < out; ++i) {
                 wk.stats->tx_ring_drops++;
                 wk.stats->tx_ring_drop_bytes += output[i]->pkt_len;
+                observer_terminal(wk.producer, output[i], OBS_HANDOFF, host_now_ns());
                 rte_pktmbuf_free(output[i]);
             }
         }
