@@ -12,7 +12,8 @@ from .reference import Reference, load_config, strict_json
 from .registration import validate_registration
 
 
-def preflight(path):
+def load_registration(path):
+    """Return checked sources, configuration and validated traces for one report."""
     path = Path(path)
     raw_manifest = path.read_bytes()
     manifest = strict_json(raw_manifest)
@@ -22,7 +23,8 @@ def preflight(path):
     if config_hash != manifest["config"]["sha256"]:
         raise StreamError("SOURCE_HASH_MISMATCH", "engine configuration bytes changed")
     config, traces = load_config(config_path, contents=raw_config)
-    Reference(config, manifest["run"], traces)
+    reference = Reference(config, manifest["run"], traces)
+    traces = {name: state["trace"] for name, state in reference.lines.items() if state["trace"] is not None}
     validate_registration(manifest, config)
     calibration_path = path.parent / manifest["calibration_path"]
     raw_calibration = calibration_path.read_bytes()
@@ -32,12 +34,17 @@ def preflight(path):
     for trace in manifest["traces"]:
         if hashlib.sha256((path.parent / trace["path"]).read_bytes()).hexdigest() != trace["sha256"]:
             raise StreamError("SOURCE_HASH_MISMATCH", "registered normalized trace bytes changed")
-    return dict(schema="hng-g2-preflight-v1", check="registration-preflight", status="PASS",
+    checked = dict(schema="hng-g2-preflight-v1", check="registration-preflight", status="PASS",
                 scope="software-only", registered_scope=manifest["scope"], g2_qualified=False,
                 reason_codes=[], sources=dict(manifest_sha256=hashlib.sha256(raw_manifest).hexdigest(),
                     config_sha256=config_hash, calibration_sha256=hashlib.sha256(raw_calibration).hexdigest(),
                     trace_sha256={row["line"]:row["sha256"] for row in manifest["traces"]}),
                 unavailable=["capture_integrity", "data_path_gates", "hardware_qualification"])
+    return checked, config, traces
+
+
+def preflight(path):
+    return load_registration(path)[0]
 
 
 def main():

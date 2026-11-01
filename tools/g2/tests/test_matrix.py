@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Matrix CLI preserves the existing reporter's sealed-run verdicts."""
+import cProfile
+import hashlib
 import json
 import os
 import signal
@@ -15,6 +17,39 @@ from tools.g2.tests.test_pcapng import setup as capture_pair, pcapng
 
 
 class MatrixTests(unittest.TestCase):
+    def test_trace_report_loads_and_validates_each_profile_once(self):
+        from tools.g2.matrix import completed_run, report_one
+        from tools.g2.reference import Trace, load_config
+        profile = dict(end_ns=10**9, loss_seed=0, outage_action='drop', terminal='error',
+                       terminal_horizon_ns=None, rows=[dict(at_ns=0, t_ns=10, loss='0', outage=False)])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root, trace=profile)
+            profiler = cProfile.Profile()
+            code = profiler.runcall(report_one, root/'manifest.json', root/'out', 'demo', 'software-only')
+            self.assertEqual(code, 0)
+            verdict, sealed_code = completed_run(root/'out', root/'manifest.json', 'demo', 'software-only', 'software')
+            self.assertEqual((verdict['status'], sealed_code), ('PASS', 0))
+            calls = {entry.code: entry.callcount for entry in profiler.getstats()}
+            self.assertEqual(calls[load_config.__code__], 1, 'trace JSON must not be loaded twice per report')
+            self.assertEqual(calls[Trace.__init__.__code__], 1, 'oracle and custody must share the validated trace')
+            # A later report must validate changed bytes, even when their hashes are registered.
+            trace = json.loads((root/'trace.json').read_text())
+            trace['profile']['rows'][0]['loss'] = '1.1'
+            raw = json.dumps(trace).encode()
+            (root/'trace.json').write_bytes(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+            config = json.loads((root/'engine.json').read_text())
+            config['lines'][0]['trace']['sha256'] = digest
+            raw = json.dumps(config).encode()
+            (root/'engine.json').write_bytes(raw)
+            manifest = json.loads((root/'manifest.json').read_text())
+            manifest['config']['sha256'] = hashlib.sha256(raw).hexdigest()
+            manifest['traces'][0]['sha256'] = digest
+            (root/'manifest.json').write_text(json.dumps(manifest))
+            self.assertEqual(report_one(root/'manifest.json', root/'invalid', 'demo', 'software-only'), 2)
+            self.assertEqual(json.loads((root/'invalid/verdict.json').read_text())['status'], 'INVALID')
+
     def test_pcapng_mode_rejects_foreign_run_or_scope_before_conversion(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); capture_pair(root,run='registered')
