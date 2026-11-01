@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -19,6 +20,7 @@ from .validate import load_registration
 
 
 EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}
+SEQCHECK = Path(__file__).resolve().parents[2] / "build" / "seqcheck"
 WORKER = "from tools.g2.matrix import report_one; import sys; sys.exit(report_one(*sys.argv[1:]))"
 
 
@@ -48,8 +50,12 @@ def source_hashes(path, mode):
     if not isinstance(verification, dict):
         raise ValueError("verification must be an object")
     if verification.get("mode") == "sampled":
-        files += [path.parent / row[field] for row in verification.get("seqchecks", [])
-                  for field in ("path", "ingress_path", "receiver_path")]
+        for row in verification.get("seqchecks", []):
+            files += [path.parent / row[field] for field in ("ingress_path", "receiver_path")]
+            result = path.parent / row["path"]
+            # A pending result is generated in the runner's output, never in the source tree.
+            if mode != "pcapng" or result.is_file():
+                files.append(result)
     return {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
 
 
@@ -104,6 +110,89 @@ def completed_run(path, source, run_id, scope, mode):
         return None
 
 
+def prepare_seqcheck(manifest_path, pair_path, cache):
+    """Register a checked directional result; preserve sources and interrupted-run cache."""
+    from .seqcheck import JSON_LIMIT, load_checks
+
+    manifest = strict_json(manifest_path.read_bytes())
+    verification = manifest.get("verification", {})
+    if verification.get("mode") != "sampled":
+        return
+    pair = strict_json(pair_path.read_bytes())
+    if any(len(pair[role]["interfaces"]) != 1 for role in ("before", "receiver")):
+        raise StreamError("SEQCHECK_DIRECTION", "one direction per capture pair is required", "INCONCLUSIVE")
+    ports = tuple(next(iter(pair[role]["interfaces"].values())) for role in ("before", "receiver"))
+    if ports not in {(row["ingress_port"], row["egress_port"]) for row in manifest["ports"]}:
+        raise StreamError("SEQCHECK_DIRECTION", "capture pair differs from registered direction", "INCONCLUSIVE")
+    captures = [(pair_path.parent / pair[role]["path"]).resolve() for role in ("before", "receiver")]
+    root = manifest_path.parent
+
+    def valid(registration):
+        try:
+            if (tuple(registration[key] for key in ("ingress_port", "egress_port")) != ports
+                    or any((root / registration[key]).resolve() != capture
+                           for key, capture in zip(("ingress_path", "receiver_path"), captures))):
+                return False
+            checked = load_checks([registration], root, manifest, None)[str(ports[0])]
+            return all(checked["inputs"][role]["sha256"] is not None for role in ("ingress", "receiver"))
+        except (ValueError, KeyError, TypeError, OSError):
+            return False
+
+    if (len(verification["seqchecks"]) > 1 or any(
+            tuple(row[key] for key in ("ingress_port", "egress_port")) != ports
+            for row in verification["seqchecks"])):
+        raise StreamError("SEQCHECK_DIRECTION", "one matching seqcheck per directional run is required", "INCONCLUSIVE")
+    registration = next((row for row in verification["seqchecks"] if valid(row)), None)
+    result = cache / f"{ports[0]}-{ports[1]}.json"
+    receipt = cache / f"{ports[0]}-{ports[1]}.registration.json"
+    if registration is None:
+        try:
+            if not receipt.is_file() or receipt.stat().st_size > JSON_LIMIT:
+                raise ValueError("missing or oversized seqcheck receipt")
+            candidate = strict_json(receipt.read_bytes())
+            if valid(candidate):
+                registration = candidate
+        except (ValueError, KeyError, TypeError, OSError):
+            pass
+    if registration is None:
+        cache.mkdir(parents=True, exist_ok=True)
+        temporary = cache / ("." + result.name + ".tmp")
+        archive(cache, temporary)
+        try:
+            with temporary.open("wb") as output:
+                process = subprocess.run([shutil.which("seqcheck") or str(SEQCHECK),
+                    "--ingress", str(captures[0]), "--receiver", str(captures[1])],
+                    stdout=output, stderr=subprocess.PIPE)
+            if process.stderr:
+                print(process.stderr.decode("utf-8", errors="replace"), file=sys.stderr, end="")
+            if temporary.stat().st_size > JSON_LIMIT:
+                raise ValueError("checker output exceeds JSON limit")
+            doc = strict_json(temporary.read_bytes())
+            if (not isinstance(doc, dict) or doc.get("schema") != "hng-seqcheck-v1"
+                    or process.returncode != EXIT.get(doc.get("status"))):
+                raise ValueError("checker exit/status mismatch")
+            registration = dict(path=str(temporary.resolve()), sha256=file_hash(temporary),
+                ingress_port=ports[0], egress_port=ports[1],
+                ingress_path=str(captures[0]), receiver_path=str(captures[1]))
+            if not valid(registration):
+                raise ValueError("checker output does not bind the registered captures")
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            raise StreamError("SEQCHECK_PROCESS", str(error), "INCONCLUSIVE") from error
+        archive(cache, result, receipt)
+        temporary.replace(result)
+        registration["path"] = str(result.resolve())
+        write_json(receipt, registration)
+    local = root / f"seqcheck-{ports[0]}-{ports[1]}.json"
+    shutil.copyfile(root / registration["path"], local)
+    if file_hash(local) != registration["sha256"]:
+        raise StreamError("SEQCHECK_SOURCE_CHANGED", "checker result changed while copying", "INCONCLUSIVE")
+    # Keep manifest paths short even when the matrix lives under a long absolute prefix.
+    links = ["source/" + os.path.relpath(capture, (root / "source").resolve()) for capture in captures]
+    verification["seqchecks"] = [dict(registration, path=local.name,
+        ingress_path=links[0], receiver_path=links[1])]
+    write_json(manifest_path, manifest)
+
+
 def report_one(manifest_path, output, run_id, scope, mode="software"):
     """Keep the reporter's large result in a fresh process, not the controller."""
     path, destination = Path(manifest_path), Path(output)
@@ -117,11 +206,13 @@ def report_one(manifest_path, output, run_id, scope, mode="software"):
             manifest = strict_json((path.parent / manifest["manifest"]).read_bytes())
         if not isinstance(manifest, dict) or manifest.get("run") != run_id or manifest.get("scope") != scope:
             raise StreamError("MATRIX_METADATA_MISMATCH", "run/scope differs from matrix registration")
-        inputs = source_hashes(Path(manifest_path), mode)
+        initial_inputs = source_hashes(Path(manifest_path), mode)
         if mode == "pcapng":
             from .pcapng import prepare_pair
             path = prepare_pair(pair_path, destination / "capture")
+            prepare_seqcheck(path, pair_path, destination.parent / ".seqchecks" / destination.name)
             manifest = strict_json(path.read_bytes())
+        inputs = initial_inputs
         checked, config, traces = load_registration(path)
         sources = {row["stream_id"]: path.parent / row["path"] for row in manifest["streams"]}
         calibration = strict_json((path.parent / manifest["calibration_path"]).read_bytes())
@@ -135,6 +226,10 @@ def report_one(manifest_path, output, run_id, scope, mode="software"):
         try:
             if inputs != source_hashes(Path(manifest_path), mode):
                 raise StreamError("MATRIX_SOURCE_CHANGED", "run inputs changed during reporting", "INCONCLUSIVE")
+            if mode == "pcapng":
+                for registration in manifest.get("verification", {}).get("seqchecks", []):
+                    if file_hash(path.parent / registration["path"]) != registration["sha256"]:
+                        raise StreamError("SEQCHECK_SOURCE_CHANGED", "checker result changed during reporting", "INCONCLUSIVE")
         except (ValueError, KeyError, TypeError, OSError) as error:
             inputs = None
             result = error_report(error, manifest)
