@@ -256,3 +256,6 @@ python3 -m tools.g2.matrix matrix.json --out reports
 
 No result from this mode alone qualifies physical timing, storage throughput or
 an observation window outside the supplied complete captures.
+The [million-packet measurement and updated budget](reports/m6-sampled.md)
+separate complete reporter throughput from the Q-only microbenchmark. The
+current normalized-input pipeline has not demonstrated one-day M6 processing.
