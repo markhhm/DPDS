@@ -159,3 +159,109 @@ prlimit --as=4294967296 -- python3 -m tools.g2.matrix matrix.json --out reports/
 
 A memory-limited reporter that cannot finish remains INCONCLUSIVE; do not
 replace it with a PASS or retry with an unbounded process.
+
+## Sampled timing and Q verification
+
+The default reporter remains a full per-packet reference/custody check. An
+explicit `verification` block on a run manifest selects sampled verification:
+
+```json
+"verification": {
+  "mode": "sampled",
+  "seqchecks": [{
+    "path": "sequence.json",
+    "sha256": "SHA256_OF_SEQUENCE_JSON",
+    "ingress_port": 0,
+    "egress_port": 1,
+    "ingress_path": "ingress.pcapng",
+    "receiver_path": "receiver.pcapng"
+  }]
+}
+```
+
+Paths are relative to that manifest. Register a separate unambiguous directional
+capture pair for each input port. The JSON uses `hng-seqcheck-v1`; both complete
+input file digests and byte sizes must match. In pcapng mode these must be the
+same captures that the adapter converts for the reporter. Conversion rewrites
+relative paths together with the other registered sources. Resume validation
+hashes the sequence result and both captures as well as the normalized streams.
+Missing, unhealthy, changed, ambiguous or incomplete coverage is INCONCLUSIVE.
+The checker can report raw missing identities as FAIL while the reporter accepts
+them as intentional Q/trace loss; its status is not copied blindly into a gate.
+
+The current sampled pcapng adapter accepts **one direction per capture pair**.
+A combined multi-interface bidirectional pair is INCONCLUSIVE with
+`SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED`: the checker has no interface filter,
+so its combined totals cannot be assigned to a single native port counter.
+Use separate directional acquisitions/configurations as independent matrix runs.
+For simultaneous bidirectional acquisition, supply sealed normalized streams
+through native (`mode=software`) input with one registered seqcheck result and
+capture pair per direction. That input mode can cover both registered ports;
+it does not change the manifest's physical/software scope. Do not copy a
+combined result into two directional registrations or split captures without
+retaining health and identity coverage evidence.
+
+The two verification layers are:
+
+- **Order and storage: full supplied-capture/run coverage.** Order checks every
+  ordinary identity's ingress rank, excluding selected-late identities from that
+  ordering while still matching them and checking their flags. Duplicate and
+  unexpected receiver identities fail. Missing identities are reconciled with
+  complete native Q-drop, trace-loss and trace-outage-drop counters. Any native
+  `delay_storage_drop` fails. These are run-level checks, not phase-local
+  attribution and not an independent per-packet audit of Q decisions.
+- **Timing and Q decisions: sampled.** The existing cell seed/mask selects
+  offered identities before admission. Every selected offer across the entire
+  registered cell is checked, including selected Q drops. Timing uses complete
+  before/after pairs for the selected survivors and the existing uncertainty,
+  median, p99 and sample-count rules. The ordinary-main and late-main subsets
+  remain part of the same uniform main sample. Unsampled late/app extras are
+  marked `not_checked` in this mode.
+
+Stress runs update the exact Fraction/deque Q state for every arrival. Only
+selected identities produce complete expected records and host Q comparisons.
+Fixed L0 calibration uses its registered no-queue assumption. Trace L0 still
+updates the complete clamp/loss/outage prefix; a sample cannot start with an
+empty trace floor. Original ingress and line ordinals are retained. Neither
+mode uses DUT queue occupancy or computed deadlines as independent predictions.
+The `expected` stream is optional in sampled mode; an old full expected stream
+is not consumed as a replacement for the sampled reference.
+
+Large-run custody is diagnostic: host event counts are reported, but the full
+LiveCustody join is not a prerequisite. Input transport seals, hashes, observer
+health, calibration, sample pairing and selected Q evidence remain mandatory.
+The initial implementation streams existing sealed normalized JSONL inputs;
+full input parsing and source verification still cost time. A Q-only microbench
+must not be presented as end-to-end reporter throughput.
+
+JSON `coverage`, `counts_scope` and `sampled_reference`, plus the summary and
+CSV coverage columns, identify what was checked. Row packet counts describe
+sampled offers; full capture totals remain under `seqcheck` and native counters.
+Unsampled Q decisions, unsampled latency, the full custody audit and physical
+hardware qualification are explicitly unverified.
+
+For independent runs, add `"workers": 2` to the matrix document. The default is
+one worker. The value must be positive and no larger than the available CPU
+count. Each run keeps its own process and output directory; summary ordering and
+resume behavior follow the registration order. Bound the sum of worker RSS and
+file-cache use to the deployment memory budget. A process address-space limit
+is not a bound on aggregate memory. Arbitrary time shards of one Q/trace history
+are not supported: they would require exact prefix state at every boundary.
+
+Run the matrix as usual, after capture and sequence checking:
+
+```sh
+python3 -m tools.g2.matrix matrix.json --out reports
+```
+
+No result from this mode alone qualifies physical timing, storage throughput or
+an observation window outside the supplied complete captures.
+The [million-packet measurement and updated budget](reports/m6-sampled.md)
+separate complete reporter throughput from the Q-only microbenchmark. The
+current normalized-input pipeline has not demonstrated one-day M6 processing.
+
+Run the sampled and matrix regression suites with:
+
+```sh
+meson test -C build g2-sampled g2-matrix --print-errorlogs
+```

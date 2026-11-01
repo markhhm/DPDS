@@ -29,11 +29,17 @@ CSV_COLUMNS = ("condition_id", "repeat", "direction", "line", "phase", "status",
 def write_outputs(result, destination):
     (destination / "report.json").write_text(json.dumps(result, allow_nan=False, indent=2) + "\n")
     with (destination / "results.csv").open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS)
+        sampled=result.get('verification_mode')=='sampled'
+        columns=CSV_COLUMNS+('verification_mode','order_coverage','storage_coverage','timing_coverage','q_coverage','custody_mode') if sampled else CSV_COLUMNS
+        writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
         for row in result.get("rows", []):
             values = {name:row.get(name) for name in CSV_COLUMNS}
             values["reasons"] = ";".join(row.get("reason_codes", [])) if "reason_codes" in row else row.get("reasons", "")
+            if sampled:
+                coverage=result['coverage']
+                values.update(verification_mode='sampled',order_coverage=coverage['order'],storage_coverage=coverage['storage'],
+                    timing_coverage=coverage['timing'],q_coverage=coverage['q'],custody_mode=coverage['custody'])
             writer.writerow(values)
     rows = [row for row in result.get("rows", []) if row.get("required", True)]
     lines = [f"{result.get('scope', 'unknown')}: {result['status']}",
@@ -42,6 +48,9 @@ def write_outputs(result, destination):
              "Report: report.json"]
     lines += [f"{row.get('direction')} {row.get('line')} {row.get('phase')}: {row['status']} "
               + ";".join(row.get("reason_codes", [])[:3]) for row in rows if row["status"]!="PASS"]
+    if result.get('verification_mode')=='sampled':
+        coverage=result['coverage']
+        lines += [f"Verification sampled; timing/Q: sampled; custody: diagnostic; order: {coverage['order']}; storage: {coverage['storage']}"]
     lines += result.get("reason_codes", [])[:3]
     (destination / "summary.txt").write_text("\n".join(lines) + "\n")
 
@@ -461,7 +470,7 @@ def main():
                         continue
                 paths[streams[0]["stream_id"]] = path
             result = build_bundle_report(config, traces, manifest, paths,
-                strict_json((root/manifest["calibration_path"]).read_bytes()), destination)
+                strict_json((root/manifest["calibration_path"]).read_bytes()), destination, registration_root=root)
             result["sources"].update(checked_sources["sources"])
             if counter_view is not None:
                 actual = result.get("counters")

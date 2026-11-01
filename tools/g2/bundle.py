@@ -16,7 +16,10 @@ from .serializer import Serialization
 from .witnesses import Witnesses
 
 
-def build_bundle_report(config, traces, manifest, sources, calibration, retention_dir=None):
+def build_bundle_report(config, traces, manifest, sources, calibration, retention_dir=None, registration_root=None):
+    if manifest.get("verification", {}).get("mode") == "sampled":
+        from .sampled_bundle import build_sampled_report
+        return build_sampled_report(config, traces, manifest, sources, calibration, retention_dir, registration_root)
     validate_registration(manifest, config)
     cells = OnlineCells(manifest)
     index = IdentityIndex(manifest)

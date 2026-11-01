@@ -63,7 +63,7 @@ test('g2-software', python,
          'tools.g2.tests.test_online.OnlineTimingTests', '--',
          'tools.g2.tests.test_differential',
          'tools.g2.tests.test_report', '--',
-         'tools.g2.tests.test_bundle', 'tools.g2.tests.test_matrix'],
+         'tools.g2.tests.test_bundle'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
@@ -128,3 +128,10 @@ test('observer-binary-io', python, args: [meson.project_source_root() / 'tests/e
 
 test('observer-shutdown', python, args: [meson.project_source_root() / 'tests/observer_shutdown.py', dpds_exe],
   timeout: 30, is_parallel: false)
+
+test('g2-sampled', python, args: ['-m','unittest','tools.g2.tests.test_sampled_reference',
+  'tools.g2.tests.test_sampled_bundle','tools.g2.tests.test_seqcheck'],
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
+test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix'],
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)

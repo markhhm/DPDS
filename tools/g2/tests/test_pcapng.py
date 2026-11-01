@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Synthetic same-clock pcapng feeds the real sealed-stream reporter."""
+import hashlib
 import json
 from pathlib import Path
 import struct
@@ -73,6 +74,31 @@ def setup(root, endian='<', run='demo'):
 
 
 class PcapngTests(unittest.TestCase):
+    def test_sampled_combined_direction_capture_requires_directional_evidence(self):
+        from tools.g2.pcapng import prepare_pair
+        from tools.g2.protocol import StreamError
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);setup(root)
+            path=root/'source/manifest.json';manifest=json.loads(path.read_text())
+            config_path=root/'source/engine.json';config=json.loads(config_path.read_text())
+            config['lines'].append(dict(config['lines'][0],name='reverse',ingress_port=1,egress_port=0))
+            raw=json.dumps(config).encode();config_path.write_bytes(raw)
+            manifest['config']['sha256']=hashlib.sha256(raw).hexdigest()
+            manifest['ports'].append(dict(manifest['ports'][0],ingress_port=1,egress_port=0))
+            manifest['lines'].append(dict(manifest['lines'][0],name='reverse',ingress_port=1,egress_port=0))
+            manifest['required_cells'].append(dict(manifest['required_cells'][0],direction='1',line='reverse'))
+            manifest['clocks']['observation']['1']='obs'
+            manifest['verification']=dict(mode='sampled',seqchecks=[])
+            path.write_text(json.dumps(manifest))
+            path=root/'pair.json';pair=json.loads(path.read_text())
+            pair['before']['interfaces']['1']=1
+            pair['receiver']['interfaces']['1']=0
+            path.write_text(json.dumps(pair))
+            with self.assertRaises(StreamError) as raised:
+                prepare_pair(path,root/'converted')
+            self.assertEqual(raised.exception.code,'SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED')
+            self.assertEqual(raised.exception.measurement_status,'INCONCLUSIVE')
+
     def invoke(self, root):
         return subprocess.run([sys.executable,'-m','tools.g2.pcapng',str(root/'pair.json'),
                                '--out',str(root/'out')],capture_output=True,text=True)
@@ -86,6 +112,31 @@ class PcapngTests(unittest.TestCase):
         health = json.loads((root/'out/conversion.json').read_text())['captures']
         self.assertTrue(all(row['complete'] for row in health.values()), health)
         return report
+
+    def test_sampled_seqcheck_cannot_certify_different_captures(self):
+        from tools.g2.pcapng import prepare_pair
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);setup(root)
+            path=root/'source/manifest.json';manifest=json.loads(path.read_text())
+            manifest['verification']=dict(mode='sampled',seqchecks=[dict(path='seqcheck.json',sha256='a'*64,
+                ingress_port=0,egress_port=1,ingress_path='other.pcapng',receiver_path='../receiver.pcapng')])
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError,'seqcheck.*capture'):
+                prepare_pair(root/'pair.json',root/'converted')
+
+    def test_sampled_seqcheck_paths_follow_relocated_registration(self):
+        from tools.g2.pcapng import prepare_pair
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);setup(root)
+            path=root/'source/manifest.json';manifest=json.loads(path.read_text())
+            (root/'source/seqcheck.json').write_text('{}')
+            manifest['verification']=dict(mode='sampled',seqchecks=[dict(path='seqcheck.json',sha256='a'*64,
+                ingress_port=0,egress_port=1,ingress_path='../before.pcapng',receiver_path='../receiver.pcapng')])
+            path.write_text(json.dumps(manifest))
+            converted=prepare_pair(root/'pair.json',root/'converted')
+            item=json.loads(converted.read_text())['verification']['seqchecks'][0]
+            self.assertEqual((converted.parent/item['path']).resolve(),root/'source/seqcheck.json')
+            self.assertEqual((converted.parent/item['ingress_path']).resolve(),root/'before.pcapng')
 
     def test_nanosecond_pair_uses_real_reporter_and_preserves_identities(self):
         with tempfile.TemporaryDirectory() as temporary:

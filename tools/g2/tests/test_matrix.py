@@ -17,6 +17,21 @@ from tools.g2.tests.test_pcapng import setup as capture_pair, pcapng
 
 
 class MatrixTests(unittest.TestCase):
+    def test_invalid_worker_counts_are_rejected_before_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrix = root / 'matrix.json'
+            controller = ('import os; os.sched_getaffinity=lambda _: {0, 1}; '
+                          'from tools.g2.matrix import main; import sys; sys.exit(main())')
+            for workers in (0, -1, True, 1.0, '2', 3):
+                matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', scope='software-only',
+                    plan={}, workers=workers, runs=[dict(id='one', manifest='missing.json')])))
+                result = subprocess.run([sys.executable, '-c', controller, str(matrix),
+                                         '--out', str(root / 'out')], capture_output=True, text=True)
+                with self.subTest(workers=workers):
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse((root / 'out').exists())
+
     def test_trace_report_loads_and_validates_each_profile_once(self):
         from tools.g2.matrix import completed_run, report_one
         from tools.g2.reference import Trace, load_config
@@ -247,6 +262,90 @@ class MatrixResumeTests(unittest.TestCase):
     def saved_files(self, root):
         return {str(path.relative_to(root)): (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
                 for path in root.rglob('*') if path.is_file()}
+
+    def test_two_workers_overlap_and_preserve_order_bytes_and_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrix = self.matrix_fixture(root)
+            baseline = root / 'baseline'
+            clean = self.cli(matrix, baseline)
+            self.assertEqual(clean.returncode, 1, clean.stderr)
+            value = json.loads(matrix.read_text())
+            value['workers'] = 1
+            matrix.write_text(json.dumps(value))
+            serial = self.cli(matrix, root / 'serial')
+            self.assertEqual(serial.returncode, 1, serial.stderr)
+            value['workers'] = 2
+            matrix.write_text(json.dumps(value))
+            worker = (
+                'from pathlib import Path; import sys,time; from tools.g2.matrix import report_one; '
+                f'root=Path({str(root)!r}); (root/("ready-"+sys.argv[3])).touch(); '
+                'deadline=time.monotonic()+5\n'
+                'while sys.argv[3] in ("first", "second") and not all('
+                '(root/("ready-"+run)).exists() for run in ("first", "second")):\n'
+                ' if time.monotonic()>deadline: raise RuntimeError("workers did not overlap")\n'
+                ' time.sleep(0.01)\n'
+                'while sys.argv[3]=="first" and not (root/"done-second").exists():\n'
+                ' if time.monotonic()>deadline: raise RuntimeError("second worker did not finish")\n'
+                ' time.sleep(0.01)\n'
+                'code=report_one(*sys.argv[1:]); (root/("done-"+sys.argv[3])).touch(); sys.exit(code)'
+            )
+            controller = ('import os; os.sched_getaffinity=lambda _: {0, 1}; '
+                          'import tools.g2.matrix as m; import sys; '
+                          f'm.WORKER={worker!r}; sys.exit(m.main())')
+            output = root / 'parallel'
+            parallel = subprocess.run([sys.executable, '-c', controller, str(matrix), '--out', str(output)],
+                                      capture_output=True, text=True, timeout=30)
+            self.assertEqual(parallel.returncode, 1, parallel.stderr)
+            expected = (baseline / 'summary.json').read_bytes()
+            self.assertEqual((output / 'summary.json').read_bytes(), expected)
+            self.assertEqual((root / 'serial/summary.json').read_bytes(), expected)
+            for run in ('first', 'second', 'third'):
+                for name in ('report.json', 'results.csv', 'summary.txt', 'verdict.json'):
+                    self.assertEqual((output / run / name).read_bytes(),
+                                     (baseline / run / name).read_bytes(), (run, name))
+                    self.assertEqual((root / 'serial' / run / name).read_bytes(),
+                                     (baseline / run / name).read_bytes(), (run, name))
+            saved = {run: self.saved_files(output / run) for run in ('first', 'second', 'third')}
+            resumed = subprocess.run([sys.executable, '-c', controller, str(matrix), '--out', str(output)],
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(resumed.returncode, 1, resumed.stderr)
+            for run, snapshot in saved.items():
+                self.assertEqual(self.saved_files(output / run), snapshot, run)
+
+    def test_resume_hashes_include_seqcheck_json_and_both_capture_inputs(self):
+        from tools.g2.matrix import completed_run, file_hash, report_one, source_hashes
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            source.mkdir()
+            fixture(source)
+            output = root / 'out'
+            self.assertEqual(report_one(source / 'manifest.json', output, 'demo', 'software-only'), 0)
+            manifest = json.loads((source / 'manifest.json').read_text())
+            dependencies = ('seqcheck.json', 'ingress.pcapng', 'receiver.pcapng')
+            for name in dependencies:
+                (source / name).write_bytes(b'registered evidence')
+            manifest['verification'] = dict(mode='sampled', seqchecks=[dict(
+                path='seqcheck.json', sha256=file_hash(source / 'seqcheck.json'),
+                ingress_port=0, egress_port=1, ingress_path='ingress.pcapng',
+                receiver_path='receiver.pcapng')])
+            (source / 'manifest.json').write_text(json.dumps(manifest))
+            seal = json.loads((output / '.complete.json').read_text())
+            seal['sources'][str(source / 'manifest.json')] = file_hash(source / 'manifest.json')
+            for name in dependencies:
+                seal['sources'][str(source / name)] = file_hash(source / name)
+            (output / '.complete.json').write_text(json.dumps(seal))
+            self.assertEqual(source_hashes(source / 'manifest.json', 'software'), seal['sources'])
+            self.assertIsNotNone(completed_run(output, source / 'manifest.json',
+                                             'demo', 'software-only', 'software'))
+            for name in dependencies:
+                path = source / name
+                path.write_bytes(b'changed evidence')
+                with self.subTest(source=name):
+                    self.assertIsNone(completed_run(output, source / 'manifest.json',
+                                                   'demo', 'software-only', 'software'))
+                path.write_bytes(b'registered evidence')
 
     def test_killed_matrix_resumes_completed_and_partial_runs_like_uninterrupted_run(self):
         with tempfile.TemporaryDirectory() as temporary:

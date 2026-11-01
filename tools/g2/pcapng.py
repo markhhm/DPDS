@@ -310,6 +310,15 @@ def prepare_pair(pair_path, output):
             raise ValueError('capture interfaces require unique registered physical ports')
     before = pair_path.parent/pair['before']['path']
     receiver = pair_path.parent/pair['receiver']['path']
+    # shortcut: seqcheck has no interface filter; use directional capture pairs until the adapter can prove a split.
+    if manifest.get('verification',{}).get('mode')=='sampled' and any(
+            len(pair[role]['interfaces'])!=1 for role in ('before','receiver')):
+        fail('SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED',
+             'sampled pcapng requires one direction per pair; use directional runs or normalized streams with directional seqchecks')
+    for check in manifest.get('verification',{}).get('seqchecks',[]):
+        if ((path.parent/check['ingress_path']).resolve()!=before.resolve() or
+                (path.parent/check['receiver_path']).resolve()!=receiver.resolve()):
+            raise ValueError('seqcheck input captures differ from the converted capture pair')
     if before.resolve() == receiver.resolve() or before.is_file() and receiver.is_file() and before.samefile(receiver):
         raise ValueError('before and receiver must be different capture files')
     destination = Path(output)
@@ -364,6 +373,9 @@ def prepare_pair(pair_path, output):
             role = field['role']; field['path'] = f'{role}.jsonl'; field['file_sha256'] = file_hash(bundle/field['path'])
         elif not Path(field['path']).is_absolute():
             field['path'] = 'source/'+field['path']
+    for check in manifest.get('verification',{}).get('seqchecks',[]):
+        for name in ('path','ingress_path','receiver_path'):
+            if not Path(check[name]).is_absolute():check[name]='source/'+check[name]
     if not Path(manifest['calibration_path']).is_absolute():
         manifest['calibration_path'] = 'source/'+manifest['calibration_path']
     (bundle/'manifest.json').write_text(json.dumps(manifest, allow_nan=False)+'\n')
