@@ -101,6 +101,32 @@ actual repeat and trace episode with its own run and evidence before reporting.
 Hardware clocks, calibration under load, trace provenance, complete matrix
 registration, physical execution, and acceptance remain separate work.
 
+## Hardware-day runbook
+
+Complete [BRING-UP](BRING-UP.md) first. Unresolved hardware decisions block this procedure.
+Export its private deployment variables, source revisions and calibration path.
+Also set `M6_MATRIX`, `REPORT_DIR`, `PILOT_MANIFEST`, `PILOT_MATRIX`, `PILOT_REPORT_DIR` and `RUN_MANIFEST`.
+
+The `*_COMMAND` variables contain the operator's deployment commands, not repository tools.
+Register their traffic, capture, drain, reset and restoration parameters first.
+Capture commands must retain native evidence and closed pairs per [PCAPNG](PCAPNG.md). The matrix runner does not acquire traffic.
+
+Use native physical observer evidence for the pilot: `PILOT_MATRIX` uses `scope=physical`, `mode=software` and native manifest paths.
+Here `software` selects native input, not software scope. Pcapng adapter queue counters are synthetic and cannot prove physical queue headroom.
+On failure, stop traffic, drain and restore the allocated resources per [Handoff](BRING-UP.md#handoff). Keep all evidence.
+
+| Step | Commands from `DPDS_SRC` | Expected output and stop condition |
+|---|---|---|
+| 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"` | Keep identities/counters and `CALIBRATION_FILE`. Require target delivery, zero non-model loss and physical pair uncertainty ≤10,000 ns. Otherwise stop here. |
+| 2. Observer cost pilot | `python3 -m tools.g2.validate "$PILOT_MANIFEST"`<br>`OFFERED_BPS=10000000000 sh -c "$PILOT_CAPTURE_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$PILOT_MATRIX" --out "$PILOT_REPORT_DIR"` | Register the pilot with required-cell `mask_bits=8`. Require preflight PASS before capture. Require zero observer drops, positive queue capacity, high-water below capacity and no `observer_cost` warnings or missing evidence. Record `OBSERVER_COST_REPORT`, `EVIDENCE_COMMIT` and `RUN_ID` per the [cost gate](BRING-UP.md#observer-cost-gate-before-m6). On failure, retain the previous plan and stop for review. |
+| 3. Register and capture M6 | `cp -n examples/m6-short.json "$M6_MATRIX"`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Edit the private matrix before traffic: `mode=pcapng`, `scope=physical`, every repeat/episode and its capture-pair path. Expand the three example entries. After step 2 passes, register fixed cells at 1/256 and 30 s exposure. Align fixed-cell plan metadata. Keep the v1 header, sample gates and trace plan. Require preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
+| 4. Release the testbed | `sh -c "$POST_BYPASS_COMMAND"`<br>`sh -c "$RESTORE_COMMAND"` | Require the post-run bypass check, drain and restoration records. On failure, record the reason and stop here. Preserve source directories for adapter symlinks. |
+| 5. Report offline | `prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" --out "$REPORT_DIR"` | Run after capture, away from the testbed. Expect per-run `report.json`, `results.csv`, `verdict.json` and final `summary.json`. On interruption, stop controller and worker, then repeat this exact command/directory. [Resume](#resume-an-interrupted-matrix) skips verified sealed reports and preserves partial attempts. It resumes reports, not capture. |
+| 6. Read the aggregate | `cat "$REPORT_DIR/summary.json"` | Read `status` and `measurement_status`. Require all registered run IDs, repeats and required rows. Step 5 reporter exits: 0 all PASS, 1 FAIL, 2 invalid/inconclusive evidence. The `cat` exit is not a verdict. Keep verdicts and stderr logs. If the summary is absent, stop here and resume step 5. |
+
+Freeze the matrix and source paths before step 5. Preserve `g2_qualified=false` and the [software limits](../tools/g2/README.md).
+A reporter PASS does not qualify hardware.
+
 ## Three-cell software smoke
 
 ```sh
