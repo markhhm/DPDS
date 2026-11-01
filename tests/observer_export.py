@@ -16,6 +16,7 @@ from eal_args import eal_arguments
 from startup import wait_for_output
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.g2.native_adapter import NativeAdapter
+from tools.g2.native_binary import decode
 from tools.g2.protocol import StreamReader
 from tools.g2.reference import Reference
 from tools.g2.counters import normalize_counters
@@ -54,9 +55,9 @@ def output_frames(path):
     return result
 
 
-def run(binary, cores, enabled, directory):
+def run(executable, cores, enabled, directory, binary=False):
     inputs = [directory / f'in-{p}.pcap' for p in (0, 1)]
-    outputs = [directory / f'out-{cores}-{enabled}-{p}.pcap' for p in (0, 1)]
+    outputs = [directory / f'out-{cores}-{enabled}-{binary}-{p}.pcap' for p in (0, 1)]
     for p in (0, 1):
         pcap(inputs[p], frames(p))
     config = directory / 'engine.json'
@@ -72,12 +73,14 @@ def run(binary, cores, enabled, directory):
             rows.extend(json.loads(line) for line in source)
     thread = threading.Thread(target=consume)
     thread.start()
-    command = [binary] + eal_arguments(cores) + ['--no-pci', '--no-huge', '--no-telemetry', '-m', '256', '--in-memory',
+    capture = directory / f'native-{cores}-{binary}.bin'
+    command = [executable] + eal_arguments(cores) + ['--no-pci', '--no-huge', '--no-telemetry', '-m', '256', '--in-memory',
         f'--file-prefix=hng-observe-{os.getpid()}-{cores}-{enabled}']
     command += [f'--vdev=net_pcap{p},rx_pcap={inputs[p]},tx_pcap={outputs[p]}' for p in (0, 1)]
     command += ['--', '-c', str(config)]
     if enabled:
-        command += ['--observe-fd', str(writer), '--observe-software', '--observe-identity', 'software-l2']
+        command += (['--observe-binary', str(capture)] if binary else ['--observe-fd', str(writer)])
+        command += ['--observe-software', '--observe-identity', 'software-l2']
     process = subprocess.Popen(command, pass_fds=(writer,), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     os.close(writer)
     try:
@@ -98,6 +101,12 @@ def run(binary, cores, enabled, directory):
     for p in (0, 1):
         assert output_frames(outputs[p]) == frames(1-p), output
     if enabled:
+        if binary:
+            decoded = io.StringIO()
+            with capture.open('rb') as source:
+                health = decode(source, decoded)
+            assert health['complete'], health
+            rows = [json.loads(line) for line in decoded.getvalue().splitlines()]
         assert rows[0]['schema'] == 'hng-native-v2'
         assert rows[-1]['kind'] == 'health' and rows[-1]['complete'], rows[-1]
         events = rows[1:-1]
@@ -143,9 +152,47 @@ def run(binary, cores, enabled, directory):
         counter_result = normalize_counters(validated[2], manifest)
         assert counter_result['measurement_status'] == 'PASS', counter_result
         assert all('native_observer_v2' in r.get('extensions', {}) for r in validated[1])
-        print(f'native export {cores} lcores complete custody and preserved frame bytes: PASS')
+        print(f'native export {cores} lcores binary={binary} complete custody and preserved frame bytes: PASS')
     else:
         assert rows == []
+
+
+def reject_binary_options(executable, directory):
+    capture = directory / 'rejected.bin'
+    config = directory / 'engine.json'
+    base = [executable] + eal_arguments(2) + ['--no-pci', '--no-huge', '--no-telemetry', '-m', '256', '--in-memory',
+        f'--file-prefix=hng-observe-reject-{os.getpid()}', '--vdev=net_null0', '--vdev=net_null1', '--', '-c', str(config)]
+    options = ['--observe-binary', str(capture), '--observe-software', '--observe-identity', 'software-l2']
+    cases = [
+        (options + ['--observe-fd', '999999'], 'mutually exclusive'),
+        (['--observe-fd', '1'] + options, 'mutually exclusive'),
+        (['--observe-binary', str(capture), '--observe-identity', 'software-l2'], 'requires --observe-software'),
+        (['--observe-binary', str(capture), '--observe-software'], 'requires --observe-software'),
+        (options + ['--observe-capacity', '0'], 'Invalid observer capacity/probe port'),
+        (options + ['--observe-capacity', '65537'], 'Invalid observer capacity/probe port'),
+        (options + ['--observe-probe-port', '0'], 'Invalid observer capacity/probe port'),
+        (options + ['--observe-probe-port', '65536'], 'Invalid observer capacity/probe port'),
+        (options + ['-c', str(directory / 'missing.json')], 'configuration rejected before RX'),
+    ]
+    for args, message in cases:
+        process = subprocess.run(base + args, capture_output=True, text=True, timeout=10)
+        output = process.stdout + process.stderr
+        assert process.returncode != 0 and message in output, output
+        assert not capture.exists(), output
+    capture.write_bytes(b'previous capture must survive')
+    process = subprocess.run(base + options, capture_output=True, text=True, timeout=10)
+    output = process.stdout + process.stderr
+    assert process.returncode != 0 and 'Cannot exclusively create observer binary file' in output, output
+    assert capture.read_bytes() == b'previous capture must survive', output
+    capture.unlink()
+    existing = directory / 'existing.bin'
+    existing.write_bytes(b'symlink target must survive')
+    capture.symlink_to(existing)
+    process = subprocess.run(base + options, capture_output=True, text=True, timeout=10)
+    output = process.stdout + process.stderr
+    assert process.returncode != 0 and 'Cannot exclusively create observer binary file' in output, output
+    assert capture.is_symlink() and existing.read_bytes() == b'symlink target must survive', output
+    print('native binary exclusive output and observer preflight: PASS')
 
 
 if __name__ == '__main__':
@@ -154,3 +201,6 @@ if __name__ == '__main__':
         for cores in (2, 3, 4, 5, 7):
             for enabled in (False, True):
                 run(binary, cores, enabled, Path(tmp))
+        for cores in (2, 3, 4, 5, 7):
+            run(binary, cores, True, Path(tmp), binary=True)
+        reject_binary_options(binary, Path(tmp))

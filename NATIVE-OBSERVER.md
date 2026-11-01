@@ -43,11 +43,38 @@ never creates full-record files. Software tests may explicitly retain full
 normalized fixtures. External receiver/before observations and calibration remain
 separate inputs; software RX and TX submission do not supply physical timestamps.
 
+## Binary file capture and offline decode
+
+The host can write the same native metadata to a compact binary regular file.
+The consumer encodes records; one I/O thread writes ordered CRC frames from a
+bounded pool. Packet bytes, adapter semantics, and
+retention policy remain unchanged. The software scope and identity options still
+apply. Nonblocking output below describes `--observe-fd`. When the I/O pool fills, file writes can
+block the consumer, but producers never wait for it. Physical PMDs remain
+unsupported by native capture.
+
+```sh
+dpds EAL_ARGUMENTS -- -c engine.json --observe-binary capture.hngb \
+  --observe-software --observe-identity stage1
+python3 -m tools.g2.native_binary capture.hngb --out native.jsonl
+```
+
+Both paths must be new. The host rejects a combination of `--observe-binary` and
+`--observe-fd`. The decoder restores `hng-native-v2` JSONL, with the original
+header, health, event values, and record order. Feed `native.jsonl` through a pipe
+to the existing adapter. Its CLI descriptors still require pipes or sockets.
+A valid incomplete capture exits decode with code `2`. A malformed capture cannot
+produce a final health seal.
+
+See [Native binary capture, version 1](docs/NATIVE-BINARY.md) for the wire format,
+complete offline commands, integer widths, and failure behavior.
+
 ## Bounded transport and custody
 
-Setup allocates five fixed-capacity queues: RX, scheduler owner 0, scheduler owner
-1, TX and control. Capacity is 1..65536 records per producer, default 4096. Queue
-storage is `5 * capacity * sizeof(struct observer_record)` bytes, reported by the
+The current v2 exporter allocates seven fixed-capacity queues: RX, scheduler
+owner 0, scheduler owner 1, TX, control, RX owner 1, and TX owner 1. Capacity is
+1..65536 records per producer, default 4096. Queue
+storage is `7 * capacity * sizeof(struct observer_record)` bytes, reported by the
 raw header's capacity and record width. Every queue has one producer and one
 consumer. Only metadata is copied on the packet path; there is no allocation,
 JSON serialization, file I/O, retry wait or consumer backpressure there.
@@ -97,7 +124,8 @@ final native health and makes normalized seals incomplete. Normal requested
 SIGINT can still complete after all inputs and ownership drain.
 
 Each normalized event preserves its actor in
-`extensions.native_observer_v1={producer,producer_seq,order}`. Actor-local
+`extensions.native_observer_v2={producer,producer_seq,order}` for v2 input.
+Legacy v1 input retains `extensions.native_observer_v1`. Actor-local
 snapshots can regress between different native producers in a combined host
 stream. A native sequence need not be contiguous within a single normalized
 role: RX also produces host terminal events. The adapter checks the complete
@@ -115,9 +143,12 @@ qualification are not provided.
 
 ## Adapter-private raw format
 
-`hng-native-v1` is an internal JSONL pipe format, normalized only by
-`tools.g2.native_adapter`. Its header contains `identity_policy`, `probe_port`,
-`capacity` and `record_bytes`. Event fields and fixed-vector positions are defined
+`hng-native-v1` and `hng-native-v2` are internal JSONL formats, normalized only by
+`tools.g2.native_adapter`. Both headers contain `identity_policy`, `probe_port`,
+`capacity`, and `record_bytes`. Version 1 describes the legacy five-producer
+boundary. The current exporter emits version 2 with seven producers and explicit
+`layout` and `ports`. Binary decode restores this same version 2 format. Event
+fields and fixed-vector positions are defined
 by `common/observer.h` and the adapter's `ROW_FIELDS` / `ITEM_FIELDS`; the public
 interchange remains the standard versioned event protocol.
 

@@ -42,8 +42,9 @@ void rx_publish(struct rx_state *s, uint16_t enqueued)
     s->enqueued[ring] += enqueued;
     host_publish(s->last_port, s->enqueued[ring], s->last_watermark);
     if (observer_enabled() && enqueued && s->last_watermark > s->last_arrival[s->last_port]) {
-        struct observer_record r = {.kind = OBS_FRONTIER, .port = s->last_port,
-            .at_ns = s->last_watermark - 1, .actual_selection_seq = s->sequence[s->last_port]};
+        struct observer_record r; observer_record_init(&r, OBS_FRONTIER, 0);
+        r.port = s->last_port; r.at_ns = s->last_watermark - 1;
+        r.actual_selection_seq = s->sequence[s->last_port];
         observer_emit(s->producer, &r);
     }
 }

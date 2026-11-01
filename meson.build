@@ -17,7 +17,7 @@ test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/cor
   env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
   workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
-common_sources = ['common/observer.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
+common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
 foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
@@ -76,7 +76,7 @@ test('io-af-packet', python, args: [meson.project_source_root() / 'tests/io_pmd.
 
 # Host packet-rate benchmark over net_ring; the test is a short smoke run.
 ring_rate = executable('hng-ring-rate', ['perf/ring_rate.c', 'core/receive.c'] + common_sources,
-  dependencies: [dpdk, core, ring_pmd],
+  dependencies: [dpdk, core, threads, ring_pmd],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_rate.py', ring_rate],
   timeout: 60, is_parallel: false)
@@ -85,7 +85,7 @@ test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/
 test('perf-ring-rate-io-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--io-split', ring_rate,
   '--', '-d', '0.2', '-w', '0.05', '-n', '2046'],
   timeout: 60, is_parallel: false)
-pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/observer.c'],
+pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/observer.c', 'common/observer_binary.c'],
   dependencies: [dpdk, core, threads], link_args: ['-lm'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
@@ -103,5 +103,20 @@ test('observer-export', python, args: [meson.project_source_root() / 'tests/obse
 test('observer-adapter', python, args: [meson.project_source_root() / 'tests/observer_adapter.py'],
   timeout: 30, is_parallel: false)
 
+binary_fixture = executable('observer-binary-fixture', ['tests/observer_binary.c', 'core/receive.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
+  link_args: ['-Wl,--wrap=host_now_ns'], override_options: ['b_lto=false'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('observer-binary', python, args: [meson.project_source_root() / 'tests/native_binary.py', binary_fixture],
+  workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
+test('native-binary-decoder', python, args: ['-m', 'unittest', 'tools.g2.tests.test_native_binary'],
+  workdir: meson.project_source_root(), timeout: 30)
+
 test('m6-smoke', python, args: [meson.project_source_root() / 'tests/m6_smoke.py', dpds_exe],
   workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
+
+binary_io = executable('observer-binary-io-test', ['tests/observer_binary_io.c', 'common/observer_binary.c'],
+  dependencies: [dpdk, threads], c_args: ['-DNDEBUG'])
+test('observer-binary-io', python, args: [meson.project_source_root() / 'tests/eal_args.py',
+  binary_io.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-binary-io'],
+  depends: binary_io, timeout: 30, is_parallel: false)

@@ -3,6 +3,9 @@
 #define HNG_OBSERVER_H
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <assert.h>
 #include "config.h"
 #define OBS_PORTS 2
 #define OBS_PRODUCERS 7
@@ -30,18 +33,35 @@ struct observer_record {
     uint64_t resources[10];
     uint64_t actual_selection_seq, attempt_id, consumed_dispatch[OBS_QUEUES], first_handoff_seq;
     struct observer_snapshot snapshot;
-    struct observer_packet items[MAX_BURST_SIZE];
     enum observer_kind kind;
     enum observer_reason reason;
     uint16_t port, count, accepted_count, handoff_queue;
+    struct observer_packet items[MAX_BURST_SIZE];
 };
+/* Only the declared item prefix is initialized, copied and consumed. */
+static inline void observer_record_init(struct observer_record *record, enum observer_kind kind, uint16_t count)
+{
+    assert(count <= MAX_BURST_SIZE);
+    memset(record, 0, offsetof(struct observer_record, items) + count * sizeof(record->items[0]));
+    record->kind = kind; record->count = count;
+}
 struct observer_health {
     uint64_t records_attempted, records_emitted, records_dropped, capture_drops;
     uint64_t queue_high_water, queue_capacity, identity_errors, malformed_records;
 };
+struct observer_storage_health {
+    uint64_t blocks_capacity, blocks_high_water, blocks_pending;
+    int cpu;
+};
+/* Read after close; storage metrics do not change the JSONL evidence contract. */
+struct observer_storage_health observer_storage_health(void);
 struct rte_mbuf;
 /* Setup/teardown run on the control thread; fd must be a pipe or socket. */
 bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
+/* Binary capture accepts an empty regular file; the consumer owns all writes. */
+bool observer_open_binary(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
+/* Software rate check only: /dev/null is not an evidence capture. */
+bool observer_open_binary_discard(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
 bool observer_start(void);
 bool observer_close(bool complete);
 void observer_abort(enum observer_abort_reason reason);

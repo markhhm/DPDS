@@ -136,8 +136,8 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             line_of[n] = (uint16_t)line; offer[n] = m; packets[n] = m; bytes[n] = m->pkt_len;
             arrivals[n] = meta->arrival_ns; seqs[n] = meta->ingress_seq;
             if (observer_enabled()) {
-                struct observer_record event = {.kind = OBS_OFFER, .count = 1, .at_ns = now,
-                    .actual_selection_seq = s->actual_selection[line]++};
+                struct observer_record event; observer_record_init(&event, OBS_OFFER, 1);
+                event.at_ns = now; event.actual_selection_seq = s->actual_selection[line]++;
                 event.items[0] = observer_packet(m); observer_emit(s->producer, &event);
             }
             n++;
