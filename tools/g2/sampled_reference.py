@@ -28,7 +28,7 @@ class SampledReference:
         if (port['ended'] or seq != port['next_seq'] or arrival < port['arrival'] or arrival <= port['frontier']
                 or ordinal != state['seq'] or line['ingress_port'] != event['ingress_port']
                 or not line['envelope']['min_q_bytes'] <= q <= line['envelope']['max_q_bytes']
-                or event.get('input_error') or event.get('segments',1) != 1
+                or not event['length'] or event.get('input_error') or event.get('segments',1) != 1
                 or event.get('vlan_id',line['vlan_id']) != line['vlan_id']):
             raise ValueError('invalid sampled arrival prefix')
         port.update(next_seq=seq+1,arrival=arrival)

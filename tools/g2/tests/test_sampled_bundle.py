@@ -50,6 +50,39 @@ class SampledBundleTests(unittest.TestCase):
             states={row['line']:row['measurement_status'] for row in result['rows']}
             self.assertEqual(states,{'cable':'FAIL','leo':'PASS'})
 
+    def test_human_outputs_label_sampled_scope(self):
+        import csv
+        from tools.g2.report import write_outputs
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root)
+            checker(root,reg,400)
+            result=build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+            output=root/'out';output.mkdir();write_outputs(result,output)
+            text=(output/'summary.txt').read_text()
+            self.assertIn('timing/Q: sampled',text)
+            self.assertIn('custody: diagnostic',text)
+            with (output/'results.csv').open() as source:row=next(csv.DictReader(source))
+            self.assertEqual(row['verification_mode'],'sampled')
+            self.assertEqual(row['q_coverage'],'sampled')
+
+    def test_sampled_mode_keeps_explicit_approved_mask(self):
+        from tools.g2.registration import validate_registration
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root)
+            checker(root,reg,400)
+            reg['required_cells'][0].update(mask_bits=8,planned_survivors=1_000_000)
+            validate_registration(reg,cfg)
+            del reg['verification']
+            with self.assertRaisesRegex(ValueError,'largest qualifying mask'):validate_registration(reg,cfg)
+
+    def test_sample_flow_must_belong_to_external_checker_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root,flow_id='different')
+            checker(root,reg,400)
+            result=build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+            self.assertIn('seqcheck_sample_flow_mismatch',result['reason_codes'])
+
     def test_sparse_selection_uses_existing_cell_hash(self):
         from tools.g2.online import sample
         from tools.g2.protocol import StreamReader

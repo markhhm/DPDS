@@ -177,7 +177,7 @@ def _validate(manifest, config):
             identifier(cell["trace_segment"], "trace segment")
         if planned and cell.get("required", True) and planned < planning_target(mask):
             raise ValueError("insufficient_planned_samples")
-        if planned and cell.get("required", True) and mask != max(
+        if verification is None and planned and cell.get("required", True) and mask != max(
                 candidate for candidate in range(11) if planned >= planning_target(candidate)):
             raise ValueError("sampling_plan_mask must use the largest qualifying mask")
     if coverage != {(line, phase) for line in registered for phase in windows}:

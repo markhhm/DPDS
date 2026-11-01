@@ -310,6 +310,10 @@ def prepare_pair(pair_path, output):
             raise ValueError('capture interfaces require unique registered physical ports')
     before = pair_path.parent/pair['before']['path']
     receiver = pair_path.parent/pair['receiver']['path']
+    for check in manifest.get('verification',{}).get('seqchecks',[]):
+        if ((path.parent/check['ingress_path']).resolve()!=before.resolve() or
+                (path.parent/check['receiver_path']).resolve()!=receiver.resolve()):
+            raise ValueError('seqcheck input captures differ from the converted capture pair')
     if before.resolve() == receiver.resolve() or before.is_file() and receiver.is_file() and before.samefile(receiver):
         raise ValueError('before and receiver must be different capture files')
     destination = Path(output)

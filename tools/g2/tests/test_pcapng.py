@@ -87,6 +87,17 @@ class PcapngTests(unittest.TestCase):
         self.assertTrue(all(row['complete'] for row in health.values()), health)
         return report
 
+    def test_sampled_seqcheck_cannot_certify_different_captures(self):
+        from tools.g2.pcapng import prepare_pair
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);setup(root)
+            path=root/'source/manifest.json';manifest=json.loads(path.read_text())
+            manifest['verification']=dict(mode='sampled',seqchecks=[dict(path='seqcheck.json',sha256='a'*64,
+                ingress_port=0,egress_port=1,ingress_path='other.pcapng',receiver_path='../receiver.pcapng')])
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError,'seqcheck.*capture'):
+                prepare_pair(root/'pair.json',root/'converted')
+
     def test_sampled_seqcheck_paths_follow_relocated_registration(self):
         from tools.g2.pcapng import prepare_pair
         with tempfile.TemporaryDirectory() as tmp:

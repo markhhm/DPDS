@@ -48,6 +48,10 @@ class SampledReferenceTests(unittest.TestCase):
         self.assertEqual(actual,expected)
         self.assertGreater(actual['clamp_extra_ns'],7_000_000)
 
+    def test_zero_length_is_not_an_unobserved_valid_arrival(self):
+        ref=SampledReference(config(),'fixture')
+        with self.assertRaises(ValueError):ref.consume(packet(0,0,length=0),False)
+
     def test_fixed_calibration_uses_original_ordinal_with_sparse_outputs(self):
         self.assertIsNotNone(SampledReference)
         cfg=config();cfg['lines'][0]['model']['q_bytes']=8192

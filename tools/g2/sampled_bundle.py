@@ -142,6 +142,11 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
         claimed=counters.get('observer',{}).get(token,{})
         if claimed.get('records_emitted')!=reader.integrity.get('record_count'):
             issue('stream_counter_mismatch')
+    known={port:{(flow['flow_id'],flow['vlan_id']) for flow in check['flows']} for port,check in checks.items()}
+    for item in selected.values():
+        row=item['expected'];port=str(row['ingress_port'])
+        if checks[port]['totals'] is not None and (row['flow_id'],row['vlan_id']) not in known[port]:
+            issue('seqcheck_sample_flow_mismatch',row)
     result=cells.finish()
     reasons=set(issues)|set(failures)|all_reasons
     for row in result['rows']:
@@ -170,7 +175,7 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
     timings['total_s']=time.perf_counter()-started
     return dict(result,schema='hng-g2-report-v1',run=manifest['run'],condition_id=manifest['condition_id'],
         status='INVALID' if state=='INCONCLUSIVE' else state,measurement_status=state,g2_qualified=False,
-        reason_codes=sorted(reasons),verification_mode='sampled',
+        reason_codes=sorted(reasons),verification_mode='sampled',sampling=dict(seed=manifest['sampling']['seed'],algorithm=manifest['sampling']['algorithm'],cells=[dict(direction=c['direction'],line=c['line'],phase=c['phase'],mask_bits=c['mask_bits']) for c in manifest['required_cells']]),
         coverage=dict(order='unavailable' if any(c['order']['status']=='INCONCLUSIVE' for c in checks.values()) else 'full-packet via seqcheck',
             storage='unavailable' if any(c['storage']['status']=='INCONCLUSIVE' for c in checks.values()) else 'full-packet via seqcheck + intentional counters',
             timing='sampled',q='sampled',custody='diagnostic',gate_scope='input-run',
