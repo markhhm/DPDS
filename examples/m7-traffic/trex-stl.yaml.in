@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# JSON flow syntax is valid YAML. STL carries its VLAN in the packet.
+[
+  {
+    "version": 2,
+    "port_limit": 2,
+    "interfaces": [
+      "${M7_PCI_0}",
+      "${M7_PCI_1}"
+    ],
+    "port_bandwidth_gb": ${M7_PORT_GB},
+    "limit_memory": ${M7_MEMORY_MB},
+    "port_info": [
+      {
+        "src_mac": "${M7_P0_SRC_MAC}",
+        "dest_mac": "${M7_P0_DST_MAC}"
+      },
+      {
+        "src_mac": "${M7_P1_SRC_MAC}",
+        "dest_mac": "${M7_P1_DST_MAC}"
+      }
+    ],
+    "platform": {
+      "master_thread_id": ${M7_MASTER_CORE},
+      "latency_thread_id": ${M7_LATENCY_CORE},
+      "dual_if": [
+        {
+          "socket": ${M7_NUMA_NODE},
+          "threads": [
+            ${M7_DATA_CORES}
+          ]
+        }
+      ]
+    }
+  }
+]
