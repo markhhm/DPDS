@@ -1,0 +1,241 @@
+{
+  "date": "2026-11-01",
+  "cpu": "AMD Ryzen 7 5800X",
+  "compiler": "GCC14.2.0 -O3",
+  "openssl": "3.5.6",
+  "acceptance": {
+    "unit": "complete identity pairs per second N/t",
+    "bidirectional_bps": 20000000000,
+    "wire_bytes": 1542,
+    "source_pairs_per_second": 1621271.0765239948,
+    "headroom": 3,
+    "required_pair_pps": 4900000,
+    "criterion": "median wall throughput of complete5M-packet captures per side; shared host, no worst-case guarantee"
+  },
+  "cases": [
+    {
+      "case": "final-5m-59",
+      "packets_per_capture": 5000000,
+      "caplen": 59,
+      "flows": 4,
+      "affinity": [
+        0,
+        1,
+        2
+      ],
+      "as_limit": 4294967296,
+      "threads_max": 3,
+      "input_bytes_each": 460000148,
+      "input_sha256": "edefb7881b0fa0669abc1287f171f307045ff45471b034cc5542a4412a8430e2",
+      "binary_sha256": "4d56f773abf9582356a36da7baedbc1f5caae35bbd9b776fd2e7febe8c9030d0",
+      "source_sha256": "ec9ffe99cd01422618c2ca8184e0d03060bd4b8860969524042538123b8f8042",
+      "runs": [
+        {
+          "wall_seconds": 0.6283579680020921,
+          "cpu_seconds": 1.493678,
+          "max_rss_kib": 50268,
+          "observed_packets_per_second": 15914495.413809577,
+          "ingress_pairs_per_second": 7957247.7069047885
+        },
+        {
+          "wall_seconds": 0.6121644480008399,
+          "cpu_seconds": 1.418582,
+          "max_rss_kib": 50340,
+          "observed_packets_per_second": 16335479.841498865,
+          "ingress_pairs_per_second": 8167739.920749432
+        },
+        {
+          "wall_seconds": 0.5636428340003476,
+          "cpu_seconds": 1.40278,
+          "max_rss_kib": 50264,
+          "observed_packets_per_second": 17741731.814501934,
+          "ingress_pairs_per_second": 8870865.907250967
+        },
+        {
+          "wall_seconds": 0.5448017439994146,
+          "cpu_seconds": 1.378817,
+          "max_rss_kib": 50296,
+          "observed_packets_per_second": 18355301.006545134,
+          "ingress_pairs_per_second": 9177650.503272567
+        },
+        {
+          "wall_seconds": 0.6918432320017018,
+          "cpu_seconds": 1.422469,
+          "max_rss_kib": 49492,
+          "observed_packets_per_second": 14454141.541671395,
+          "ingress_pairs_per_second": 7227070.770835698
+        }
+      ],
+      "median_observed_mpps": 16.335479841498866,
+      "median_pair_mpps": 8.167739920749433
+    },
+    {
+      "case": "final-5m-128",
+      "packets_per_capture": 5000000,
+      "caplen": 128,
+      "flows": 4,
+      "affinity": [
+        0,
+        1,
+        2
+      ],
+      "as_limit": 4294967296,
+      "threads_max": 3,
+      "input_bytes_each": 800000148,
+      "input_sha256": "ea52afec96daeeb8f6da4ee2db47f0f8d66095595e19c81086d57e5f888755c2",
+      "binary_sha256": "4d56f773abf9582356a36da7baedbc1f5caae35bbd9b776fd2e7febe8c9030d0",
+      "source_sha256": "ec9ffe99cd01422618c2ca8184e0d03060bd4b8860969524042538123b8f8042",
+      "runs": [
+        {
+          "wall_seconds": 0.706324079001206,
+          "cpu_seconds": 2.001953,
+          "max_rss_kib": 50292,
+          "observed_packets_per_second": 14157807.01422601,
+          "ingress_pairs_per_second": 7078903.507113005
+        },
+        {
+          "wall_seconds": 0.782329611996829,
+          "cpu_seconds": 2.25072,
+          "max_rss_kib": 50300,
+          "observed_packets_per_second": 12782336.046919994,
+          "ingress_pairs_per_second": 6391168.023459997
+        },
+        {
+          "wall_seconds": 1.0540978470016853,
+          "cpu_seconds": 2.515885,
+          "max_rss_kib": 50304,
+          "observed_packets_per_second": 9486785.338234367,
+          "ingress_pairs_per_second": 4743392.669117183
+        },
+        {
+          "wall_seconds": 0.9475911839981563,
+          "cpu_seconds": 2.538634,
+          "max_rss_kib": 50308,
+          "observed_packets_per_second": 10553074.119798329,
+          "ingress_pairs_per_second": 5276537.059899164
+        },
+        {
+          "wall_seconds": 1.0686597989988513,
+          "cpu_seconds": 2.617143,
+          "max_rss_kib": 50200,
+          "observed_packets_per_second": 9357514.907333713,
+          "ingress_pairs_per_second": 4678757.4536668565
+        }
+      ],
+      "median_observed_mpps": 10.553074119798328,
+      "median_pair_mpps": 5.276537059899164
+    },
+    {
+      "case": "final-5m-59",
+      "packets_per_capture": 5000000,
+      "caplen": 59,
+      "flows": 4,
+      "affinity": [
+        0,
+        2,
+        4
+      ],
+      "as_limit": 4294967296,
+      "threads_max": 3,
+      "input_bytes_each": 460000148,
+      "input_sha256": "edefb7881b0fa0669abc1287f171f307045ff45471b034cc5542a4412a8430e2",
+      "binary_sha256": "4d56f773abf9582356a36da7baedbc1f5caae35bbd9b776fd2e7febe8c9030d0",
+      "source_sha256": "ec9ffe99cd01422618c2ca8184e0d03060bd4b8860969524042538123b8f8042",
+      "runs": [
+        {
+          "wall_seconds": 0.734195874996658,
+          "cpu_seconds": 1.733606,
+          "max_rss_kib": 50252,
+          "observed_packets_per_second": 13620343.481288996,
+          "ingress_pairs_per_second": 6810171.740644498
+        },
+        {
+          "wall_seconds": 0.83454496399645,
+          "cpu_seconds": 1.6940240000000002,
+          "max_rss_kib": 50212,
+          "observed_packets_per_second": 11982577.849505229,
+          "ingress_pairs_per_second": 5991288.924752614
+        },
+        {
+          "wall_seconds": 0.7222997670032782,
+          "cpu_seconds": 1.728578,
+          "max_rss_kib": 50300,
+          "observed_packets_per_second": 13844667.348417701,
+          "ingress_pairs_per_second": 6922333.674208851
+        },
+        {
+          "wall_seconds": 0.869054012997367,
+          "cpu_seconds": 1.734699,
+          "max_rss_kib": 50268,
+          "observed_packets_per_second": 11506764.654949356,
+          "ingress_pairs_per_second": 5753382.327474678
+        },
+        {
+          "wall_seconds": 1.0064221669963445,
+          "cpu_seconds": 1.6481499999999998,
+          "max_rss_kib": 49508,
+          "observed_packets_per_second": 9936188.140454901,
+          "ingress_pairs_per_second": 4968094.070227451
+        }
+      ],
+      "median_observed_mpps": 11.98257784950523,
+      "median_pair_mpps": 5.991288924752615
+    },
+    {
+      "case": "final-5m-128",
+      "packets_per_capture": 5000000,
+      "caplen": 128,
+      "flows": 4,
+      "affinity": [
+        0,
+        2,
+        4
+      ],
+      "as_limit": 4294967296,
+      "threads_max": 3,
+      "input_bytes_each": 800000148,
+      "input_sha256": "ea52afec96daeeb8f6da4ee2db47f0f8d66095595e19c81086d57e5f888755c2",
+      "binary_sha256": "4d56f773abf9582356a36da7baedbc1f5caae35bbd9b776fd2e7febe8c9030d0",
+      "source_sha256": "ec9ffe99cd01422618c2ca8184e0d03060bd4b8860969524042538123b8f8042",
+      "runs": [
+        {
+          "wall_seconds": 0.9515664759965148,
+          "cpu_seconds": 2.4660719999999996,
+          "max_rss_kib": 50300,
+          "observed_packets_per_second": 10508987.288069012,
+          "ingress_pairs_per_second": 5254493.644034506
+        },
+        {
+          "wall_seconds": 1.0959587969991844,
+          "cpu_seconds": 2.5503,
+          "max_rss_kib": 50256,
+          "observed_packets_per_second": 9124430.614892397,
+          "ingress_pairs_per_second": 4562215.307446199
+        },
+        {
+          "wall_seconds": 0.9753525820051436,
+          "cpu_seconds": 2.46144,
+          "max_rss_kib": 50196,
+          "observed_packets_per_second": 10252702.647735713,
+          "ingress_pairs_per_second": 5126351.3238678565
+        },
+        {
+          "wall_seconds": 1.161675875999208,
+          "cpu_seconds": 2.562926,
+          "max_rss_kib": 50324,
+          "observed_packets_per_second": 8608253.133774139,
+          "ingress_pairs_per_second": 4304126.5668870695
+        },
+        {
+          "wall_seconds": 1.0150970020040404,
+          "cpu_seconds": 2.543271,
+          "max_rss_kib": 50336,
+          "observed_packets_per_second": 9851275.277394816,
+          "ingress_pairs_per_second": 4925637.638697408
+        }
+      ],
+      "median_observed_mpps": 9.851275277394816,
+      "median_pair_mpps": 4.925637638697408
+    }
+  ]
+}
