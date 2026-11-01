@@ -44,17 +44,21 @@ endforeach
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
 
+# Separate the long event checks; overlap CLI fixtures after differential replay.
 test('g2-software', python,
   args: [meson.project_source_root() / 'scripts/run-unittest-groups.py',
-         'tools.g2.tests.test_online', '--', 'tools.g2.tests.test_reference',
-         'tools.g2.tests.test_report', 'tools.g2.tests.test_probe', 'tools.g2.tests.test_differential',
+         'tools.g2.tests.test_online.OnlineTests',
+         'tools.g2.tests.test_reference', 'tools.g2.tests.test_probe',
          'tools.g2.tests.test_protocol', 'tools.g2.tests.test_runner',
          'tools.g2.tests.test_calibration', 'tools.g2.tests.test_custody',
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
          'tools.g2.tests.test_counters', 'tools.g2.tests.test_identity_index',
-         'tools.g2.tests.test_bundle', 'tools.g2.tests.test_serializer',
-         'tools.g2.tests.test_live_custody', 'tools.g2.tests.test_matrix',
-         'tools.g2.tests.test_pcapng'],
+         'tools.g2.tests.test_serializer', 'tools.g2.tests.test_live_custody',
+         'tools.g2.tests.test_pcapng', '--',
+         'tools.g2.tests.test_online.OnlineTimingTests', '--',
+         'tools.g2.tests.test_differential',
+         'tools.g2.tests.test_report', '--',
+         'tools.g2.tests.test_bundle', 'tools.g2.tests.test_matrix'],
   workdir: meson.project_source_root(), timeout: 180, is_parallel: false)
 # Software-only integrity: actual PMDs, synthetic payloads, independent oracle.
 ring_pmd = meson.get_compiler('c').find_library('rte_net_ring', dirs: dpdk.get_variable(pkgconfig: 'libdir'), required: true)
