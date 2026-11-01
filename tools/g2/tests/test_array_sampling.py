@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from tools.g2 import array_sampling
 from tools.g2.array_sampling import _sha256_words, sample_mask
 from tools.g2.online import sample
 
@@ -52,6 +53,68 @@ class ArraySamplingTests(unittest.TestCase):
         for index, length in enumerate(lengths):
             digest = hashlib.sha256(data[index, :int(length)].tobytes()).digest()
             np.testing.assert_array_equal(actual[index], np.frombuffer(digest, dtype='>u4'))
+
+    def test_shared_full_data_prefix_is_compressed_once_before_varying_padding(self):
+        suffix_lengths = np.asarray([0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129], dtype=np.uint64)
+        for prefix in (64, 128):
+            array_sampling._shared_compress.cache_clear()
+            lengths = suffix_lengths + prefix
+            data = np.zeros((len(lengths), prefix + 129), dtype=np.uint8)
+            data[:, :prefix] = np.arange(prefix, dtype=np.uint8)
+            data[:, prefix:] = (np.arange(129)[None, :] + np.arange(len(lengths))[:, None]) % 256
+            with self.subTest(prefix=prefix), patch('tools.g2.array_sampling._compress',
+                    wraps=array_sampling._compress) as compressed:
+                actual = _sha256_words(data, lengths)
+            widths = [call.args[1].shape[0] for call in compressed.call_args_list]
+            self.assertEqual(widths[:prefix // 64], [1] * (prefix // 64))
+            self.assertTrue(all(width == len(lengths) for width in widths[prefix // 64:]))
+            for index, length in enumerate(lengths):
+                digest = hashlib.sha256(data[index, :int(length)].tobytes()).digest()
+                np.testing.assert_array_equal(actual[index], np.frombuffer(digest, dtype='>u4'))
+
+    def test_matching_blocks_after_first_noncommon_block_keep_distinct_states(self):
+        array_sampling._shared_compress.cache_clear()
+        data = np.full((9, 256), ord('a'), dtype=np.uint8)
+        data[:, 64] = np.arange(len(data), dtype=np.uint8)
+        with patch('tools.g2.array_sampling._compress', wraps=array_sampling._compress) as compressed:
+            actual = _sha256_words(data, np.full(len(data), 256, dtype=np.uint64))
+        self.assertEqual([call.args[1].shape[0] for call in compressed.call_args_list], [1, 9, 9, 9, 9])
+        for index, row in enumerate(data):
+            np.testing.assert_array_equal(actual[index], np.frombuffer(hashlib.sha256(row).digest(), dtype='>u4'))
+
+    def test_common_padding_is_never_used_as_shared_data_midstate(self):
+        for length in (55, 56, 63):
+            data = np.full((4, length), ord('a'), dtype=np.uint8)
+            with self.subTest(length=length), patch('tools.g2.array_sampling._compress',
+                    wraps=array_sampling._compress) as compressed:
+                actual = _sha256_words(data, np.full(4, length, dtype=np.uint64))
+            self.assertTrue(all(call.args[1].shape[0] == 4 for call in compressed.call_args_list))
+            expected = np.frombuffer(hashlib.sha256(b'a' * length).digest(), dtype='>u4')
+            np.testing.assert_array_equal(actual, np.tile(expected, (4, 1)))
+
+    def test_shared_prefix_cache_reuses_work_without_aliasing_or_crossing_seed_states(self):
+        cached = getattr(array_sampling, '_shared_compress', None)
+        self.assertTrue(callable(cached), 'shared data compression cache is missing')
+        cached.cache_clear()
+        try:
+            for seed in (0, 17):
+                data = np.full((5, 148), ord('a'), dtype=np.uint8)
+                data[:, 16:24] = np.frombuffer(seed.to_bytes(8, 'big'), dtype=np.uint8)
+                data[:, 128:] = np.arange(len(data), dtype=np.uint8)[:, None]
+                lengths = np.full(len(data), 148, dtype=np.uint64)
+                with patch('tools.g2.array_sampling._compress', wraps=array_sampling._compress) as compressed:
+                    first = _sha256_words(data, lengths)
+                self.assertEqual([call.args[1].shape[0] for call in compressed.call_args_list], [1, 1, 5])
+                first.fill(0)
+                with patch('tools.g2.array_sampling._compress', wraps=array_sampling._compress) as compressed:
+                    actual = _sha256_words(data, lengths)
+                self.assertEqual([call.args[1].shape[0] for call in compressed.call_args_list], [5])
+                for index, row in enumerate(data):
+                    np.testing.assert_array_equal(actual[index], np.frombuffer(hashlib.sha256(row).digest(), dtype='>u4'))
+            self.assertGreater(cached.cache_info().hits, 0)
+            self.assertLessEqual(cached.cache_info().maxsize, 256)
+        finally:
+            cached.cache_clear()
 
     def test_stage1_matches_scalar_across_seeds_masks_and_uint64_extremes(self):
         rows = items()

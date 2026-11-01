@@ -38,6 +38,7 @@ class NativeInput:
         path=self.root/registration['path'];reader=NativeArrays(path)
         projection=NativeProjection(reader.header,manifest,config)
         self.projection=projection
+        self._packet_cache={}
         chosen=[]
         for batch in reader.batches():
             links=projection.accept(batch)
@@ -54,7 +55,7 @@ class NativeInput:
             for port,state in projection.port_state.items():reference.full.ports[port].update(state)
             if self.uniform is not None:
                 host=items[(kinds==1)|(kinds==2)]
-                selected=sample_mask(manifest['run'],manifest['sampling']['seed'],self.uniform,host)
+                selected=self._host_selection(packets,wanted,host)
                 for item in host[selected]:
                     event_index=int(item['event_index'])
                     self.host.append(projection.host(events[event_index],item,int(links['host_seq'][event_index])))
@@ -71,6 +72,7 @@ class NativeInput:
         missing=[row for row in generated if _counter_key(row) not in actual]
         self.counters=normalize_counters(missing+counter_rows,manifest)
         self.chosen=np.concatenate(chosen) if chosen else np.empty(0,dtype=items.dtype)
+        self._match_groups=None
         if self.uniform is None:self._host_pass(path,projection)
         self.runtime=projection.runtime
         self.inputs=Counter({str(port):values['rx_returned'] for port,values in projection.custody.items()})
@@ -100,18 +102,45 @@ class NativeInput:
             result[indices]=sample_mask(manifest['run'],manifest['sampling']['seed'],cell['mask_bits'],items[indices])
         return result
 
+    def _host_selection(self,packets,wanted,host):
+        if self.uniform==0:return np.ones(len(host),dtype=bool)
+        for port in np.unique(packets['ingress_port']):
+            positions=np.flatnonzero(packets['ingress_port']==port)
+            cache=self._packet_cache.setdefault(int(port),[])
+            cache.append((packets[positions].copy(),wanted[positions].copy()))
+            del cache[:-2]
+        result=np.zeros(len(host),dtype=bool);known=np.zeros(len(host),dtype=bool)
+        for port,history in self._packet_cache.items():
+            for rows,mask in history:
+                first=int(rows['ingress_seq'][0])
+                positions=np.flatnonzero((host['ingress_port']==port)&(host['ingress_seq']>=first)&
+                                         (host['ingress_seq']<first+len(rows)))
+                indices=(host['ingress_seq'][positions]-first).astype(np.int64)
+                same=np.ones(len(positions),dtype=bool)
+                for name in ('identity_kind','source','destination','source_port','destination_port','identity'):
+                    same&=host[name][positions]==rows[name][indices]
+                known[positions[same]]=True;result[positions[same]]=mask[indices[same]]
+        remaining=np.flatnonzero(~known)
+        result[remaining]=sample_mask(self.manifest['run'],self.manifest['sampling']['seed'],self.uniform,host[remaining])
+        return result
+
     def _matches(self,rows,port,identity):
         wanted=np.zeros(len(rows),dtype=bool)
-        for line in self.config['lines']:
-            chosen=self.chosen[(self.chosen['line']==self.names[line['name']])]
-            if not len(chosen):continue
-            fields=('source','destination','source_port','destination_port')
-            flows=np.unique(chosen[list(fields)])
-            for flow in flows:
-                selected=port==line['ingress_port'];target=np.ones(len(chosen),dtype=bool)
-                for name in fields:
-                    selected&=rows[name]==flow[name];target&=chosen[name]==flow[name]
-                wanted[selected]|=np.isin(identity[selected],chosen['identity'][target])
+        fields=('source','destination','source_port','destination_port')
+        if self._match_groups is None:
+            self._match_groups=[]
+            for line in self.config['lines']:
+                chosen=self.chosen[self.chosen['line']==self.names[line['name']]]
+                for flow in np.unique(chosen[list(fields)]):
+                    selected=np.ones(len(chosen),dtype=bool)
+                    for name in fields:selected&=chosen[name]==flow[name]
+                    self._match_groups.append((line['ingress_port'],flow,np.unique(chosen['identity'][selected])))
+        for ingress,flow,keys in self._match_groups:
+            selected=port==ingress
+            for name in fields:selected&=rows[name]==flow[name]
+            indices=np.flatnonzero(selected);positions=np.searchsorted(keys,identity[indices])
+            present=positions<len(keys)
+            wanted[indices[present]]|=keys[positions[present]]==identity[indices[present]]
         return wanted
 
     def _host_pass(self,path,projection):

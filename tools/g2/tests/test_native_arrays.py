@@ -130,6 +130,30 @@ class NativeArraysTests(unittest.TestCase):
         parts += [frame(2, payload, sequence), frame(3, line(health(counts)), sequence+1)]
         self.assert_parity(b''.join(parts), chunk_records=23)
 
+    def test_uniform_lengths_validate_every_prefix_before_using_array_offsets(self):
+        records = [entry(seq=index+1, order=index) for index in range(32)]
+        raw = capture(b''.join(records), seal=health((32, 0, 0, 0, 0, 0, 0)))
+        self.assert_parity(raw, chunk_records=7)
+        # A valid first size and whole-frame stride cannot excuse a later size.
+        for size in (0, len(records[12])-1, len(records[12])+1):
+            altered = list(records)
+            altered[12] = struct.pack('<H', size)+altered[12][2:]
+            self.rejects(capture(b''.join(altered), seal=health((32, 0, 0, 0, 0, 0, 0))))
+
+    def test_variable_entry_lengths_fall_back_at_tag_width_transitions(self):
+        records = [entry(seq=index+1, order=index, common=[index+1]+[0]*21) for index in range(300)]
+        self.assert_parity(capture(b''.join(records), seal=health((300, 0, 0, 0, 0, 0, 0))), chunk_records=31)
+
+    def test_uniform_dense_masks_write_native_widths_without_ignoring_a_later_unknown_bit(self):
+        records = [entry(seq=index+1, order=index, common=list(native_binary.COMMON_MAX),
+                         items=(list(native_binary.ITEM_MAX),)) for index in range(4)]
+        self.assert_parity(capture(b''.join(records), seal=health((4, 0, 0, 0, 0, 0, 0))), chunk_records=3)
+        body = records[-1][2:]
+        bad_mask = ((1 << 22)-1) | (1 << 31)
+        broken = body[:6]+struct.pack('<I', bad_mask)+body[10:]
+        records[-1] = struct.pack('<H', len(broken))+broken
+        self.rejects(capture(b''.join(records), seal=health((4, 0, 0, 0, 0, 0, 0))))
+
     def test_batch_boundaries_preserve_all_kinds_producer_sequences_and_links(self):
         counts = [0]*7
         records = []

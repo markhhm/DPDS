@@ -40,6 +40,15 @@ class SampledColumnsTests(unittest.TestCase):
         cfg=config();cfg['lines'][0]['model']['q_bytes']=8192
         self.compare(cfg,[packet(i,i*1000,length=60) for i in range(80)],'calibration')
 
+    def test_columns_and_legacy_packet_calls_can_alternate_exact_state(self):
+        cfg=config();cfg['lines'][0]['model']['c_bps']=9_999_999_937
+        full=Reference(cfg,'fixture');slim=SampledReference(cfg,'fixture')
+        events=[packet(i,0 if i<6 else 1000,length=60+(i%3)*16) for i in range(15)]
+        expected=[full.consume(event) for event in events]
+        self.assertEqual(list(slim.consume_columns(columns(events[:4]),np.ones(4,dtype=bool),lambda i:events[i])),expected[:4])
+        self.assertEqual(slim.consume(events[4],True),expected[4])
+        self.assertEqual(list(slim.consume_columns(columns(events[5:]),np.ones(10,dtype=bool),lambda i:events[i+5])),expected[5:])
+
     def test_trace_l0_keeps_entire_unsampled_clamp_prefix(self):
         cfg=config();line=cfg['lines'][0]
         line['model'].update(t_ns=0,p='0',delta_ns=0,q_bytes=8192,storage_capacity_packets=1_000_000,storage_capacity_bytes=2_000_000_000)

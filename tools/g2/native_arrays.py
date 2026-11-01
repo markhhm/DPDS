@@ -54,6 +54,30 @@ def _frame(source, expected, digest=None):
     return kind, payload
 
 
+def _entry_offsets(payload):
+    if len(payload) < 2:
+        raise ValueError('truncated native binary entry length')
+    size, = struct.unpack_from('<H', payload)
+    stride = size+2
+    if size and len(payload) % stride == 0:
+        positions = np.arange(0, len(payload), stride, dtype=np.int64)
+        sizes = payload[positions[:, None]+np.arange(2)].view('<u2').reshape(-1)
+        if np.all(sizes == size):
+            return positions+2, positions+stride
+    starts, ends, offset = [], [], 0
+    while offset < len(payload):
+        if offset+2 > len(payload):
+            raise ValueError('truncated native binary entry length')
+        size, = struct.unpack_from('<H', payload, offset)
+        end = offset+2+size
+        if not size or end > len(payload):
+            raise ValueError('truncated or empty native binary event')
+        starts.append(offset+2)
+        ends.append(end)
+        offset = end
+    return np.asarray(starts, dtype=np.int64), np.asarray(ends, dtype=np.int64)
+
+
 class _Columns:
     """Advance independent row cursors while decoding a column at a time."""
     def __init__(self, data, starts, ends):
@@ -62,10 +86,16 @@ class _Columns:
         self.ends = np.asarray(ends, dtype=np.int64)
 
     def take(self, rows, size):
-        positions = self.cursor[rows]
-        if np.any(positions + size > self.ends[rows]):
+        # Decoder row selections are unique; a full selection is the whole column.
+        full = len(rows) == len(self.cursor)
+        positions = self.cursor.copy() if full else self.cursor[rows]
+        ends = positions+size
+        if np.any(ends > (self.ends if full else self.ends[rows])):
             raise ValueError('truncated native binary event')
-        self.cursor[rows] = positions + size
+        if full:
+            self.cursor[:] = ends
+        else:
+            self.cursor[rows] = ends
         return positions
 
     def byte(self, rows):
@@ -73,36 +103,54 @@ class _Columns:
 
     def integer(self, rows, maximum=(1 << 64)-1):
         tags = self.byte(rows)
-        values = tags.astype(np.uint64)
-        wide = np.flatnonzero(tags >= 128)
-        if wide.size:
-            if np.any(tags[wide] > 0x87):
+        if tags.size and tags[0] >= 128 and np.all(tags == tags[0]):
+            width = int(tags[0])-0x7f
+            if width > 8:
                 raise ValueError('unknown native binary integer tag')
-            widths = tags[wide].astype(np.int64)-0x7f
-            positions = self.take(rows[wide], widths)
-            decoded = self.data[positions[:, None]+np.arange(8)].view('<u8').reshape(-1)
-            decoded &= np.uint64((1 << 64)-1) >> ((8-widths).astype(np.uint64)*np.uint64(8))
-            if np.any(decoded < 128) or np.any((widths > 1) & (self.data[positions+widths-1] == 0)):
+            positions = self.take(rows, width)
+            values = self.data[positions[:, None]+np.arange(8)].view('<u8').reshape(-1)
+            values &= np.uint64((1 << 64)-1) >> np.uint64((8-width)*8)
+            if np.any(values < 128) or (width > 1 and np.any(self.data[positions+width-1] == 0)):
                 raise ValueError('noncanonical native binary integer')
-            values[wide] = decoded
+        else:
+            values = tags.astype(np.uint64)
+            wide = np.flatnonzero(tags >= 128)
+            if wide.size:
+                if np.any(tags[wide] > 0x87):
+                    raise ValueError('unknown native binary integer tag')
+                widths = tags[wide].astype(np.int64)-0x7f
+                positions = self.take(rows[wide], widths)
+                decoded = self.data[positions[:, None]+np.arange(8)].view('<u8').reshape(-1)
+                decoded &= np.uint64((1 << 64)-1) >> ((8-widths).astype(np.uint64)*np.uint64(8))
+                if np.any(decoded < 128) or np.any((widths > 1) & (self.data[positions+widths-1] == 0)):
+                    raise ValueError('noncanonical native binary integer')
+                values[wide] = decoded
         if maximum != (1 << 64)-1 and np.any(values > maximum):
             raise ValueError('overflowing native binary integer')
         return values
 
-    def sparse(self, rows, maxima):
+    def sparse(self, rows, maxima, columns, destinations):
         positions = self.take(rows, 4)
         masks = self.data[positions[:, None]+np.arange(4)].copy().view('<u4').reshape(-1)
-        if np.any(masks >> len(maxima)):
+        any_mask = int(np.bitwise_or.reduce(masks, initial=0))
+        all_mask = int(np.bitwise_and.reduce(masks, initial=(1 << len(maxima))-1))
+        if any_mask >> len(maxima):
             raise ValueError('unknown native binary presence bit')
-        values = np.zeros((len(rows), len(maxima)), dtype=np.uint64)
         for bit, maximum in enumerate(maxima):
-            selected = np.flatnonzero(masks & (1 << bit))
-            if selected.size:
-                column = self.integer(rows[selected], maximum)
-                if np.any(column == 0):
-                    raise ValueError('native binary present value is zero')
-                values[selected, bit] = column
-        return values
+            if not any_mask & (1 << bit):
+                continue
+            if all_mask & (1 << bit):
+                selected = slice(None)
+            else:
+                selected = np.flatnonzero(masks & (1 << bit))
+            column = self.integer(rows[selected], maximum)
+            if np.any(column == 0):
+                raise ValueError('native binary present value is zero')
+            target = columns[bit]
+            if isinstance(selected, slice) and len(destinations) == len(target):
+                target[:] = column
+            else:
+                target[destinations[selected]] = column
 
 
 def _decode(data, starts, ends):
@@ -114,14 +162,12 @@ def _decode(data, starts, ends):
     if np.any(events['producer'] > 6) or np.any(events['kind'] > 7) or np.any(events['count'] > 16):
         raise ValueError('native binary producer, kind or item count is out of range')
     events['producer_seq'], events['order'] = wire.integer(rows), wire.integer(rows)
-    common = wire.sparse(rows, COMMON_MAX)
-    for bit, name in enumerate(('at_ns', 'gate_ns', 'submit_before_ns', 'submit_after_ns')):
-        events[name] = common[:, bit]
-    events['resources'] = common[:, 4:14]
-    events['actual_selection_seq'], events['attempt_id'] = common[:, 14], common[:, 15]
-    events['consumed_dispatch'] = common[:, 16:18]
-    for bit, name in enumerate(('first_handoff_seq', 'handoff_queue', 'port', 'accepted_count'), 18):
-        events[name] = common[:, bit]
+    common_columns = ([events[name] for name in ('at_ns', 'gate_ns', 'submit_before_ns', 'submit_after_ns')]
+        + [events['resources'][:, index] for index in range(10)]
+        + [events[name] for name in ('actual_selection_seq', 'attempt_id')]
+        + [events['consumed_dispatch'][:, index] for index in range(2)]
+        + [events[name] for name in ('first_handoff_seq', 'handoff_queue', 'port', 'accepted_count')])
+    wire.sparse(rows, COMMON_MAX, common_columns, rows)
     snapshot_counts = wire.byte(rows)
     if np.any(snapshot_counts > 2):
         raise ValueError('native binary snapshot count exceeds two')
@@ -141,13 +187,12 @@ def _decode(data, starts, ends):
     counts = events['count']
     items = np.zeros(int(counts.sum()), dtype=ITEM_DTYPE)
     items['event_index'] = np.repeat(rows, counts)
+    item_columns = [items[name] for name in ITEM_FIELDS]
     bases = np.cumsum(counts, dtype=np.int64)-counts
     for index in range(int(counts.max(initial=0))):
         selected = rows[counts > index]
         positions = bases[selected]+index
-        values = wire.sparse(selected, ITEM_MAX)
-        for bit, name in enumerate(ITEM_FIELDS):
-            items[name][positions] = values[:, bit]
+        wire.sparse(selected, ITEM_MAX, item_columns, positions)
     if np.any(wire.cursor != wire.ends):
         raise ValueError('trailing bytes in native binary event')
     return dict(events=events, items=items, snapshots=snapshots)
@@ -226,35 +271,28 @@ class NativeArrays:
                 if kind != 1 or _header(payload.tobytes()) != self.header:
                     raise ValueError('native binary header changed')
                 expected = 1
-                buffers, starts, ends, buffered = [], [], [], 0
+                buffers, starts, ends, buffered, pending = [], [], [], 0, 0
                 while True:
                     kind, payload = _frame(source, expected, digest)
                     expected += 1
                     if kind == 2:
-                        offset, attached = 0, False
-                        while offset < len(payload):
-                            if offset+2 > len(payload):
-                                raise ValueError('truncated native binary entry length')
-                            size, = struct.unpack_from('<H', payload, offset)
-                            end = offset+2+size
-                            if not size or end > len(payload):
-                                raise ValueError('truncated or empty native binary event')
-                            if not attached:
-                                base = buffered
-                                buffers.append(payload)
-                                buffered += len(payload)
-                                attached = True
-                            starts.append(base+offset+2)
-                            ends.append(base+end)
-                            offset = end
-                            if len(starts) == self.chunk_records:
-                                yield self._batch(buffers, starts, ends)
+                        entry_starts, entry_ends = _entry_offsets(payload)
+                        offset = 0
+                        while offset < len(entry_starts):
+                            take = min(self.chunk_records-pending, len(entry_starts)-offset)
+                            starts.append(entry_starts[offset:offset+take]+buffered)
+                            ends.append(entry_ends[offset:offset+take]+buffered)
+                            buffers.append(payload)
+                            buffered += len(payload)
+                            pending += take
+                            offset += take
+                            if pending == self.chunk_records:
+                                yield self._batch(buffers, np.concatenate(starts), np.concatenate(ends))
                                 self._unchanged(source)
-                                buffers, starts, ends, buffered = [], [], [], 0
-                                attached = False
+                                buffers, starts, ends, buffered, pending = [], [], [], 0, 0
                     elif kind == 3:
-                        if starts:
-                            yield self._batch(buffers, starts, ends)
+                        if pending:
+                            yield self._batch(buffers, np.concatenate(starts), np.concatenate(ends))
                             self._unchanged(source)
                         health = _health(payload.tobytes(), self.header, self.counts, self.seen)
                         if source.read(1):

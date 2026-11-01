@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact arrival prefixes with expected records only for selected identities."""
 from fractions import Fraction
+from .exact_q import ExactQ
 from .reference import Reference, U64, q_admit, selected, trace_decision, uint
 
 
@@ -10,6 +11,7 @@ class SampledReference:
         self.mode = timing_mode
         self.checked = 0
         self.prefix = 0
+        self._column_q = {}
 
     def consume_columns(self, items, wanted, make_event):
         """Validate arrival columns; retain the exact serial Q/trace recurrence."""
@@ -38,7 +40,6 @@ class SampledReference:
                     or np.any(q<line['envelope']['min_q_bytes']) or np.any(q>line['envelope']['max_q_bytes'])):
                 raise ValueError('invalid sampled line arrival prefix')
             prefix=self.mode=='stress' or state['trace'] is not None
-            services={int(value):Fraction(8*(int(value)+20)*10**9,model['c_bps']) for value in np.unique(q)}
             choices=wanted[indices]
 
             def record(local,finish,outcome,service=None,deadline=None,release=None,clamp=0):
@@ -55,16 +56,23 @@ class SampledReference:
 
             if prefix:
                 self.prefix+=count
+                kernel=self._column_q.get(names[index])
+                if kernel is None:
+                    kernel=self._column_q[names[index]]=ExactQ(state)
                 for local,(arrival,size,choice) in enumerate(zip(rows['arrival_ns'].tolist(),q.tolist(),choices.tolist())):
-                    finish=q_admit(state,arrival,size,services[size])
-                    outcome='q_drop' if finish is None else 'accepted'
+                    ticks=kernel.admit(arrival,size)
+                    outcome='q_drop' if ticks is None else 'accepted'
                     service=deadline=release=None;clamp=0
-                    if finish is not None and state['trace'] is not None:
-                        service=-(-finish.numerator//finish.denominator)
+                    if ticks is not None and state['trace'] is not None:
+                        service=-(-ticks//kernel.C)
                         deadline,release,outcome,clamp=trace_decision(state,service,ordinal+local)
                     state['counts'][outcome]+=1
-                    if choice:record(local,finish,outcome,service,deadline,release,clamp)
+                    if choice:
+                        kernel.publish()
+                        record(local,None if ticks is None else Fraction(ticks,kernel.C),outcome,service,deadline,release,clamp)
+                kernel.publish()
             else:
+                services={int(value):Fraction(8*(int(value)+20)*10**9,model['c_bps']) for value in np.unique(q)}
                 accepted=q<=model['q_bytes']
                 state['counts']['accepted']+=int(accepted.sum());state['counts']['q_drop']+=count-int(accepted.sum())
                 for local in np.flatnonzero(choices):
@@ -87,6 +95,8 @@ class SampledReference:
         seq = uint(event['ingress_seq'],'ingress sequence',U64-1)
         name = event['line']
         state = ref.lines[name]
+        previous=self._column_q.pop(name,None)
+        if previous is not None:previous.restore()
         ordinal = uint(event['selection_seq'],'line ordinal',U64-1)
         q = max(uint(event['length'],'length',2**32-1)+4,64)
         line, model = state['config'], state['config']['model']

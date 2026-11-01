@@ -4,6 +4,8 @@
 Only flow groups enter Python; sequence formatting and SHA-256 rounds operate on
 NumPy arrays. Work is chunked independently of the size of the capture.
 """
+from functools import lru_cache
+
 import numpy as np
 
 from .reference import canonical, uint
@@ -36,6 +38,35 @@ def _ror(word, bits):
     return (word >> bits) | (word << (32 - bits))
 
 
+def _compress(state, block, schedule=None):
+    """Compress one 64-byte block per state column with uint32 arithmetic."""
+    if schedule is None:
+        schedule = np.empty((64, block.shape[0]), dtype=np.uint32)
+    schedule[:16] = block.copy().view('>u4').T
+    for index in range(16, 64):
+        x, y = schedule[index - 15], schedule[index - 2]
+        sigma0 = _ror(x, 7) ^ _ror(x, 18) ^ (x >> 3)
+        sigma1 = _ror(y, 17) ^ _ror(y, 19) ^ (y >> 10)
+        schedule[index] = schedule[index - 16] + sigma0 + schedule[index - 7] + sigma1
+    a, b, c, d, e, f, g, h = state.copy()
+    for index in range(64):
+        sigma1 = _ror(e, 6) ^ _ror(e, 11) ^ _ror(e, 25)
+        choice = (e & f) ^ (~e & g)
+        temp1 = h + sigma1 + choice + _K[index] + schedule[index]
+        sigma0 = _ror(a, 2) ^ _ror(a, 13) ^ _ror(a, 22)
+        majority = (a & b) ^ (a & c) ^ (b & c)
+        h, g, f, e, d, c, b, a = g, f, e, d + temp1, c, b, a, temp1 + sigma0 + majority
+    return state + np.asarray((a, b, c, d, e, f, g, h))
+
+
+@lru_cache(maxsize=256)
+def _shared_compress(state, block):
+    """Cache immutable midstates only for complete common leading data blocks."""
+    words = np.asarray(state, dtype=np.uint32)[:, None]
+    data = np.frombuffer(block, dtype=np.uint8)[None, :]
+    return tuple(_compress(words, data)[:, 0].tolist())
+
+
 def _sha256_words(messages, lengths):
     """Hash rows of bytes with individual lengths; return eight uint32 words."""
     count = len(lengths)
@@ -52,24 +83,18 @@ def _sha256_words(messages, lengths):
     bit_lengths = lengths * np.uint64(8)
     for index in range(8):
         padded[rows, blocks * 64 - 1 - index] = (bit_lengths >> (index * 8)) & 255
-    state = np.broadcast_to(_INITIAL[:, None], (8, count)).copy()
+    state = _INITIAL[:, None]
+    shared = 0
+    for block in range(int(lengths.min()) // 64):
+        data = padded[:, block * 64:(block + 1) * 64]
+        if not np.all(data == data[:1]):
+            break
+        state = np.asarray(_shared_compress(tuple(state[:, 0].tolist()), data[0].tobytes()), dtype=np.uint32)[:, None]
+        shared += 1
+    state = np.broadcast_to(state, (8, count)).copy()
     schedule = np.empty((64, count), dtype=np.uint32)
-    for block in range(int(blocks.max())):
-        schedule[:16] = padded[:, block * 64:(block + 1) * 64].copy().view('>u4').T
-        for index in range(16, 64):
-            x, y = schedule[index - 15], schedule[index - 2]
-            sigma0 = _ror(x, 7) ^ _ror(x, 18) ^ (x >> 3)
-            sigma1 = _ror(y, 17) ^ _ror(y, 19) ^ (y >> 10)
-            schedule[index] = schedule[index - 16] + sigma0 + schedule[index - 7] + sigma1
-        a, b, c, d, e, f, g, h = state.copy()
-        for index in range(64):
-            sigma1 = _ror(e, 6) ^ _ror(e, 11) ^ _ror(e, 25)
-            choice = (e & f) ^ (~e & g)
-            temp1 = h + sigma1 + choice + _K[index] + schedule[index]
-            sigma0 = _ror(a, 2) ^ _ror(a, 13) ^ _ror(a, 22)
-            majority = (a & b) ^ (a & c) ^ (b & c)
-            h, g, f, e, d, c, b, a = g, f, e, d + temp1, c, b, a, temp1 + sigma0 + majority
-        next_state = state + np.asarray((a, b, c, d, e, f, g, h))
+    for block in range(shared, int(blocks.max())):
+        next_state = _compress(state, padded[:, block * 64:(block + 1) * 64], schedule)
         state = np.where(block < blocks, next_state, state)
     return state.T
 
