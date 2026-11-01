@@ -69,6 +69,9 @@ class _Replay:
         self.lines = {row["name"]: row for row in config["lines"]}
         self.traces = {name: profile if isinstance(profile, Trace) else Trace(profile)
                        for name, profile in traces.items()}
+        self.min_delay = {name:min(row['t_ns'] for row in self.traces[name].rows)
+                          if name in self.traces else line['model']['t_ns']
+                          for name,line in self.lines.items()}
         self.ports = {}
         for row in manifest["ports"]:
             port, queue = row["egress_port"], row["queue_id"]
@@ -257,12 +260,15 @@ class _Replay:
         return valid
 
     def safe(self, row, event):
-        relevant = {line["ingress_port"] for line in self.lines.values()
-                    if line["egress_port"] == row["egress_port"]}
-        return all(event["frontiers"][str(port)]["input_complete"] or
-                   event["frontiers"][str(port)]["through_ns"] is not None and
-                   event["frontiers"][str(port)]["through_ns"] >= int(row["release_ns"])
-                   for port in relevant)
+        for name,line in self.lines.items():
+            if line['egress_port'] != row['egress_port']:
+                continue
+            frontier = event['frontiers'][str(line['ingress_port'])]
+            through = frontier['through_ns']
+            if not frontier['input_complete'] and (through is None or
+                    through + 1 + self.min_delay[name] < int(row['release_ns'])):
+                return False
+        return True
 
     def scheduler_head(self, event, selected):
         heads = []  # At most the four configured lines, never the packet history.
