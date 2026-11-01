@@ -123,3 +123,11 @@ test('observer-binary-io', python, args: [meson.project_source_root() / 'tests/e
 
 test('observer-shutdown', python, args: [meson.project_source_root() / 'tests/observer_shutdown.py', dpds_exe],
   timeout: 30, is_parallel: false)
+
+physical_fixture = executable('observer-physical-fixture',
+  ['dpds.c', 'core/receive.c', 'core/combined.c', 'tests/observer_physical_pmd.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
+  link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_bus', '-Wl,--wrap=rte_bus_name'],
+  override_options: ['b_lto=false'], build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('observer-physical', python, args: [meson.project_source_root() / 'tests/observer_physical.py', dpds_exe, physical_fixture],
+  timeout: 30, is_parallel: false)

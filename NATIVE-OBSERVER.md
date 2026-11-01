@@ -49,9 +49,9 @@ The host can write the same native metadata to a compact binary regular file.
 The consumer encodes records; one I/O thread writes ordered CRC frames from a
 bounded pool. Packet bytes, adapter semantics, and
 retention policy remain unchanged. The software scope and identity options still
-apply. Nonblocking output below describes `--observe-fd`. When the I/O pool fills, file writes can
-block the consumer, but producers never wait for it. Physical PMDs remain
-unsupported by native capture.
+apply to software PMDs. Nonblocking output below describes `--observe-fd`. When the I/O pool fills, file writes can
+block the consumer, but producers never wait for it. Physical devices require the explicit binary-only
+`--observe-physical` mode described below.
 
 ```sh
 dpds EAL_ARGUMENTS -- -c engine.json --observe-binary capture.hngb \
@@ -65,6 +65,14 @@ header, health, event values, and record order. Feed `native.jsonl` through a pi
 to the existing adapter. Its CLI descriptors still require pipes or sockets.
 A valid incomplete capture exits decode with code `2`. A malformed capture cannot
 produce a final health seal.
+
+Physical capture uses `--observe-physical --observe-identity stage1`, with
+`--observe-binary`. It is mutually exclusive with `--observe-software`. Every
+selected device must use `mlx5_pci` on PCI or `mlx5_auxiliary` on the auxiliary bus; software and mixed
+port sets are rejected. Its v2 header includes `capture_scope="physical"` and the
+adapter labels NIC sources `physical-pmd`. Legacy software headers remain
+unchanged. This enables capture and normalization only; calibrated external
+observations and physical reporter qualification remain separate prerequisites.
 
 See [Native binary capture, version 1](docs/NATIVE-BINARY.md) for the wire format,
 complete offline commands, integer widths, and failure behavior.

@@ -1,4 +1,6 @@
 /* DPDS HNG host integration. Original DPDS authors and Apache-2.0 license retained. */
+#include <rte_bus.h>
+#include <rte_dev.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -104,12 +106,13 @@ int main(int argc, char **argv)
     optind = 1;
     int option, observe_fd = -1;
     unsigned observe_capacity = 4096, observe_port = 9000;
-    bool observe_software = false;
+    bool observe_software = false, observe_physical = false;
     const char *observe_identity = NULL, *observe_binary = NULL;
     static const struct option options[] = {
         {"observe-fd", required_argument, NULL, 1000}, {"observe-software", no_argument, NULL, 1001},
         {"observe-identity", required_argument, NULL, 1002}, {"observe-capacity", required_argument, NULL, 1003},
         {"observe-probe-port", required_argument, NULL, 1004},
+        {"observe-physical", no_argument, NULL, 1006},
         {"observe-binary", required_argument, NULL, 1005}, {NULL, 0, NULL, 0}};
     while ((option = getopt_long(argc, argv, "c:o:", options, NULL)) != -1) {
         if (option == 'c') config = optarg;
@@ -117,6 +120,7 @@ int main(int argc, char **argv)
         else if (option == 1001) observe_software = true;
         else if (option == 1002) observe_identity = optarg;
         else if (option == 1005) observe_binary = optarg;
+        else if (option == 1006) observe_physical = true;
         else if (option == 1000 || option == 1003 || option == 1004) {
             char *end; unsigned long value = strtoul(optarg, &end, 10);
             if (!*optarg || *end || optarg[0] == '-' || value > INT_MAX) rte_exit(EXIT_FAILURE, "Invalid observer integer\n");
@@ -126,6 +130,10 @@ int main(int argc, char **argv)
         }
         else rte_exit(EXIT_FAILURE, "Usage: ... -- [-c config.json] [-o stats.txt]\n");
     }
+    if (observe_physical && observe_software)
+        rte_exit(EXIT_FAILURE, "Physical and software capture are mutually exclusive\n");
+    if (observe_physical && (!observe_binary || !observe_identity || strcmp(observe_identity, "stage1")))
+        rte_exit(EXIT_FAILURE, "Physical mode requires binary capture and stage1 identity\n");
     if (observe_binary && observe_fd >= 0)
         rte_exit(EXIT_FAILURE, "--observe-binary and --observe-fd are mutually exclusive\n");
     if (rte_lcore_count() < 2 || rte_lcore_count() == 6 || rte_lcore_count() > 7)
@@ -163,15 +171,22 @@ int main(int argc, char **argv)
     }
     if (observe_fd >= 0 || observe_binary) {
         if (!observe_binary && observe_fd <= STDERR_FILENO) rte_exit(EXIT_FAILURE, "Observer FD must be separate from standard streams\n");
-        if (!observe_software || !observe_identity ||
+        if ((!observe_software && !observe_physical) || !observe_identity ||
             (strcmp(observe_identity, "stage1") && strcmp(observe_identity, "software-l2")))
-            rte_exit(EXIT_FAILURE, "Capture requires --observe-software and --observe-identity stage1|software-l2\n");
+            rte_exit(EXIT_FAILURE, "Capture requires --observe-software or --observe-physical and --observe-identity stage1|software-l2\n");
         if (!observe_capacity || observe_capacity > 65536 || !observe_port || observe_port > 65535)
             rte_exit(EXIT_FAILURE, "Invalid observer capacity/probe port\n");
         for (unsigned p = 0; p < host.port_count; ++p) {
             struct rte_eth_dev_info info;
-            if (rte_eth_dev_info_get(host.ports[p], &info) || !info.driver_name ||
-                (strcmp(info.driver_name, "net_pcap") && strcmp(info.driver_name, "net_ring") && strcmp(info.driver_name, "net_null")))
+            if (rte_eth_dev_info_get(host.ports[p], &info) || !info.driver_name)
+                rte_exit(EXIT_FAILURE, "Cannot identify capture device\n");
+            if (observe_physical) {
+                const struct rte_bus *bus = info.device ? rte_dev_bus(info.device) : NULL;
+                const char *name = bus ? rte_bus_name(bus) : NULL;
+                if (!name || !((!strcmp(name, "pci") && !strcmp(info.driver_name, "mlx5_pci")) ||
+                               (!strcmp(name, "auxiliary") && !strcmp(info.driver_name, "mlx5_auxiliary"))))
+                    rte_exit(EXIT_FAILURE, "Physical mode requires supported mlx5 PCI/auxiliary devices on every port\n");
+            } else if (strcmp(info.driver_name, "net_pcap") && strcmp(info.driver_name, "net_ring") && strcmp(info.driver_name, "net_null"))
                 rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
         }
         int fd = observe_fd;
@@ -180,11 +195,12 @@ int main(int argc, char **argv)
             if (fd < 0) rte_exit(EXIT_FAILURE, "Cannot exclusively create observer binary file: %s\n", strerror(errno));
         }
         enum observer_identity_policy policy = !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2;
-        bool prepared = observe_binary ? observer_open_binary(fd, policy, observe_port, observe_capacity, io_split) :
+        bool prepared = observe_physical ? observer_open_binary_physical(fd, observe_port, observe_capacity, io_split) :
+            observe_binary ? observer_open_binary(fd, policy, observe_port, observe_capacity, io_split) :
             observer_open(fd, policy, observe_port, observe_capacity, io_split);
         if (observe_binary) close(fd);
         if (!prepared) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer capture\n");
-    } else if (observe_software || observe_identity)
+    } else if (observe_software || observe_physical || observe_identity)
         rte_exit(EXIT_FAILURE, "Observer options require --observe-fd or --observe-binary\n");
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];

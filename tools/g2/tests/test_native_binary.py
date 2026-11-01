@@ -78,6 +78,17 @@ class NativeBinaryTests(unittest.TestCase):
         self.assertEqual(caught.exception.measurement_status, 'INCONCLUSIVE')
         self.assertNotIn('"kind":"health"', output.getvalue())
 
+    def test_physical_scope_requires_explicit_stage1_v2_header(self):
+        header = json.loads(HEADER)
+        physical = dict(header, capture_scope='physical')
+        seal, output = self.decode(capture(header=line(physical)))
+        self.assertTrue(seal['complete'])
+        self.assertTrue(output.startswith(line(physical).decode()))
+        for scope in ('software-only', 'unknown', True, None):
+            self.rejects(capture(header=line(dict(header, capture_scope=scope))))
+        self.rejects(capture(header=line(dict(physical, identity_policy=1))))
+        self.rejects(capture(header=line(dict(physical, schema='hng-native-v1'))))
+
     def test_zero_record_preserves_raw_endpoints_and_legacy_key_order(self):
         seal = line(health())
         result, output = self.decode(capture())

@@ -9,9 +9,9 @@ retain their bounded queues and do not wait for disk I/O. The encoder waits when
 the I/O pool fills; sustained slow storage therefore causes explicit queue loss. The decoder restores
 native JSONL for the adapter, oracle, and retention consumer.
 
-Capture supports PCAP, ring, and null software PMDs. It requires explicit software
-scope and an identity policy. Physical PMD support and hardware qualification
-remain separate work. Binary capture does not establish a packet-rate guarantee.
+Software capture supports PCAP, ring, and null PMDs with explicit software
+scope and identity policy. The mlx5 physical capture path has a separate opt-in described
+below; hardware qualification remains separate work. Binary capture does not establish a packet-rate guarantee.
 
 ## Capture and offline conversion
 
@@ -94,7 +94,9 @@ JSON line. No bytes can follow the health frame. An empty capture has a header
 frame and a health frame, with no event frame.
 
 The header schema is `hng-native-v2`. Its fields are `schema`, `identity_policy`,
-`probe_port`, `capacity`, `record_bytes`, `layout`, and `ports`.
+`probe_port`, `capacity`, `record_bytes`, `layout`, and `ports`. The optional
+`capture_scope` is permitted only with the exact value `physical` and Stage 1
+identity policy. Missing scope means legacy software-only capture.
 
 Identity policy is
 0 for `stage1` and 1 for `software-l2`. Probe port is 1..65,535. Capacity and
@@ -313,3 +315,28 @@ I/O pool drained. Maximum process RSS was about 877 MiB. This result used five
 pipeline lcores plus the encoder and external generator assignments described
 above, with a discard sink. A different CPU assignment had one short overflow;
 CPU scheduling and storage headroom must still be checked per physical run.
+
+## Physical capture opt-in
+
+```sh
+dpds EAL_PCI_ARGUMENTS -- -c registered.json --observe-binary physical.hngb \
+  --observe-physical --observe-identity stage1 --observe-capacity 65536
+```
+
+This mode requires a supported mlx5 hardware driver/bus pair on every port:
+`mlx5_pci` on PCI, or `mlx5_auxiliary` on the auxiliary bus. PCI membership alone
+is insufficient: paravirtual NICs such as virtio and VMXNET3 are rejected.
+Missing/unknown device buses and mixed software/physical port sets are rejected.
+It cannot use `--observe-fd`, `--observe-software`, or `software-l2` identity. All
+mode/device checks occur before creating the output file. Software capture keeps
+its existing whitelist and exact legacy header bytes.
+
+Physical mode adds `capture_scope="physical"` to the raw v2 header. The decoder
+preserves it and the adapter returns physical scope, labels NIC sources
+`physical-pmd`, and retains their diagnostic semantics. The adapter still reports
+`g2_qualified=false`: this PR enables native capture and normalization, not
+calibrated external timing or end-to-end physical reporting. The existing
+reporter and custody qualification boundaries are unchanged. Check queue/storage
+loss, watermarks and final drain on every hardware run, with the NVMe requirements
+above. Software bus-substitution tests exercise the gate; they are not hardware
+acceptance evidence.
