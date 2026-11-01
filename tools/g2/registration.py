@@ -59,13 +59,23 @@ def _validate(manifest, config):
     shape(manifest, ("schema", "run", "condition_id", "scope", "producer_versions",
         "stage1_source_commit", "stage1_source_review", "config", "traces", "ports", "lines",
         "timing_mode", "sampling", "clocks", "windows", "required_cells", "streams", "capacity",
-        "identity_profile", "offloads", "calibration_path", "retention"))
+        "identity_profile", "offloads", "calibration_path", "retention"), ("verification",))
     if manifest["schema"] != "hng-g2-manifest-v1" or manifest["scope"] not in {"software-only", "physical"}:
         raise ValueError("unsupported manifest schema/scope")
     for key in ("run", "condition_id", "stage1_source_review"):
         identifier(manifest[key], key)
     if manifest["timing_mode"] not in {"stress", "calibration"}:
         raise ValueError("unsupported timing mode")
+    verification = manifest.get('verification')
+    if verification is not None:
+        shape(verification, ('mode','seqchecks'))
+        if verification['mode'] != 'sampled' or not isinstance(verification['seqchecks'],list):
+            raise ValueError('unsupported verification mode/seqchecks')
+        for pair in verification['seqchecks']:
+            shape(pair, ('path','sha256','ingress_port','egress_port','ingress_path','receiver_path'))
+            digest(pair['sha256'])
+            for field in ('path','ingress_path','receiver_path'): identifier(pair[field], field)
+            for field in ('ingress_port','egress_port'): uint(pair[field],field,65535)
     pairs, egress_sources = set(), {}
     for port in _array(manifest["ports"], "ports"):
         shape(port, ("ingress_port", "egress_port", "link_bps", "queue_id", "rx_queue_ids", "tx_queue_ids"))
@@ -224,7 +234,7 @@ def _validate(manifest, config):
         ids.add(stream["stream_id"])
         paths.add(stream["path"])
         roles.add(stream["role"])
-    if roles != set(ROLES):
+    if roles != set(ROLES) and not (verification is not None and roles == set(ROLES)-{"expected"}):
         raise ValueError("missing required stream role")
     capacity = manifest["capacity"]
     shape(capacity, ("max_unresolved", "timing_sample_capacity", "max_diagnostics", "max_join_lag_ns",

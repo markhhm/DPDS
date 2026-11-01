@@ -364,6 +364,9 @@ def prepare_pair(pair_path, output):
             role = field['role']; field['path'] = f'{role}.jsonl'; field['file_sha256'] = file_hash(bundle/field['path'])
         elif not Path(field['path']).is_absolute():
             field['path'] = 'source/'+field['path']
+    for check in manifest.get('verification',{}).get('seqchecks',[]):
+        for name in ('path','ingress_path','receiver_path'):
+            if not Path(check[name]).is_absolute():check[name]='source/'+check[name]
     if not Path(manifest['calibration_path']).is_absolute():
         manifest['calibration_path'] = 'source/'+manifest['calibration_path']
     (bundle/'manifest.json').write_text(json.dumps(manifest, allow_nan=False)+'\n')

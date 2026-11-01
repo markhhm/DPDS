@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Sampled timing/Q verification; external full-capture order/drop evidence."""
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+import time
+
+from .calibration import Calibration
+from .counters import normalize_counters
+from .online import OnlineCells, sample
+from .protocol import StreamError, StreamReader
+from .reference import canonical
+from .registration import validate_registration
+from .sampled_reference import SampledReference
+from .seqcheck import load_checks
+
+
+def build_sampled_report(config,traces,manifest,sources,calibration,retention_dir=None,registration_root=None):
+    validate_registration(manifest,config)
+    started=time.perf_counter()
+    cells=OnlineCells(manifest)
+    clock=Calibration(calibration,manifest['scope'],manifest['run'])
+    reference=SampledReference(config,manifest['run'],traces,manifest['timing_mode'])
+    selected={};readers={};issues=set();failures=Counter();diagnostics=Counter();timings={}
+    limits={};inputs=Counter();sample_counts=Counter();observed={'before':Counter(),'receiver':Counter()};all_reasons=set()
+    cap=manifest['capacity']['timing_sample_capacity']
+    lines={line['name']:line for line in config['lines']}
+
+    def issue(code,row=None,fail=False):
+        all_reasons.add(code)
+        if fail:failures[code]+=1
+        if row is None and not fail:issues.add(code)
+        if row is not None:cells.violation(row,code,'FAIL' if fail else 'INCONCLUSIVE')
+
+    def rows(role):
+        for registration in manifest['streams']:
+            if registration['role']!=role:continue
+            reader=StreamReader(sources[registration['stream_id']],role,manifest['run'])
+            readers[registration['stream_id']]=reader
+            if reader.header['stream_id']!=registration['stream_id']:
+                raise StreamError('STREAM_REGISTRATION','stream differs from registration')
+            for row in reader:yield row
+            if reader.integrity['file_sha256']!=registration['file_sha256']:
+                raise StreamError('SOURCE_HASH_MISMATCH','stream differs from registered hash')
+
+    def key(row):return row['ingress_port'],row['external_identity']
+
+    counters=normalize_counters(rows('counters'),manifest)
+    issues.update(counters['reason_codes'])
+    cost=counters.get('observer_cost',dict(status='INCONCLUSIVE',warnings=[],end_backlog={}))
+    mark=time.perf_counter()
+    for event in rows('ingress'):
+        wanted=False
+        cell=None
+        if event['kind']=='packet':
+            inputs[str(event['ingress_port'])]+=1
+            cell=cells._cell(event)
+            if cell is not None:
+                mask=cell['registration'].get('mask_bits',manifest['sampling']['mask_bits'])
+                wanted=sample(event,manifest['sampling']['seed'],mask)
+        row=reference.consume(event,wanted)
+        if row is None:continue
+        token=key(row)
+        if token in selected:raise StreamError('DUPLICATE_SAMPLE','sample identity repeats')
+        tag=(str(row['ingress_port']),row['line'],cell['registration']['phase'])
+        limits[tag]=limits.get(tag,0)+1
+        if limits[tag]>cap:raise StreamError('SAMPLE_CAPACITY','selected sample bound exhausted','INCONCLUSIVE')
+        selected[token]=dict(expected=row,before=None,receive=None,offer=None,terminal=None)
+        sample_counts[str(row['ingress_port'])]+=1
+        cells.expect(row)
+    summary=reference.finish()
+    timings['arrival_prefix_s']=time.perf_counter()-mark
+    mark=time.perf_counter()
+    for role in ('before','receiver'):
+        for observation in rows(role):
+            observed[role][str(observation['ingress_port'])]+=1
+            state=selected.get(key(observation))
+            if state is None:continue
+            row=state['expected']
+            field='before' if role=='before' else 'receive'
+            if state[field] is not None:
+                issue('duplicate_sample_'+field,row);continue
+            for name in ('egress_port','line','length','vlan_id','flow_id','app'):
+                if observation[name]!=row[name]:issue('sample_identity_mapping',row)
+            if observation['selected_late'] is not None and observation['selected_late']!=int(row['late']):
+                issue('probe_flag_mismatch',row,True)
+            state[field]=observation
+    timings['sample_pair_scan_s']=time.perf_counter()-mark
+    mark=time.perf_counter()
+    for event in rows('host'):
+        diagnostics[event['kind']]+=1
+        if event['kind'] not in ('offer','terminal'):continue
+        state=selected.get(key(event))
+        if state is None:continue
+        row=state['expected']
+        if event['kind']=='offer':
+            if state['offer'] is not None:issue('duplicate_sample_offer',row)
+            state['offer']=event
+            if event['actual_selection_seq']!=row['selection_seq']:
+                issue('sample_q_decision_mismatch',row,True)
+        else:
+            if state['terminal'] is not None:issue('duplicate_sample_terminal',row)
+            state['terminal']=event
+    timings['host_diagnostic_scan_s']=time.perf_counter()-mark
+    expected_reasons=dict(q_drop='q_drop',trace_loss='trace_loss_drop',trace_outage='trace_outage_drop')
+    for state in selected.values():
+        row,before,received=state['expected'],state['before'],state['receive']
+        terminal=state['terminal']
+        actual=terminal['reason'] if terminal else None
+        expected=expected_reasons.get(row['outcome'])
+        if state['offer'] is None:issue('sample_q_decision_unavailable',row)
+        if expected is not None and actual!=expected or expected is None and actual in expected_reasons.values():
+            issue('sample_q_decision_mismatch',row,True)
+        if before is None:issue('missing_sample_before',row)
+        if row['outcome']!='accepted':
+            if received is not None:cells.delivery(row,0,0)
+            continue
+        if received is None:
+            cells.loss(row,'sample_missing_delivery',False)
+            issue('missing_sample_receiver',row)
+            continue
+        if before is None:continue
+        try:
+            pair=clock.pair(before,received)
+            if pair['target_clock_id']!=manifest['clocks']['observation'][str(row['ingress_port'])]:
+                raise StreamError('CLOCK_PAIR_DOMAIN','sample clock differs from registration','INCONCLUSIVE')
+            target=None
+            if manifest['timing_mode']=='calibration':
+                line=lines[row['line']]
+                target=row['release_ns']-row['arrival_ns'] if line['trace'] else line['model']['t_ns']+row['late']*line['model']['delta_ns']
+            cells.delivery(row,pair['owd_ns'],pair['uncertainty_ns'],target,pair['raw_owd_ns'])
+        except StreamError as error:issue(error.code,row)
+    checks=load_checks(manifest['verification']['seqchecks'],registration_root,manifest,counters)
+    for port,check in checks.items():
+        if check['totals'] is not None:
+            for role in ('before','receiver'):
+                expected=check['totals']['ingress' if role=='before' else 'receiver']
+                if observed[role][port]!=expected:issue('seqcheck_stream_count_mismatch')
+    for token,reader in readers.items():
+        if reader.header['role']=='counters':continue
+        claimed=counters.get('observer',{}).get(token,{})
+        if claimed.get('records_emitted')!=reader.integrity.get('record_count'):
+            issue('stream_counter_mismatch')
+    result=cells.finish()
+    reasons=set(issues)|set(failures)|all_reasons
+    for row in result['rows']:
+        check=checks[row['direction']]
+        row['gates'].update(order=check['order'],storage=check['storage'])
+        row['full_capture_evidence']=dict(source='hng-seqcheck-v1',scope=check['coverage_scope'])
+        row['counts_scope']='sampled-offers'
+        row['reason_codes']=sorted(set(row['reason_codes'])|issues|set(check['reason_codes']))
+        for name in ('late_extra',*(key for key in row['timing'] if key.startswith('app_extra:'))):
+            row['timing'][name]['status']='not_checked'
+        incomplete=issues or any(gate['status']=='INCONCLUSIVE' for gate in row['gates'].values()) or row['measurement_status']=='INCONCLUSIVE'
+        failed=row['measurement_status']=='FAIL' or any(gate['status']=='FAIL' for gate in row['gates'].values())
+        state='INCONCLUSIVE' if incomplete else 'FAIL' if failed else 'PASS'
+        row.update(measurement_status=state,status='INVALID' if state=='INCONCLUSIVE' else state,
+                   g2_pass=state=='PASS',g2_qualified=False,
+                   error_median_ms=None if row['timing']['main']['median_abs_error_ns'] is None else row['timing']['main']['median_abs_error_ns']/1e6,
+                   error_p99_ms=None if row['timing']['main']['p99_abs_error_ns'] is None else row['timing']['main']['p99_abs_error_ns']/1e6,
+                   delay_storage_drops=check['storage']['value'],capture_drops=None,
+                   timing_samples=row['timing']['main']['n'])
+        reasons.update(row['reason_codes'])
+    required=[row for row in result['rows'] if row['required']]
+    state='FAIL' if any(row['measurement_status']=='FAIL' for row in required) else 'INCONCLUSIVE' if any(row['measurement_status']!='PASS' for row in required) else 'PASS'
+    if retention_dir is not None:
+        with (Path(retention_dir)/'samples.jsonl').open('x') as target:
+            for state_row in selected.values():target.write(json.dumps(state_row,separators=(',',':'))+'\n')
+    timings['total_s']=time.perf_counter()-started
+    return dict(result,schema='hng-g2-report-v1',run=manifest['run'],condition_id=manifest['condition_id'],
+        status='INVALID' if state=='INCONCLUSIVE' else state,measurement_status=state,g2_qualified=False,
+        reason_codes=sorted(reasons),verification_mode='sampled',
+        coverage=dict(order='unavailable' if any(c['order']['status']=='INCONCLUSIVE' for c in checks.values()) else 'full-packet via seqcheck',
+            storage='unavailable' if any(c['storage']['status']=='INCONCLUSIVE' for c in checks.values()) else 'full-packet via seqcheck + intentional counters',
+            timing='sampled',q='sampled',custody='diagnostic',gate_scope='input-run',
+            unverified=['unsampled Q decisions','unsampled latency','full custody','hardware qualification']),
+        sampled_reference=summary,selected_offers=len(selected),input_packets=dict(inputs),
+        custody=dict(mode='diagnostic',event_counts=dict(diagnostics),full_audit_performed=False),
+        seqcheck=checks,processing=timings,stream_integrity=[reader.integrity for reader in readers.values()],
+        observer_cost=cost,counters=counters,sources=dict(config_sha256=hashlib.sha256(canonical(config)).hexdigest(),
+            calibration_document_sha256=hashlib.sha256(canonical(calibration)).hexdigest()),
+        registration=manifest,stage1_source_commit=manifest['stage1_source_commit'],stage1_source_review=manifest['stage1_source_review'],
+        mismatches=dict(cap=cells.retention.cap,records=[],counts=dict(failures)),
+        unavailable=['hardware_qualification','full_custody_audit'])

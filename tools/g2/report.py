@@ -461,7 +461,7 @@ def main():
                         continue
                 paths[streams[0]["stream_id"]] = path
             result = build_bundle_report(config, traces, manifest, paths,
-                strict_json((root/manifest["calibration_path"]).read_bytes()), destination)
+                strict_json((root/manifest["calibration_path"]).read_bytes()), destination, registration_root=root)
             result["sources"].update(checked_sources["sources"])
             if counter_view is not None:
                 actual = result.get("counters")

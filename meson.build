@@ -123,3 +123,7 @@ test('observer-binary-io', python, args: [meson.project_source_root() / 'tests/e
 
 test('observer-shutdown', python, args: [meson.project_source_root() / 'tests/observer_shutdown.py', dpds_exe],
   timeout: 30, is_parallel: false)
+
+test('g2-sampled', python, args: ['-m','unittest','tools.g2.tests.test_sampled_reference',
+  'tools.g2.tests.test_sampled_bundle','tools.g2.tests.test_seqcheck'],
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
