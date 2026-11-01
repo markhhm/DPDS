@@ -148,14 +148,14 @@ are byte-identical. Input provenance and processing fields in `report.json`
 are intentionally different. Smaller regressions additionally compare fixed
 L0, trace clamp, seven-writer bidirectional evidence and Q-mismatch FAIL cases.
 
-| Metric | Same-cell JSONL | Direct binary (`baea886`) |
+| Metric | Same-cell JSONL | Direct binary (`8b3e980`) |
 |---|---:|---:|
-| Matrix elapsed, including reads/hashes/child startup/output | 208.94 s | **8.84 s** |
-| Elapsed per offered packet | 208.94 us | **8.84 us** |
-| User + system CPU | 206.18 s | 8.82 s |
-| Maximum reported process RSS | 70,308 KiB | 149,448 KiB |
-| Reporter total | — | 8.014 s |
-| Native/capture input, selection and exact Q | — | 7.485 s |
+| Matrix elapsed, including reads/hashes/child startup/output | 208.94 s | **9.05 s** |
+| Elapsed per offered packet | 208.94 us | **9.05 us** |
+| User + system CPU | 206.18 s | 9.04 s |
+| Maximum reported process RSS | 70,308 KiB | 142,420 KiB |
+| Reporter total | — | 8.227 s |
+| Native/capture input, selection and exact Q | — | 7.796 s |
 
 This is a single pinned-CPU run on a shared Linux host, AS 4 GiB/CPU 180 s for
 binary (600 s for JSONL), warm ordinary filesystem cache, no tmpfs. Reading
@@ -171,10 +171,10 @@ For the same planning population of **1.2e11 offers**, the measured binary cell
 gives:
 
 ```text
-CPU estimate = 8.82 s / 1e6 * 1.2e11 / 3600 = 294 core-hours
-16-core ideal wall estimate = 8.84 s / 1e6 * 1.2e11 / 16
-                           = 18.42 hours
-24-hour CPU-only floor = ceil(294 / 24) = 13 cores
+CPU estimate = 9.04 s / 1e6 * 1.2e11 / 3600 = 301.33 core-hours
+16-core ideal wall estimate = 9.05 s / 1e6 * 1.2e11 / 16
+                           = 18.85 hours
+24-hour CPU-only floor = ceil(301.33 / 24) = 13 cores
 ```
 
 This is an ideal extrapolation, not measured parallel speedup or a one-day M6
