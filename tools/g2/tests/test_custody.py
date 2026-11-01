@@ -68,6 +68,19 @@ def envelop(rows, stream="host"):
 
 
 class CustodyTests(unittest.TestCase):
+    def test_v2_two_owner_replay_keeps_prefixes_and_frontiers_separate(self):
+        from tools.g2.tests.test_live_custody import LiveCustodyTests
+        cfg,reg,rows,events=LiveCustodyTests().two_owner_history()
+        self.config=cfg
+        self.manifest=reg
+        self.manifest['retention']['mode']='full'
+        self.manifest['capacity']['join_disk_bytes']=8_000_000
+        events=[offer(row) for row in rows]+events
+        audit=self.audit(rows,events)
+        self.assertEqual(audit.issues,[])
+        for row in rows:
+            self.assertTrue(audit.was_accepted(row['ingress_port'],row['external_identity']))
+
     def setUp(self):
         self.assertTrue(callable(audit_host), "independent host custody checker is missing")
         self.directory = tempfile.TemporaryDirectory()
@@ -93,6 +106,15 @@ class CustodyTests(unittest.TestCase):
         return audit_host(self.config, self.traces, self.manifest, iter(rows),
                           iter(envelop(events)) if not events or "stream_id" not in events[0]
                           else iter(events), Path(self.directory.name))
+
+    def test_native_v2_wrong_stage_cannot_make_a_model_drop_conclusive(self):
+        row=expected(outcome='q_drop')
+        events=envelop([offer(row),terminal(row,'q_drop')])
+        for i,event in enumerate(events):
+            event['extensions']=dict(native_observer_v2=dict(producer=3,producer_seq=i+1,order=i))
+        audit=self.audit([row],events)
+        self.assertIn('native_actor',self.codes(audit,'INCONCLUSIVE'))
+        self.assertNotEqual(audit.measurement_status,'PASS')
 
     def test_history_replay_requires_explicit_software_debug_retention(self):
         for change in [dict(retention=dict(mode="stream",debug_windows=[],mismatch_cap=64)),dict(scope="physical")]:

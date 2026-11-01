@@ -5,9 +5,9 @@
 #include <stdint.h>
 #include "config.h"
 #define OBS_PORTS 2
-#define OBS_PRODUCERS 5
+#define OBS_PRODUCERS 7
 #define OBS_QUEUES 2
-enum observer_producer { OBS_RX, OBS_WORKER0, OBS_WORKER1, OBS_TX, OBS_CONTROL };
+enum observer_producer { OBS_RX, OBS_WORKER0, OBS_WORKER1, OBS_TX, OBS_CONTROL, OBS_RX1, OBS_TX1 };
 enum observer_abort_reason { OBS_ABORT_DRAIN = 1, OBS_ABORT_PRODUCER = 2, OBS_ABORT_RESOURCE = 4, OBS_ABORT_REQUESTED = 8 };
 enum observer_identity_policy { OBS_ID_STAGE1, OBS_ID_SOFTWARE_L2 };
 enum observer_kind { OBS_PACKET, OBS_OFFER, OBS_TERMINAL, OBS_FRONTIER, OBS_END, OBS_DISPATCH, OBS_ATTEMPT, OBS_RESOURCES };
@@ -41,7 +41,7 @@ struct observer_health {
 };
 struct rte_mbuf;
 /* Setup/teardown run on the control thread; fd must be a pipe or socket. */
-bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity);
+bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
 bool observer_start(void);
 bool observer_close(bool complete);
 void observer_abort(enum observer_abort_reason reason);
@@ -52,14 +52,14 @@ struct observer_record *observer_reserve(enum observer_producer producer);
 void observer_commit(enum observer_producer producer);
 /* One scheduler writer per owner; completed publications use a three-slot SPSC mailbox. */
 void observer_publish_snapshot(unsigned owner, const struct observer_snapshot *snapshot);
-/* One TX reader, before arbitration; bounded reads retain the last completed publication. */
-bool observer_load_snapshot(struct observer_snapshot *snapshot);
+/* One TX reader per mailbox; bounded reads retain the last completed publication. */
+bool observer_load_snapshot(enum observer_producer producer, struct observer_snapshot *snapshot);
 struct observer_health observer_health(enum observer_producer producer);
 struct observer_packet observer_packet(const struct rte_mbuf *packet);
-void observer_input(struct rte_mbuf *packet);
+void observer_input(enum observer_producer producer, struct rte_mbuf *packet);
 void observer_terminal(enum observer_producer producer, const struct rte_mbuf *packet,
     enum observer_reason reason, uint64_t at_ns);
-void observer_input_end(uint16_t port, uint64_t next);
+void observer_input_end(enum observer_producer producer, uint16_t port, uint64_t next);
 /* Control-thread resource snapshots, before launch and after port close. */
 void observer_resources(uint16_t port, bool end, uint64_t total, uint64_t free_count,
     const struct rte_eth_stats *nic);

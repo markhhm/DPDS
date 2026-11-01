@@ -33,7 +33,7 @@ def emit(writer, row):
                                if key not in ('kind', 'run', 'stream_id', 'seq')})
 
 
-def capture(binary, family, root):
+def capture(binary, family, root, cores=5):
     config = dict(schema='hng-v1', lines=[])
     for port in (0, 1):
         config['lines'].append(dict(name=f'line-{port}', ingress_port=port, egress_port=1-port,
@@ -76,7 +76,7 @@ def capture(binary, family, root):
             shutil.copyfileobj(source, target, 65536)
     thread = threading.Thread(target=spool)
     thread.start()
-    command = [binary] + eal_arguments(5) + ['--no-pci', '--no-huge', '--no-telemetry',
+    command = [binary] + eal_arguments(cores) + ['--no-pci', '--no-huge', '--no-telemetry',
         '-m', '256', '--in-memory', f'--file-prefix=hng-m6-{os.getpid()}-{family}']
     command += [f'--vdev=net_pcap{p},rx_pcap={root}/in-{p}.pcap,tx_pcap={root}/out-{p}.pcap' for p in (0, 1)]
     command += ['--', '-c', str(config_path), '--observe-fd', str(writer.fileno()),
@@ -85,7 +85,7 @@ def capture(binary, family, root):
                                text=True)
     writer.close()
     try:
-        prefix = wait_for_output(process, b'layout=5-lcore')
+        prefix = wait_for_output(process, f'layout={cores}-lcore'.encode())
         time.sleep(0.25)
         process.send_signal(signal.SIGINT)
         output, _ = process.communicate(timeout=10)
@@ -171,7 +171,9 @@ def capture(binary, family, root):
             phase='steady', mask_bits=0, planned_survivors=COUNT) for p in (0, 1)])
     registration['sampling']['oversample_apps'] = []
     registration['capacity'].update(identity_index_capacity=2*COUNT+10, max_unresolved=2*COUNT+10,
-        handoff_queues=[dict(handoff_queue_id=f'handoff-{p}', producer=f'worker-{p}', consumer='tx', capacity=4096)
+        handoff_queues=[dict(handoff_queue_id=f'handoff-{p}', producer=f'worker-{p}', consumer='tx', capacity=4096,
+            extensions=dict(native_actors=dict(producer=dict(stream_id='native-host', producer=1+p),
+                                               consumer=dict(stream_id='native-host', producer=6 if cores == 7 and p else 3))))
                         for p in (0, 1)])
     registration['identity_profile'] = dict(kind='packet_occurrence', occurrence_policy='software-l2-identity',
                                            policy_sha256=hashlib.sha256(b'software-l2-identity').hexdigest())
