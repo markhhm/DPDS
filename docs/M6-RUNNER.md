@@ -11,20 +11,43 @@ Replace the example's manifest paths with sealed `hng-g2-manifest-v1` captures.
 Paths are relative to the matrix file. Each entry has a unique `id` equal to
 the manifest's `run`, a `manifest` path, and an optional `family` (`main`,
 `boundary`, or `trace`). Duplicate IDs or resolved manifest paths are rejected
-before execution. The output directory must be new; previous evidence is never
-overwritten. Run/scope mismatches invalidate that run. A missing or invalid run
+before execution. Use a new output directory or resume one created by this
+runner for the same matrix registration. Run/scope mismatches invalidate that run. A missing or invalid run
 remains in the summary and does not suppress later runs.
 IDs that collide with `summary.json` or another run's stderr filename are rejected.
 
 Each run uses a fresh process and produces the unchanged G2 `report.json`,
 `results.csv`, and `summary.txt`, plus a small `verdict.json`. The controller
-reads only that verdict and writes `summary.json`; it does not load full reports
-or capture streams. Stderr is retained as `<id>.stderr.log`. A reporter process
+reads the verdict and writes `summary.json`. Resume validation streams file hashes
+without loading full captures into memory. Stderr is retained as `<id>.stderr.log`. A reporter process
 failure or incomplete set of artifacts becomes INCONCLUSIVE. Any measured FAIL
 makes the matrix FAIL; otherwise every run must PASS. Exit codes are 0 for PASS,
 1 for FAIL, and 2 for invalid/inconclusive evidence or matrix input errors.
 An interrupt stops execution; partial output must not be treated as a final
-summary. Re-run into a fresh output directory.
+summary. After the controller and its worker have stopped, repeat the same
+command with the same output directory.
+
+## Resume an interrupted matrix
+
+The runner records the matrix registration in `.matrix.json` and finishes each
+run with an atomic `.complete.json` receipt. It skips a run only when its receipt,
+input hashes, output hashes and verdict agree. Completed PASS, FAIL and
+INCONCLUSIVE reports retain their original verdicts; resume does not turn a
+measurement failure into a retry. Input checks include configuration, calibration,
+traces and sealed streams. Pcapng mode also checks the pair registration and both
+raw capture files, and retains the converted bundle when it is unchanged.
+
+Incomplete runs, changed inputs or changed outputs cause that run's directory
+and stderr log to move under `.incomplete/<unique-id>/` before a fresh worker
+reruns the cell. Existing evidence is retained. The old matrix summary also
+moves aside when execution restarts. A new `summary.json` is published atomically
+only after every registered run has a verdict, including reused runs.
+
+Use one controller/worker group per output directory. Stop the old worker before
+resuming after a forced controller kill. A different matrix registration or an
+unrecognized existing directory is rejected without replacing its contents.
+Directories from older runner versions lack the registration/receipts; use a
+fresh output directory for those results or after changing reporter code.
 
 The runner preserves every required row and repeat verdict. It does not pool
 repeats, change sampling, or grant physical qualification. The current G2
