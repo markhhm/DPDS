@@ -23,9 +23,22 @@ RECORD = np.dtype([(name, dtype) for name, dtype in (
 CHUNK_BYTES = 8*1024*1024
 
 
+def _byte_rows(data, positions, width):
+    if (len(positions) and positions.dtype.kind == 'i' and data.ndim == 1
+            and data.dtype == np.uint8 and data.flags.c_contiguous):
+        first = int(positions[0])
+        stride = int(positions[1])-first if len(positions) > 1 else 0
+        # Python integers keep the buffer-bound proof exact even for hostile offsets.
+        if (first >= 0 and stride >= 0 and first+(len(positions)-1)*stride+width <= len(data)
+                and np.all(np.diff(positions) == stride)):
+            return np.ndarray((len(positions),width),dtype=np.uint8,buffer=data,
+                              offset=first,strides=(stride,1))
+    return data[positions[:,None]+np.arange(width)]
+
+
 def _words(data, positions, dtype):
     dtype = np.dtype(dtype)
-    return data[positions[:,None]+np.arange(dtype.itemsize)].view(dtype).reshape(-1)
+    return _byte_rows(data,positions,dtype.itemsize).view(dtype).reshape(-1)
 
 
 def _epb_run(data, cursor, size, order, limit):
@@ -50,7 +63,7 @@ class CaptureArrays:
 
     def _decode(self, data, positions, blocks, order):
         positions = np.asarray(positions, dtype=np.int64)
-        headers = data[positions[:,None]+8+np.arange(20)].view(order+'u4').reshape(-1,5)
+        headers = _byte_rows(data,positions+8,20).view(order+'u4').reshape(-1,5)
         interfaces, high, low, caplen, wirelen = headers.T
         padded = (caplen.astype(np.uint64)+3) & ~np.uint64(3)
         sizes = _words(data, positions+4, order+'u4')
@@ -100,7 +113,7 @@ class CaptureArrays:
         if np.any(caplen < 38):
             fail('PCAPNG_IDENTITY', 'truncated single-VLAN IPv4 probe')
         packet = positions+28
-        fixed = data[packet[:,None]+np.arange(38)]
+        fixed = _byte_rows(data,packet,38)
         if np.any(fixed[:,12] != 0x81) or np.any(fixed[:,13] != 0) or np.any(fixed[:,16] != 8) or np.any(fixed[:,17] != 0):
             fail('PCAPNG_IDENTITY', 'retained single-VLAN IPv4 UDP probes are required')
         ihl = (fixed[:,18] & 15).astype(np.int64)*4

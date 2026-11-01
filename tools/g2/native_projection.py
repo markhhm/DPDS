@@ -19,7 +19,15 @@ def _require(condition, message):
 
 
 def _in(values, choices):
-    return np.isin(values, tuple(choices))
+    choices = tuple(choices)
+    if not choices:
+        return np.zeros(values.shape, dtype=bool)
+    if len(choices) <= 3:
+        result = values == choices[0]
+        for choice in choices[1:]:
+            result |= values == choice
+        return result
+    return np.isin(values, choices)
 
 
 class NativeProjection:
@@ -62,9 +70,8 @@ class NativeProjection:
         except (ValueError, TypeError, KeyError, IndexError, OverflowError) as error:
             raise StreamError('NATIVE_SEMANTIC', str(error), 'INCONCLUSIVE') from error
 
-    def _ingress(self, events, items):
+    def _ingress(self, events, packet_items):
         kind = events['kind']
-        packet_items = items[kind[items['event_index']] == 0]
         packet_ports = np.full(len(events), -1, dtype=np.int64)
         packet_seq = np.zeros(len(events), dtype=np.uint64)
         arrival = np.zeros(len(events), dtype=np.uint64)
@@ -109,56 +116,75 @@ class NativeProjection:
             if end_positions.size:
                 self._unused_ends.add(port)
         for line in range(len(self.lines)):
-            selected = packet_items[packet_items['line'] == line]
+            selected = packet_items['selection_seq'][packet_items['line'] == line]
             want = np.arange(self._packet_selection[line], self._packet_selection[line]+len(selected), dtype=np.uint64)
-            _require(np.array_equal(selected['selection_seq'], want), 'raw per-line selection sequence is not contiguous')
+            _require(np.array_equal(selected, want), 'raw per-line selection sequence is not contiguous')
             self._packet_selection[line] += len(selected)
 
-    def _actors(self, events, items):
+    def _actors(self, events, items, item_kinds):
         kind, producer = events['kind'], events['producer']
-        _require(not np.any((kind == 7) & (producer != 4)), 'resources require the control actor')
-        markers = _in(kind, (3, 4))
-        _require(not np.any(markers & ~_in(events['port'], self.physical_ports)), 'marker on unregistered port')
+        _require(not np.any(producer[kind == 7] != 4), 'resources require the control actor')
+        markers = (kind == 3) | (kind == 4)
+        marker_ports = events['port'][markers]
+        _require(np.all(_in(marker_ports, self.physical_ports)), 'marker on unregistered port')
         split, ports = self.header['layout'] == 'per-direction', self.header['ports']
-        marker_owner = (events['port'] == ports[-1]) & split
-        _require(not np.any(markers & (producer != np.where(marker_owner, 5, 0))), 'RX marker actor differs from port owner')
-        indexes = items['event_index']
-        bases = np.cumsum(events['count'], dtype=np.int64)-events['count']
-        ordinal = np.arange(len(items))-bases[indexes]
-        active = _in(kind[indexes], (0, 1, 2, 5, 6))
-        items, indexes, ordinal = items[active], indexes[active], ordinal[active]
+        marker_actors = np.where(marker_ports == ports[-1], 5, 0) if split else 0
+        _require(not np.any(producer[markers] != marker_actors), 'RX marker actor differs from port owner')
+        for stage in (0, 1, 2, 5, 6):
+            selected = np.flatnonzero(item_kinds == stage)
+            if not selected.size:
+                continue
+            indexes = items['event_index'][selected]
+            actors, ingress = producer[indexes], items['ingress_port'][selected]
+            if split:
+                _require(np.all(_in(ingress, ports)), 'packet actor refers to unregistered native port')
+                owner = (ingress == ports[-1]).astype(np.uint8)
+                rx, tx = np.where(owner, 5, 0), np.where(owner, 6, 3)
+                worker = actors == 1+owner
+            else:
+                rx, tx = 0, 3
+                worker = (actors == 1) | ((actors == 2) & (ingress == ports[-1]))
+            if stage == 0:
+                allowed = actors == rx
+            elif stage in (1, 5):
+                allowed = worker
+            elif stage == 6:
+                allowed = actors == tx
+            else:
+                reason = events['reason'][indexes]
+                allowed = np.where(reason == 5, worker | (actors == rx),
+                    np.where((reason == 6) | (reason == 7), actors == tx, worker))
+                _require(np.all(reason < len(REASONS)), 'terminal actor differs from reason stage')
+            _require(np.all(allowed), 'packet actor differs from port owner')
+            if stage in (5, 6):
+                _require(np.all(events['port'][indexes] == self._line_egress[items['line'][selected]]), 'native egress differs from registered line')
+            if stage == 5:
+                bases = np.cumsum(events['count'], dtype=np.int64)-events['count']
+                ordinal = (selected-bases[indexes]).astype(np.uint64)
+                first = events['first_handoff_seq'][indexes]
+                _require(not np.any((items['handoff_queue'][selected] != events['handoff_queue'][indexes]) |
+                    (items['handoff_seq'][selected] != first+ordinal) | (first > U64-ordinal-np.uint64(1))), 'dispatch item differs from queue prefix')
+            elif stage == 6:
+                _require(not np.any(items['handoff_seq'][selected] == U64), 'TX handoff ordinal uses uint64 sentinel')
+                if split:
+                    _require(np.all(items['handoff_queue'][selected] == owner), 'TX item belongs to another handoff owner')
+                gates = items['gate_ns'][selected]
+                _require(not np.any((gates < events['gate_ns'][indexes]) | (gates > events['submit_before_ns'][indexes])), 'item gate outside TX selection interval')
+        dispatch = kind == 5
+        _require(not np.any(producer[dispatch] != 1+events['handoff_queue'][dispatch].astype(np.uint64)), 'dispatch queue differs from scheduler actor')
+        attempts = np.flatnonzero(kind == 6)
+        allowed_tx = (3, 6) if split else (3,)
+        _require(np.all(_in(producer[attempts], allowed_tx)) and
+            not np.any(events['accepted_count'][attempts] > events['count'][attempts]), 'invalid TX actor or accepted prefix')
         if split:
-            _require(np.all(_in(items['ingress_port'], ports)), 'packet actor refers to unregistered native port')
-        kinds, actors = kind[indexes], producer[indexes]
-        owner = ((items['ingress_port'] == ports[-1]) & split).astype(np.uint8)
-        rx, tx = np.where(owner, 5, 0), np.where(owner, 6, 3)
-        worker = actors == 1+owner
-        if not split:
-            worker |= (actors == 2) & (items['ingress_port'] == ports[-1])
-        allowed = np.where(kinds == 0, actors == rx,
-                  np.where(_in(kinds, (1, 5)), worker, np.where(kinds == 6, actors == tx, worker | (actors == rx) | (actors == tx))))
-        _require(np.all(allowed), 'packet actor differs from port owner')
-        terminal = kinds == 2
-        reason = events['reason'][indexes]
-        stage = np.where(reason == 5, worker | (actors == rx), np.where(_in(reason, (6, 7)), actors == tx, worker))
-        _require(not np.any(terminal & ((reason >= len(REASONS)) | ~stage)), 'terminal actor differs from reason stage')
-        dispatch, attempts = kind == 5, kind == 6
-        _require(not np.any((kinds == 6) & (items['handoff_seq'] == U64)), 'TX handoff ordinal uses uint64 sentinel')
-        _require(not np.any(dispatch & (producer != 1+events['handoff_queue'].astype(np.uint64))), 'dispatch queue differs from scheduler actor')
-        _require(not np.any(attempts & (~_in(producer, (3, 6)) | ((producer == 6) & (not split)) | (events['accepted_count'] > events['count']))), 'invalid TX actor or accepted prefix')
-        _require(not np.any(_in(kinds, (5, 6)) & (events['port'][indexes] != self._line_egress[items['line']])), 'native egress differs from registered line')
-        selected = kinds == 5
-        first = events['first_handoff_seq'][indexes]
-        _require(not np.any(selected & ((items['handoff_queue'] != events['handoff_queue'][indexes]) | (items['handoff_seq'] != first+ordinal.astype(np.uint64)) | (first > U64-ordinal.astype(np.uint64)-np.uint64(1)))), 'dispatch item differs from queue prefix')
-        if split:
-            _require(not np.any((kinds == 6) & (items['handoff_queue'] != owner)), 'TX item belongs to another handoff owner')
-            for actor, owner_index in ((3, 0), (6, 1)):
-                rows = np.flatnonzero(attempts & (producer == actor))
-                egress = {line['egress_port'] for line in self.lines if line['ingress_port'] == ports[owner_index]}
-                _require(not np.any(events['consumed_dispatch'][rows, 1-owner_index]) and np.all(_in(events['port'][rows], egress)), 'TX prefix or egress belongs to another owner')
-        _require(not np.any(attempts & ((events['gate_ns'] > events['submit_before_ns']) | (events['submit_before_ns'] > events['submit_after_ns']) | (events['attempt_id'] == U64))), 'impossible TX call timestamp or ordinal')
-        _require(not np.any((kinds == 6) & ((items['gate_ns'] < events['gate_ns'][indexes]) | (items['gate_ns'] > events['submit_before_ns'][indexes]))), 'item gate outside TX selection interval')
-        _require(not np.any((kind == 1) & (events['actual_selection_seq'] == U64)), 'offer selection ordinal uses uint64 sentinel')
+            for actor, owner in ((3, 0), (6, 1)):
+                rows = attempts[producer[attempts] == actor]
+                egress = {line['egress_port'] for line in self.lines if line['ingress_port'] == ports[owner]}
+                _require(not np.any(events['consumed_dispatch'][rows, 1-owner]) and np.all(_in(events['port'][rows], egress)), 'TX prefix or egress belongs to another owner')
+        _require(not np.any((events['gate_ns'][attempts] > events['submit_before_ns'][attempts]) |
+            (events['submit_before_ns'][attempts] > events['submit_after_ns'][attempts]) |
+            (events['attempt_id'][attempts] == U64)), 'impossible TX call timestamp or ordinal')
+        _require(not np.any(events['actual_selection_seq'][kind == 1] == U64), 'offer selection ordinal uses uint64 sentinel')
 
     def _snapshot(self, events, snapshots):
         emitted = ((events['kind'] == 5) & (events['count'] > 0)) | (events['kind'] == 6)
@@ -198,14 +224,16 @@ class NativeProjection:
                 _require(np.array_equal(selected, want), 'native producer sequence gap')
                 if selected.size:
                     self.seen[producer], self.counts[producer] = int(selected[-1]), self.counts[producer]+len(selected)
-            active = _in(kinds[items['event_index']], (0, 1, 2, 5, 6))
+            indexes = items['event_index']
+            item_kinds = kinds[indexes]
+            active = (item_kinds <= 2) | (item_kinds == 5) | (item_kinds == 6)
             _require(not np.any((items['identity_kind'] > 2) | (items['selected_late'] > 2) |
                 (items['input_error'] > 2) | (items['handoff_queue'] > 1) |
                 (items['classified'] & (items['line'] >= len(self.lines))) |
                 ((items['identity_kind'] != 0) & (items['identity_kind'] != self.header['identity_policy']+1))), 'invalid native item identity, flags or line')
             _require(not np.any(active & (~items['classified'] | (items['identity_kind'] == 0))),
                      'unrepresentable native packet identity or classification')
-            packets = items[kinds[items['event_index']] == 0]
+            packets = items[item_kinds == 0]
             _require(not np.any((packets['ingress_port'] != self._line_ingress[packets['line']]) |
                 (packets['vlan_id'] != self._line_vlan[packets['line']]) | (packets['vlan_id'] > 4094) | packets['stripped']), 'native line or VLAN differs from raw input')
             length = np.maximum(packets['length'].astype(np.uint64)+4, 64)
@@ -213,8 +241,8 @@ class NativeProjection:
                 (length < self._line_min[packets['line']]) | (length > self._line_max[packets['line']]) |
                 (packets['selection_seq'] == U64)), 'native length, segments or ordinal is unrepresentable')
             _require(not np.any(active & (items['ingress_seq'] == U64)), 'native ingress ordinal uses uint64 sentinel')
-            self._actors(events, items)
-            self._ingress(events, items)
+            self._actors(events, items, item_kinds)
+            self._ingress(events, packets)
             self._snapshot(events, snapshots)
             if len(events):
                 self.at_ns = max(self.at_ns, int(events['at_ns'].max()), int(events['submit_after_ns'].max()), int(items['arrival_ns'].max(initial=0)))
@@ -228,28 +256,35 @@ class NativeProjection:
                 count = int(np.count_nonzero((kinds == kind) & host_emits))
                 if count:
                     self.diagnostics[name] += count
-            indexes = items['event_index']
-            item_kinds = kinds[indexes]
-            bases = np.cumsum(events['count'], dtype=np.int64)-events['count']
-            ordinal = np.arange(len(items))-bases[indexes]
+            terminal_items = np.flatnonzero(item_kinds == 2)
+            terminal_ports = items['ingress_port'][terminal_items]
+            terminal_reasons = events['reason'][indexes[terminal_items]]
+            attempted_items = np.flatnonzero(item_kinds == 6)
+            if attempted_items.size:
+                bases = np.cumsum(events['count'], dtype=np.int64)-events['count']
+                attempted_events = indexes[attempted_items]
+                ordinal = attempted_items-bases[attempted_events]
+                accepted_items = attempted_items[ordinal < events['accepted_count'][attempted_events]]
+            else:
+                accepted_items = attempted_items
+            accepted_ports = items['ingress_port'][accepted_items]
+            packet_ports = packets['ingress_port']
+            host_items = np.flatnonzero((item_kinds == 1) | (item_kinds == 2))
+            host_ports = items['ingress_port'][host_items]
             ports = np.unique(np.r_[np.asarray(tuple(self.input_ports), dtype=np.uint16), items['ingress_port'][active]])
             for port_value in ports:
                 port = int(port_value)
-                owned = items['ingress_port'] == port
-                received = int(np.count_nonzero(owned & (item_kinds == 0)))
-                accepted = int(np.count_nonzero(owned & (item_kinds == 6) & (ordinal < events['accepted_count'][indexes])))
-                terminal = owned & (item_kinds == 2)
-                if port in self.input_ports or received or accepted or np.any(terminal):
+                received = int(np.count_nonzero(packet_ports == port))
+                accepted = int(np.count_nonzero(accepted_ports == port))
+                reasons = np.bincount(terminal_reasons[terminal_ports == port], minlength=len(REASONS))
+                if port in self.input_ports or received or accepted or np.any(reasons):
                     custody = self.custody.setdefault(port, Counter())
                     custody['rx_returned'] += received
                     custody['tx_accepted'] += accepted
-                    for reason, name in enumerate(REASONS):
-                        count = int(np.count_nonzero(terminal & (events['reason'][indexes] == reason)))
-                        if count:
-                            custody[name] += count
-                self._bound(port, items['arrival_ns'][owned & (item_kinds == 0)])
-                host_rows = indexes[owned & _in(item_kinds, (1, 2))]
-                self._bound(port, events['at_ns'][host_rows])
+                    for reason in np.flatnonzero(reasons):
+                        custody[REASONS[reason]] += int(reasons[reason])
+                self._bound(port, packets['arrival_ns'][packet_ports == port])
+                self._bound(port, events['at_ns'][indexes[host_items[host_ports == port]]])
             mapped = {}
             for port in self.manifest['ports']:
                 mapped.setdefault(port['egress_port'], port['ingress_port'])

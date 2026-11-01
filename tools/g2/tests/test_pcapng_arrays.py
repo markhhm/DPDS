@@ -18,6 +18,53 @@ class CaptureArraysTests(unittest.TestCase):
         from tools.g2.pcapng_arrays import CaptureArrays
         return CaptureArrays(path, {0: 3}, start, end, **kwargs)
 
+    def test_byte_views_preserve_words_and_fall_back_for_irregular_offsets(self):
+        from tools.g2.pcapng_arrays import _byte_rows, _words
+        data=np.arange(64,dtype=np.uint8);positions=np.array([1,9,17],dtype=np.int64)
+        rows=_byte_rows(data,positions,4)
+        np.testing.assert_array_equal(rows,[[1,2,3,4],[9,10,11,12],[17,18,19,20]])
+        self.assertTrue(np.shares_memory(rows,data))
+        for dtype,expected in [('>u2',[258,2314,4370]),('<u2',[513,2569,4625])]:
+            np.testing.assert_array_equal(_words(data,positions,dtype),expected)
+        for offsets,expected in [([1,9,18],[[1,2],[9,10],[18,19]]),
+                                 ([-2,0],[[62,63],[0,1]]),([3,3],[[3,4],[3,4]])]:
+            np.testing.assert_array_equal(_byte_rows(data,np.array(offsets,dtype=np.int64),2),expected)
+        np.testing.assert_array_equal(_byte_rows(data[::2],np.array([1,3,5]),2),[[2,4],[6,8],[10,12]])
+        self.assertEqual(_byte_rows(data,np.array([],dtype=np.int64),4).shape,(0,4))
+        for offsets in ([63],[0,2**63-1,-2]):
+            with self.assertRaises(IndexError): _byte_rows(data,np.array(offsets,dtype=np.int64),2)
+        with self.assertRaises(IndexError): _byte_rows(data,np.array([0.5,2.5]),2)
+
+    def test_mixed_ipv4_options_and_record_sizes_match_streaming_reader(self):
+        manifest=dict(lines=[dict(name='line',ingress_port=3,egress_port=4,vlan_id=100)],
+                      identity_profile=dict(probe_port=9000))
+        for endian in ('<','>'):
+            with self.subTest(endian=endian),tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'capture.pcapng';other=Path(tmp)/'options.pcapng'
+                pcapng(path,list(range(7)),endian=endian,caplen=59)
+                pcapng(other,list(range(7)),endian=endian,caplen=99,ip_options=40)
+                variants=[]
+                for source in (path,other):
+                    blocks=[];data=source.read_bytes();cursor=0
+                    while cursor<len(data):
+                        kind,size=struct.unpack_from(endian+'II',data,cursor)
+                        blocks.append((kind,data[cursor:cursor+size]));cursor+=size
+                    variants.append(blocks)
+                packet=0;combined=[]
+                for index,(kind,block) in enumerate(variants[0]):
+                    if kind==6:
+                        if packet%2: block=variants[1][index][1]
+                        packet+=1
+                    combined.append(block)
+                path.write_bytes(b''.join(combined))
+                reference=Capture(path,{0:3},0,10**9);reader=self.reader(path)
+                rows=np.concatenate(list(reader.batches()))
+                for row,(interface,raw,packet,length) in zip(rows,list(reference.packets())):
+                    expected=observation(packet,length,3,'before',manifest)
+                    self.assertEqual(int(row['sequence']),int(expected['external_identity'].rsplit(':',1)[1]))
+                    self.assertEqual((int(row['raw']),int(row['length'])),(raw,length))
+                self.assertEqual(reader.descriptions,reference.descriptions)
+
     def test_epb_run_stops_at_first_nonmatching_frame(self):
         from tools.g2.pcapng_arrays import _epb_run
         for endian in ('<','>'):

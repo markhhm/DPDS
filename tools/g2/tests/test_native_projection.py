@@ -242,6 +242,51 @@ class NativeProjectionTests(unittest.TestCase):
                 self.assertEqual(projection.at_ns, adapter.at_ns)
                 self.assertEqual(counters, [json.loads(row) for row in outputs[2].getvalue().splitlines()][1:-1])
 
+    def test_terminal_reason_counts_and_stage_actors_match_legacy_in_mixed_batches(self):
+        for layout in ('shared', 'per-direction'):
+            with self.subTest(layout=layout):
+                cfg, reg, header, events = fixture(reverse=True, layout=layout)
+                events[3]['reason'] = 255  # Nonterminal reason bytes are not normalized.
+                for owner in (0, 1):
+                    for reason in range(len(REASONS)):
+                        producer = (3 if owner == 0 or layout == 'shared' else 6) if reason in (6, 7) else 1+owner
+                        if reason == 5:
+                            producer = 5 if owner and layout == 'per-direction' else 0
+                        packet = item(100+reason, 0, 100, owner)
+                        packet[4], packet[5] = 2**64-1, 2**64-1
+                        events.append(raw_event(2, producer, [packet], reason=reason, at_ns=500+reason))
+                raw = encode(header, copy.deepcopy(events))
+                text, outputs = io.StringIO(), [io.StringIO() for _ in range(3)]
+                decode(io.BytesIO(raw), text)
+                adapter = NativeAdapter(io.StringIO(text.getvalue()), *outputs, run=reg['run'], lines=cfg['lines'])
+                self.assertTrue(adapter.process()['complete'])
+                projection, _, counters, _ = self.project(cfg, reg, header, events, 7)
+                self.assertEqual(projection.custody, adapter.custody)
+                self.assertEqual(projection.logical_emitted, adapter.logical_emitted[:2])
+                self.assertEqual(counters, [json.loads(row) for row in outputs[2].getvalue().splitlines()][1:-1])
+
+    def test_mixed_ingress_tx_accepted_prefix_preserves_per_port_counters(self):
+        cfg, reg, header, events = fixture(reverse=True, layout='shared')
+        cfg['lines'][1]['egress_port'] = reg['lines'][1]['egress_port'] = 1
+        events = [row for row in events if not (row['kind'] in (5, 6) and row['port'] == 0)]
+        offered = []
+        for index, owner in enumerate((0, 1, 0, 1)):
+            packet = item(100+index, index, 500, owner)
+            packet[5] = 600
+            offered.append(packet)
+        events.append(raw_event(6, 3, offered, port=1, gate_ns=600, submit_before_ns=610,
+            submit_after_ns=611, accepted_count=3, consumed_dispatch=[1, 0]))
+        raw = encode(header, copy.deepcopy(events))
+        text, outputs = io.StringIO(), [io.StringIO() for _ in range(3)]
+        decode(io.BytesIO(raw), text)
+        adapter = NativeAdapter(io.StringIO(text.getvalue()), *outputs, run=reg['run'], lines=cfg['lines'])
+        self.assertTrue(adapter.process()['complete'])
+        projection, _, counters, _ = self.project(cfg, reg, header, events, 3)
+        self.assertEqual(projection.custody[0]['tx_accepted'], 3)
+        self.assertEqual(projection.custody[1]['tx_accepted'], 1)
+        self.assertEqual(projection.custody, adapter.custody)
+        self.assertEqual(counters, [json.loads(row) for row in outputs[2].getvalue().splitlines()][1:-1])
+
     def test_wrong_actual_selection_sequence_is_preserved_for_sampled_q_failure(self):
         cfg, reg, header, events = fixture()
         events[3]['actual_selection_seq'] = 999

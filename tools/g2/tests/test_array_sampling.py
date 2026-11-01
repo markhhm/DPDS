@@ -138,7 +138,7 @@ class ArraySamplingTests(unittest.TestCase):
                                       scalar_mask('mixed', 7, 2, rows))
 
     def test_chunk_boundary_and_every_decimal_width_match_scalar(self):
-        rows = items(8209)
+        rows = items(array_sampling._CHUNK_ROWS + 17)
         rows['ingress_port'] = 65535
         rows['source'] = 2**32 - 1
         rows['destination'] = 0
@@ -150,10 +150,11 @@ class ArraySamplingTests(unittest.TestCase):
                                       scalar_mask('chunks', 2**63, 4, rows))
 
     def test_uniform_flow_chunks_match_scalar_without_sorting(self):
-        rows = items(8209)
+        rows = items(array_sampling._CHUNK_ROWS + 17)
         for field in ('ingress_port', 'source', 'destination', 'source_port', 'destination_port'):
             rows[field] = rows[field][0]
-        rows['identity'][8190:8195] = [2**53 - 1, 2**53, 2**53 + 1, 2**64 - 2, 2**64 - 1]
+        boundary = array_sampling._CHUNK_ROWS
+        rows['identity'][boundary - 2:boundary + 3] = [2**53 - 1, 2**53, 2**53 + 1, 2**64 - 2, 2**64 - 1]
         run = 'uniform-台灣😀"\\\n'
         for kind in (1, 2, None):
             rows['identity_kind'] = 1 if kind is None else kind
