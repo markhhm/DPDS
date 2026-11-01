@@ -82,11 +82,11 @@ class LiveCustodyTests(unittest.TestCase):
             else: broken['extensions']['native_observer_v1'] = dict(producer=3,producer_seq=1,order=0)
             with self.assertRaises(StreamError): validate_record(broken,'host')
 
-    def audit(self, rows, events, configuration=None, registration=None):
+    def audit(self, rows, events, configuration=None, registration=None, traces=None):
         active = {key(row):dict(expected=row, offer=True, terminal=None, tx=False,
                                dispatch=None, pending=False) for row in rows}
         issues = []
-        checker = LiveCustody(configuration or config(), {}, registration or manifest(), active,
+        checker = LiveCustody(configuration or config(), traces or {}, registration or manifest(), active,
                               lambda code,status,row=None:issues.append((code,status)))
         checker.input_next = {port:max((row["ingress_seq"]+1 for row in rows if row["ingress_port"]==port),default=0)
                               for port in checker.input_next}
@@ -94,6 +94,51 @@ class LiveCustodyTests(unittest.TestCase):
         for event in envelop(events):
             checker.event(event)
         return checker, active, issues
+
+    def test_dispatch_certificate_uses_closed_lower_bound_and_all_line_minima(self):
+        from pathlib import Path
+        import tempfile
+        from tools.g2.custody import audit_host
+        cases = [('fixed-boundary', 89, 100, None, False, False, True),
+                 ('one-short', 88, 100, None, False, False, False),
+                 ('zero-delay-boundary', 189, 0, None, False, False, True),
+                 ('unknown', None, 100, None, False, False, False),
+                 ('end', None, 100, None, False, True, True),
+                 ('competing-line', 89, 100, None, True, False, False),
+                 ('trace-boundary', 89, 0, 100, False, False, True),
+                 ('trace-lower-step', 89, 0, 0, False, False, False)]
+        for label, through, minimum, trace_minimum, competing, ended, safe in cases:
+            cfg, reg, traces = config(), manifest(), {}
+            cfg['lines'][0]['model']['t_ns'] = minimum
+            if competing:
+                other = copy.deepcopy(cfg['lines'][0])
+                other.update(name='other', vlan_id=200)
+                other['model']['t_ns'] = 0
+                cfg['lines'].append(other)
+            if trace_minimum is not None:
+                cfg['lines'][0]['trace'] = dict(path='trace', sha256='0'*64)
+                traces['cable'] = dict(end_ns=1000, terminal='error', terminal_horizon_ns=None,
+                    outage_action='hold', loss_seed=0, rows=[
+                        dict(at_ns=0, t_ns=100, loss='0', outage=False),
+                        dict(at_ns=200, t_ns=trace_minimum, loss='0', outage=False)])
+            reg['retention']['mode'] = 'full'
+            reg['capacity']['join_disk_bytes'] = 8_000_000
+            row = expected()
+            events = [dispatch([row]), attempt([row])]
+            for event in events:
+                event['frontiers']['0'].update(through_ns=through, input_complete=ended)
+            _, _, issues = self.audit([row], events, cfg, reg, traces)
+            with tempfile.TemporaryDirectory() as directory:
+                audit = audit_host(cfg, traces, reg, iter([row]),
+                                   iter(envelop([offer(row), *events])), Path(directory))
+            with self.subTest(case=label, checker='live'):
+                self.assertEqual(('unsafe_dispatch_frontier', 'INCONCLUSIVE') in issues, not safe)
+                if safe:
+                    self.assertEqual(issues, [])
+            with self.subTest(case=label, checker='disk'):
+                self.assertEqual(bool(audit.counts['unsafe_dispatch_frontier']), not safe)
+                if safe:
+                    self.assertEqual(audit.issues, [])
 
     def test_zero_partial_and_full_attempts_preserve_the_unaccepted_suffix(self):
         rows = [expected(i, release=190+i) for i in range(3)]

@@ -16,6 +16,9 @@ class LiveCustody:
         self.active, self.issue = active, issue
         self.lines = {row["name"]:row for row in config["lines"]}
         self.traces = {name:value if isinstance(value, Trace) else Trace(value) for name,value in traces.items()}
+        self.min_delay = {name:min(row['t_ns'] for row in self.traces[name].rows)
+                          if name in self.traces else line['model']['t_ns']
+                          for name,line in self.lines.items()}
         self.ports = {row["egress_port"]:row["queue_id"] for row in manifest["ports"]}
         self.queues = {row["handoff_queue_id"]:dict(next=0, consumed=0, items={},
             capacity=row["capacity"], producer=None, consumer=None, egress=None, actors=handoff_actors(row))
@@ -197,11 +200,15 @@ class LiveCustody:
                     self.issue("port_mapping", "INVALID", row)
                 if not state["offer"]:
                     self.issue("dispatch_before_offer", "INCONCLUSIVE", row)
-                relevant = {line["ingress_port"] for line in self.lines.values() if line["egress_port"] == event["egress_port"]}
-                if not all(event["frontiers"][str(port)]["input_complete"] or
-                           event["frontiers"][str(port)]["through_ns"] is not None and
-                           event["frontiers"][str(port)]["through_ns"] >= row["release_ns"] for port in relevant):
-                    self.issue("unsafe_dispatch_frontier", "INCONCLUSIVE", row)
+                for name,line in self.lines.items():
+                    if line['egress_port'] != event['egress_port']:
+                        continue
+                    frontier = event['frontiers'][str(line['ingress_port'])]
+                    through = frontier['through_ns']
+                    if not frontier['input_complete'] and (through is None or
+                            through + 1 + self.min_delay[name] < row['release_ns']):
+                        self.issue("unsafe_dispatch_frontier", "INCONCLUSIVE", row)
+                        break
                 ordinal = event["first_handoff_seq"]+index
                 if len(queue["items"])>=queue["capacity"]:
                     self.issue("handoff_capacity", "INCONCLUSIVE", row)

@@ -73,6 +73,10 @@ distinct ownership; an acquire/release exchange transfers a completed slot.
 A writer paused during its next copy leaves its last completed publication
 readable. Neither path waits or retries, and no frontier or input prefix is
 invented. Invalid snapshot port sets still latch malformed evidence.
+Normalized frontiers are closed: a native lower bound W becomes `through_ns=W-1`.
+Dispatch proof uses `through_ns+1+minimum_delay` for every line feeding the
+selected egress. The trace minimum covers the whole registered profile, including
+future delay reductions; unknown relevant frontiers still cannot certify output.
 Each offered item records the actual
 final whole-burst gate-check time for its line. The submit call has separate
 before/after times and the actual accepted prefix, including zero and retries.
