@@ -109,10 +109,12 @@ def _json(payload):
 
 def _header(payload):
     value = _json(payload)
-    fields(value, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes', 'layout', 'ports'))
+    fields(value, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes', 'layout', 'ports'), ('capture_scope',))
     if value['schema'] != 'hng-native-v2':
         raise ValueError('unknown native binary header schema')
     uint(value['identity_policy'], 'identity policy', 1)
+    if 'capture_scope' in value and (value['capture_scope'] != 'physical' or value['identity_policy'] != 0):
+        raise ValueError('physical native capture requires stage1 identity')
     if not uint(value['probe_port'], 'probe port', 65535):
         raise ValueError('native probe port must be positive')
     if not uint(value['capacity'], 'queue capacity', 65536) or not uint(value['record_bytes'], 'record size', 65536):

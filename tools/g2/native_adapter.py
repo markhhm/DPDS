@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Normalize the software-only native pipe into sealed oracle input streams.
+"""Normalize the native metadata stream into sealed oracle input streams.
 
 All destinations are open text streams. The adapter forwards every input to the
 oracle; retention and its default 1/1024 sample belong to the downstream consumer.
@@ -46,6 +46,7 @@ class NativeAdapter:
         self.writers = [StreamWriter(target, run, f'native-{role}', role, clock_id,
                         producer='native-adapter', producer_commit=producer_commit)
                         for role, target in zip(('ingress', 'host', 'counters'), (ingress, host, counters))]
+        self.scope = 'software-only'
         self.producers = PRODUCERS
         self.provenance_key = "native_observer_v1"
         self.seen = [0]*self.producers
@@ -98,7 +99,7 @@ class NativeAdapter:
             if name.startswith('nic_') or name == 'rx_returned':
                 descriptors[name]['semantics'] = 'overlapping_diagnostic'
             if name.startswith('nic_'):
-                descriptors[name]['source'] = 'software-pmd'
+                descriptors[name]['source'] = 'physical-pmd' if self.scope == 'physical' else 'software-pmd'
             if value is None:
                 descriptors[name]['reason'] = 'native-evidence-unavailable'
         self._emit(2, 'counter', scope=scope, scope_id=scope_id, phase=phase, at_ns=at_ns,
@@ -412,10 +413,15 @@ class NativeAdapter:
         try:
             self.header = self._read()
             version = self.header.get('schema') if isinstance(self.header, dict) else None
-            fields(self.header, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes') + (('layout', 'ports') if version == 'hng-native-v2' else ()))
+            fields(self.header, ('schema', 'identity_policy', 'probe_port', 'capacity', 'record_bytes') + (('layout', 'ports') if version == 'hng-native-v2' else ()),
+                   ('capture_scope',) if version == 'hng-native-v2' else ())
             if version not in ('hng-native-v1', 'hng-native-v2'):
                 raise ValueError('unknown native schema')
             uint(self.header['identity_policy'], 'identity policy', 1)
+            if 'capture_scope' in self.header:
+                if self.header['capture_scope'] != 'physical' or self.header['identity_policy'] != 0:
+                    raise ValueError('physical native capture requires stage1 identity')
+                self.scope = 'physical'
             uint(self.header['probe_port'], 'probe port', 65535)
             if not uint(self.header['capacity'], 'queue capacity', 65536) or not uint(self.header['record_bytes'], 'record size', 65536):
                 raise ValueError('native capacity/record width must be positive')
@@ -477,7 +483,7 @@ class NativeAdapter:
         for writer in self.writers:
             writer.finish(complete=complete, dropped_records=dropped)
         return dict(complete=complete, errors=dict(self.errors), raw_consumed_sha256=self.raw_hash.hexdigest(),
-                    raw_producer_health=self.health, scope='software-only', g2_qualified=False)
+                    raw_producer_health=self.health, scope=self.scope, g2_qualified=False)
 
 
 def main():
