@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Matrix CLI preserves the existing reporter's sealed-run verdicts."""
 import json
+import os
+import signal
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -176,3 +179,238 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(summary['runs'][0]['measurement_status'],report['measurement_status'])
             self.assertEqual(report['rows'][0]['timing']['main']['n'],400)
             self.assertTrue((root/'out/main-r0/results.csv').is_file())
+
+
+class MatrixResumeTests(unittest.TestCase):
+    def matrix_fixture(self, root):
+        def late(rows, registration):
+            for row in rows['receiver']:
+                row['receive_ns'] += 200_000
+                row['timestamp']['raw'] += 200_000
+
+        def unavailable(rows, registration):
+            rows['receiver'][0]['timestamp']['mapping_id'] = 'missing'
+
+        runs = []
+        for run, change in [('first', None), ('second', late), ('third', unavailable)]:
+            capture = root / run
+            capture.mkdir()
+            fixture(capture, run=run, mutate=change)
+            runs.append(dict(id=run, manifest=f'{run}/manifest.json'))
+        matrix = root / 'matrix.json'
+        matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', scope='software-only',
+                                          plan={}, runs=runs)))
+        return matrix
+
+    def cli(self, matrix, output):
+        return subprocess.run([sys.executable, '-m', 'tools.g2.matrix', str(matrix), '--out', str(output)],
+                              capture_output=True, text=True, timeout=30)
+
+    def saved_files(self, root):
+        return {str(path.relative_to(root)): (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+                for path in root.rglob('*') if path.is_file()}
+
+    def test_killed_matrix_resumes_completed_and_partial_runs_like_uninterrupted_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrix = self.matrix_fixture(root)
+            baseline, output = root / 'baseline', root / 'resumed'
+            clean = self.cli(matrix, baseline)
+            self.assertEqual(clean.returncode, 1, clean.stderr)
+            self.assertEqual([r['measurement_status'] for r in
+                              json.loads((baseline / 'summary.json').read_text())['runs']],
+                             ['PASS', 'FAIL', 'INCONCLUSIVE'])
+            ready = root / 'worker-ready'
+            # Block only after the real first reporter has completed. The second
+            # cell leaves partial output, as a killed reporter/converter would.
+            worker = (
+                'from pathlib import Path; import signal,sys; '
+                'from tools.g2.matrix import report_one; '
+                f'ready=Path({str(ready)!r}); '
+                '\nif sys.argv[3]=="second":\n'
+                ' path=Path(sys.argv[2]); path.mkdir(); '
+                '(path/"partial.bin").write_bytes(b"interrupted evidence"); '
+                'ready.touch(); signal.pause()\n'
+                'sys.exit(report_one(*sys.argv[1:]))'
+            )
+            controller = ('import tools.g2.matrix as m; import sys; '
+                          f'm.WORKER={worker!r}; sys.exit(m.main())')
+            process = subprocess.Popen([sys.executable, '-c', controller, str(matrix), '--out', str(output)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                       start_new_session=True)
+            try:
+                deadline = time.monotonic() + 20
+                while not ready.exists():
+                    self.assertIsNone(process.poll(), 'matrix exited before the interruption checkpoint')
+                    self.assertLess(time.monotonic(), deadline, 'reporter did not reach checkpoint')
+                    time.sleep(0.01)
+                saved = self.saved_files(output / 'first')
+                self.assertTrue(saved)
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=5)
+                if process.stderr is not None:
+                    process.stderr.close()
+            resumed = self.cli(matrix, output)
+            self.assertEqual(resumed.returncode, 1, resumed.stderr)
+            self.assertEqual(self.saved_files(output / 'first'), saved, 'completed run was rewritten')
+            self.assertEqual(json.loads((output / 'summary.json').read_text()),
+                             json.loads((baseline / 'summary.json').read_text()))
+            for run in ('first', 'second', 'third'):
+                for name in ('report.json', 'results.csv', 'summary.txt', 'verdict.json'):
+                    self.assertEqual((output / run / name).read_bytes(),
+                                     (baseline / run / name).read_bytes(), (run, name))
+            partials = list(root.rglob('partial.bin'))
+            self.assertEqual(len(partials), 1, 'partial evidence was deleted or duplicated')
+            self.assertNotEqual(partials[0].parent, output / 'second')
+            self.assertEqual(partials[0].read_bytes(), b'interrupted evidence')
+
+    def test_changed_report_is_archived_and_only_affected_run_is_recomputed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrix = self.matrix_fixture(root)
+            output = root / 'out'
+            first = self.cli(matrix, output)
+            self.assertEqual(first.returncode, 1, first.stderr)
+            original = (output / 'first' / 'report.json').read_bytes()
+            saved = {run: self.saved_files(output / run) for run in ('second', 'third')}
+            corrupted = json.loads(original)
+            corrupted['rows'][0]['counts']['received'] = 999
+            corrupt_bytes = json.dumps(corrupted).encode()
+            (output / 'first' / 'report.json').write_bytes(corrupt_bytes)
+            resumed = self.cli(matrix, output)
+            self.assertEqual(resumed.returncode, 1, resumed.stderr)
+            self.assertEqual((output / 'first' / 'report.json').read_bytes(), original)
+            for run, snapshot in saved.items():
+                self.assertEqual(self.saved_files(output / run), snapshot, run)
+            archived = [p for p in root.rglob('report.json') if p.read_bytes() == corrupt_bytes]
+            self.assertEqual(len(archived), 1, 'changed evidence was not preserved')
+            self.assertNotEqual(archived[0].parent, output / 'first')
+
+    def test_changed_sealed_capture_does_not_reuse_an_old_pass(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            matrix = self.matrix_fixture(root)
+            output = root / 'out'
+            first = self.cli(matrix, output)
+            self.assertEqual(first.returncode, 1, first.stderr)
+            saved = {run: self.saved_files(output / run) for run in ('second', 'third')}
+            receiver = root / 'first' / 'receiver.jsonl'
+            with receiver.open('ab') as stream:
+                stream.write(b'changed after sealing\n')
+            resumed = self.cli(matrix, output)
+            self.assertEqual(resumed.returncode, 1, resumed.stderr)
+            summary = json.loads((output / 'summary.json').read_text())
+            self.assertEqual([run['id'] for run in summary['runs']], ['first', 'second', 'third'])
+            self.assertEqual(summary['runs'][0]['status'], 'INVALID')
+            self.assertFalse(summary['runs'][0]['g2_qualified'])
+            for run, snapshot in saved.items():
+                self.assertEqual(self.saved_files(output / run), snapshot, run)
+            archived = [json.loads(p.read_text()) for p in root.rglob('verdict.json')
+                        if p.parent != output / 'first' and p.parent not in
+                        (output / 'second', output / 'third')]
+            self.assertTrue(any(v['run']=='first' and v['status']=='PASS' for v in archived),
+                            'old PASS evidence was deleted')
+
+    def test_pcapng_resume_keeps_conversion_and_rechecks_changed_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            source.mkdir()
+            expected = capture_pair(source, run='pcap')
+            matrix = root / 'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', mode='pcapng',
+                scope='software-only', plan={}, runs=[dict(id='pcap', manifest='source/pair.json')])))
+            output = root / 'out'
+            initial = self.cli(matrix, output)
+            self.assertEqual(initial.returncode, 0, initial.stderr)
+            saved = self.saved_files(output / 'pcap')
+            resumed = self.cli(matrix, output)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(self.saved_files(output / 'pcap'), saved)
+            pcapng(source / 'receiver.pcapng', [r['release_ns']+3 for r in expected], drop=1)
+            changed = self.cli(matrix, output)
+            self.assertEqual(changed.returncode, 2, changed.stderr)
+            report = json.loads((output / 'pcap/report.json').read_text())
+            self.assertEqual(report['measurement_status'], 'INCONCLUSIVE')
+            conversion = json.loads((output / 'pcap/capture/conversion.json').read_text())
+            self.assertIn('PCAPNG_CAPTURE_DROP', conversion['captures']['receiver']['reason_codes'])
+            self.assertFalse(report['g2_qualified'])
+            conversions = list(root.rglob('conversion.json'))
+            self.assertEqual(len(conversions), 2, 'prior converted evidence was not preserved')
+
+    def test_summary_temporary_filename_does_not_collide_with_a_valid_run_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            source.mkdir()
+            fixture(source, run='summary.json.tmp')
+            matrix = root / 'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', scope='software-only',
+                plan={}, runs=[dict(id='summary.json.tmp', manifest='source/manifest.json')])))
+            result = self.cli(matrix, root / 'out')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            summary = json.loads((root / 'out/summary.json').read_text())
+            self.assertEqual(summary['runs'][0]['status'], 'PASS')
+
+    def test_resume_hashes_include_the_trace_actually_loaded_from_config(self):
+        from tools.g2.matrix import source_hashes
+        from tools.g2.validate import preflight
+        import hashlib
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            trace = (Path(__file__).resolve().parents[3] / 'dpds-core/tests/fixtures/trace.json').read_bytes()
+            for name in ('actual-trace.json', 'registered-trace.json'):
+                (root / name).write_bytes(trace)
+            digest = hashlib.sha256(trace).hexdigest()
+            config = json.loads((root / 'engine.json').read_text())
+            config['lines'][0]['trace'] = dict(path='actual-trace.json', sha256=digest)
+            config['lines'][0]['model'].update(t_ns=0, delta_ns=0, p='0')
+            raw = json.dumps(config).encode()
+            (root / 'engine.json').write_bytes(raw)
+            manifest = json.loads((root / 'manifest.json').read_text())
+            manifest['config']['sha256'] = hashlib.sha256(raw).hexdigest()
+            manifest['traces'] = [dict(line='cable', path='registered-trace.json', sha256=digest,
+                                      provenance='synthetic fixture')]
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            preflight(root / 'manifest.json')
+            before = source_hashes(root / 'manifest.json', 'software')
+            with (root / 'actual-trace.json').open('ab') as stream:
+                stream.write(b' ')
+            self.assertNotEqual(source_hashes(root / 'manifest.json', 'software'), before)
+
+    def test_missing_converted_source_symlink_is_archived_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture_pair(root, run='pcap')
+            matrix = root / 'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', mode='pcapng',
+                scope='software-only', plan={}, runs=[dict(id='pcap', manifest='pair.json')])))
+            output = root / 'out'
+            first = self.cli(matrix, output)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            source = output / 'pcap/capture/bundle/source'
+            source.unlink()
+            resumed = self.cli(matrix, output)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertTrue(source.is_dir(), 'resume reused an unusable converted bundle')
+            self.assertEqual(len(list(root.rglob('conversion.json'))), 2)
+
+    def test_pcapng_manifest_symlink_uses_the_resolved_native_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            capture_pair(root, run='pcap')
+            (root / 'linked.json').symlink_to(root / 'source/manifest.json')
+            pair = json.loads((root / 'pair.json').read_text())
+            pair['manifest'] = 'linked.json'
+            (root / 'pair.json').write_text(json.dumps(pair))
+            matrix = root / 'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', mode='pcapng',
+                scope='software-only', plan={}, runs=[dict(id='pcap', manifest='pair.json')])))
+            result = self.cli(matrix, root / 'out')
+            self.assertEqual(result.returncode, 0, result.stderr)
