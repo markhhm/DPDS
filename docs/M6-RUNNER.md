@@ -265,3 +265,74 @@ Run the sampled and matrix regression suites with:
 ```sh
 meson test -C build g2-sampled g2-matrix --print-errorlogs
 ```
+
+### Direct binary input for sampled runs
+
+Add the raw native capture and one or two directional capture-pair documents:
+
+```json
+"verification": {
+  "mode": "sampled",
+  "native_binary": {"path": "native.hngb", "sha256": "FULL_NATIVE_FILE_SHA256"},
+  "capture_pairs": ["forward-pair.json", "reverse-pair.json"],
+  "seqchecks": [{
+    "path": "forward-sequence.json", "sha256": "FORWARD_CHECK_SHA256",
+    "ingress_port": 0, "egress_port": 1,
+    "ingress_path": "forward-before.pcapng", "receiver_path": "forward-receiver.pcapng"
+  }, {
+    "path": "reverse-sequence.json", "sha256": "REVERSE_CHECK_SHA256",
+    "ingress_port": 1, "egress_port": 0,
+    "ingress_path": "reverse-before.pcapng", "receiver_path": "reverse-receiver.pcapng"
+  }]
+}
+```
+
+Replace the SHA256 placeholders with complete file digests. Each pair uses `hng-pcapng-pair-v1`, including the
+registered nanosecond clock/mapping, measurement/drain bounds and physical
+interface-to-port mappings. Its raw files must be the same files named by that
+direction's seqcheck registration. The pairs must cover every registered
+direction once. This path supports separate bidirectional pairs and all seven
+native writers. Combined bidirectional capture files remain INCONCLUSIVE:
+`hng-seqcheck-v1` totals do not attribute identities to physical input ports.
+
+For this input mode, `streams` contains only the small sealed `counters` stream.
+Keep capture observer health/cost endpoints for `before` and `receiver` in that
+stream. Native actor, logical ingress/host, pool, NIC and terminal counters are
+rebuilt from the complete binary capture. If native counter rows are also
+provided, they must agree exactly with the reconstructed rows. An absent or
+unknown capture-health/cost record remains INCONCLUSIVE. Do not synthesize
+physical queue headroom from a complete file or from a zero drop count.
+
+The binary file supplies logical `native-ingress` and `native-host` streams;
+the aggregate external observation IDs are `before` and `receiver`. Native
+handoff actor bindings can name `native-host` without registering a JSONL
+packet stream. There is no native decode-to-JSONL prepass. Source/resume checks
+bind the native file, pair metadata, raw pcapng files, checker JSON, counters,
+configuration, traces and calibration.
+
+Use matrix `mode=software` for this native input path, as for existing native
+manifests. The manifest's `scope` independently declares software-only or
+physical evidence. Physical calibration and observer-cost requirements still
+apply; choosing the binary reader does not qualify hardware.
+
+The reader uses bounded NumPy arrays. HNGBIN1 entries are variable-length, so
+the reader verifies their CRC frames and tagged fields before exposing columns.
+Only selected witnesses become packet dictionaries. Stress Q uses Python
+integer ticks of 1/C nanoseconds: service adds exactly `8*(q+20)*10^9` ticks,
+and draining compares completion with `arrival_ns*C`. Python integers prevent
+overflow and preserve the Fraction model, including equality boundaries and
+non-integral service times. Trace prefixes use the same service ceiling and
+clamp/loss/outage rules. The normalized JSONL route remains the default when
+`native_binary` is absent.
+
+Host samples reuse an ingress decision only after matching the entire native
+identity key. Unknown or changed keys use the original hash. Different phase
+masks use a separate verified native pass to match the actual selected ingress
+identities, rather than trusting host arrival metadata. This preserves sample
+selection; the different-mask path has additional processing cost.
+
+Both input routes share verdict/statistics code. Regression tests compare
+`verdict.json`, `results.csv` and `summary.txt` byte for byte on identical raw
+evidence, including Q drops, trace clamp, seven writers and a Q mismatch FAIL.
+`report.json` retains input-specific provenance, integrity and processing times.
+No raw source is deleted automatically.
