@@ -103,7 +103,7 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(result.returncode,2,result.stderr)
             self.assertTrue((root/'out/summary.json').is_file(),result.stderr)
             summary=json.loads((root/'out/summary.json').read_text())
-            self.assertEqual([run['measurement_status'] for run in summary['runs']],['PASS','INCONCLUSIVE','PASS'])
+            self.assertEqual([run['measurement_status'] for run in summary['runs']],['INCONCLUSIVE']*3)
             self.assertEqual(summary['measurement_status'],'INCONCLUSIVE')
             self.assertEqual([run['condition_id'] for run in summary['runs']],['main-r0','dropped-r0','last-r0'])
             self.assertFalse(summary['g2_qualified'])
@@ -113,6 +113,9 @@ class MatrixTests(unittest.TestCase):
                 self.assertEqual(run['rows'][0]['condition_id'],run['id'])
                 self.assertTrue((root/'out'/run['id']/'results.csv').is_file())
                 self.assertTrue((root/'out'/run['id']/'capture/conversion.json').is_file())
+                conversion=json.loads((root/'out'/run['id']/'capture/conversion.json').read_text())
+                self.assertEqual(conversion['captures']['receiver']['complete'], run['id']!='dropped-r0')
+                self.assertEqual(report['observer_cost']['status'], 'INCONCLUSIVE')
 
     def test_matrix_metadata_must_match_registered_run_and_scope(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -362,10 +365,10 @@ class MatrixResumeTests(unittest.TestCase):
                 scope='software-only', plan={}, runs=[dict(id='pcap', manifest='source/pair.json')])))
             output = root / 'out'
             initial = self.cli(matrix, output)
-            self.assertEqual(initial.returncode, 0, initial.stderr)
+            self.assertEqual(initial.returncode, 2, initial.stderr)
             saved = self.saved_files(output / 'pcap')
             resumed = self.cli(matrix, output)
-            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(resumed.returncode, 2, resumed.stderr)
             self.assertEqual(self.saved_files(output / 'pcap'), saved)
             pcapng(source / 'receiver.pcapng', [r['release_ns']+3 for r in expected], drop=1)
             changed = self.cli(matrix, output)
@@ -428,11 +431,11 @@ class MatrixResumeTests(unittest.TestCase):
                 scope='software-only', plan={}, runs=[dict(id='pcap', manifest='pair.json')])))
             output = root / 'out'
             first = self.cli(matrix, output)
-            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(first.returncode, 2, first.stderr)
             source = output / 'pcap/capture/bundle/source'
             source.unlink()
             resumed = self.cli(matrix, output)
-            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(resumed.returncode, 2, resumed.stderr)
             self.assertTrue(source.is_dir(), 'resume reused an unusable converted bundle')
             self.assertEqual(len(list(root.rglob('conversion.json'))), 2)
 
@@ -448,4 +451,4 @@ class MatrixResumeTests(unittest.TestCase):
             matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1', mode='pcapng',
                 scope='software-only', plan={}, runs=[dict(id='pcap', manifest='pair.json')])))
             result = self.cli(matrix, root / 'out')
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 2, result.stderr)

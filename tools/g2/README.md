@@ -73,6 +73,34 @@ measurement implementation task. **Software-only, not G2.** They cannot qualify 
 hardware run. The v1 contract is published; complete online joins, host observer
 wiring and final report integration remain in progress.
 
+## Observer cost assessment
+
+The bundle reporter includes an `observer_cost` assessment from the existing
+counter snapshots. `status=PASS` requires all these conditions for every observer
+scope, including individual native producers:
+
+- `records_dropped=0` and `capture_drops=0` during the run.
+- Positive `queue_capacity` and peak `queue_high_water<queue_capacity`.
+- Zero backlog in the end snapshot: `records_attempted-records_emitted-records_dropped=0`.
+
+The backlog uses absolute end counts, not start/end deltas. A backlog that
+persists across both endpoints does not disappear from the assessment.
+Missing, reset or invalid evidence produces a warning. An incomplete counter
+scope inventory also prevents PASS. Each warning identifies its
+`observer` and `code`. `end_backlog` retains the derived count or null.
+
+This count conservatively includes records that capture output failed to emit.
+It is not a direct queue-length measurement. The loss condition also rejects
+capture-output loss.
+
+Any warning makes the affected report cells INCONCLUSIVE, while their gate
+diagnostics remain available. Structural errors retain INVALID.
+The normalized counter view also includes this assessment.
+
+This assessment does not collect new counters or grant physical qualification.
+Existing active-join metrics and processing/storage qualification flags remain
+separate from the three cost conditions.
+
 ## Run and check
 
 From the host repository root, with the normal Cargo/Meson/DPDK environment:

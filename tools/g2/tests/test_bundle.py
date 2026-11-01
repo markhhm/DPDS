@@ -177,6 +177,29 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(row["serialization"]["modeled"]["wait"]["n"], 400)
         self.assertEqual(row["serialization"]["actual_attempt"]["wait"]["n"], 400)
 
+    def test_full_observer_queue_makes_even_a_timing_failure_inconclusive(self):
+        def full_queue(rows, registration):
+            for snapshot in rows['counters']:
+                if snapshot['scope']=='observer' and snapshot['scope_id']=='host' and snapshot['phase']=='end':
+                    snapshot['values']['queue_high_water'] = snapshot['values']['queue_capacity']
+            for row in rows['receiver']:
+                row['receive_ns'] += 600_000
+                row['timestamp']['raw'] += 600_000
+            registration['capacity']['max_unresolved'] = 410
+        report = self.run_bundle(mutate=full_queue)
+        self.assertEqual(report['measurement_status'], 'INCONCLUSIVE')
+        self.assertEqual(report['observer_cost'].get('status'), 'INCONCLUSIVE')
+        self.assertIn(dict(observer='host', code='observer_cost_queue_full'), report['observer_cost']['warnings'])
+        self.assertEqual(report['rows'][0]['measurement_status'], 'INCONCLUSIVE')
+        self.assertIn('p99', report['rows'][0]['observed_failures'])
+
+    def test_clean_observer_cost_passes_without_hardware_qualification(self):
+        report = self.run_bundle()
+        self.assertEqual(report['observer_cost'].get('status'), 'PASS')
+        self.assertEqual(report['observer_cost']['warnings'], [])
+        self.assertEqual(report['rows'][0]['measurement_status'], 'PASS')
+        self.assertFalse(report['g2_qualified'])
+
     def test_trace_l0_uses_registered_reference_owd_and_writes_a_verdict(self):
         from tools.g2.matrix import report_one
         trace = dict(end_ns=10**9, terminal='error', terminal_horizon_ns=None,

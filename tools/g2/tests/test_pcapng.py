@@ -77,14 +77,22 @@ class PcapngTests(unittest.TestCase):
         return subprocess.run([sys.executable,'-m','tools.g2.pcapng',str(root/'pair.json'),
                                '--out',str(root/'out')],capture_output=True,text=True)
 
+    def assert_healthy_capture_with_cost_warning(self, root, result):
+        self.assertEqual(result.returncode, 2, result.stderr)
+        report = json.loads((root/'out/reports/demo/report.json').read_text())
+        self.assertEqual(report['measurement_status'], 'INCONCLUSIVE', report['reason_codes'])
+        self.assertEqual(report['observer_cost']['status'], 'INCONCLUSIVE')
+        self.assertIn(dict(observer='before', code='observer_cost_queue_full'), report['observer_cost']['warnings'])
+        health = json.loads((root/'out/conversion.json').read_text())['captures']
+        self.assertTrue(all(row['complete'] for row in health.values()), health)
+        return report
+
     def test_nanosecond_pair_uses_real_reporter_and_preserves_identities(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
             setup(root)
             result=self.invoke(root)
-            self.assertEqual(result.returncode,0,result.stderr)
-            report=json.loads((root/'out/reports/demo/report.json').read_text())
-            self.assertEqual(report['measurement_status'],'PASS',report.get('reason_codes'))
+            report = self.assert_healthy_capture_with_cost_warning(root, result)
             self.assertFalse(report['g2_qualified'])
             self.assertEqual(report['rows'][0]['timing']['main']['n'],400)
             before=list(StreamReader(root/'out/bundle/before.jsonl',role='before'))
@@ -100,9 +108,7 @@ class PcapngTests(unittest.TestCase):
                     pcapng(root/f'{role}.pcapng', [row[key]+(3 if role=='receiver' else 0) for row in expected],
                            endian=endian, snaplen=retained, caplen=retained, ip_options=ip_options)
                 result = self.invoke(root)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                report = json.loads((root/'out/reports/demo/report.json').read_text())
-                self.assertEqual(report['measurement_status'], 'PASS', report['reason_codes'])
+                self.assert_healthy_capture_with_cost_warning(root, result)
                 for role in ('before', 'receiver'):
                     rows = list(StreamReader(root/f'out/bundle/{role}.jsonl', role=role))
                     self.assertEqual([row['external_identity'] for row in rows], [FLOW+f':{i}' for i in range(400)])
@@ -158,14 +164,12 @@ class PcapngTests(unittest.TestCase):
                 self.assertFalse(conversion['captures']['receiver']['complete'])
                 self.assertIsNone(conversion['captures']['receiver']['dropped'])
 
-    def test_big_endian_complete_capture_proves_real_missing_delivery_failure(self):
+    def test_big_endian_complete_capture_retains_missing_delivery_with_cost_warning(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); expected=setup(root,endian='>')
             pcapng(root/'receiver.pcapng',[row['release_ns']+3 for row in expected[:-1]],endian='>')
             result=self.invoke(root)
-            self.assertEqual(result.returncode,1,result.stderr)
-            report=json.loads((root/'out/reports/demo/report.json').read_text())
-            self.assertEqual(report['measurement_status'],'FAIL',report['reason_codes'])
+            report = self.assert_healthy_capture_with_cost_warning(root, result)
             self.assertIn('missing_delivery',report['rows'][0]['observed_failures'])
             conversion=json.loads((root/'out/conversion.json').read_text())
             self.assertTrue(conversion['captures']['receiver']['complete'])
@@ -185,7 +189,7 @@ class PcapngTests(unittest.TestCase):
             cal['mappings'][1]['target_origin_ns']=epoch-10**9
             path.write_text(json.dumps(cal))
             result=self.invoke(root)
-            self.assertEqual(result.returncode,0,result.stderr)
+            self.assert_healthy_capture_with_cost_warning(root, result)
             rows=list(StreamReader(root/'out/bundle/before.jsonl',role='before'))
             self.assertEqual(rows[0]['timestamp']['raw'],epoch+100-10**9)
 
