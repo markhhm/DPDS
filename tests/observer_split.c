@@ -38,7 +38,18 @@ int main(int argc, char **argv)
             *packet_meta(in[i]) = (struct packet_meta){.ingress_port=port, .ingress_seq=i, .arrival_ns=i*1000};
             observer_input(OBS_RX, in[i]);
         }
-        assert(worker_step_at(w, in, 2, out, 0) == 0); worker_end_input(w);
+        assert(worker_step_at(w, in, 2, out, 0) == 0);
+        host_publish(port, w->consumed, 2000);
+        assert(worker_step_at(w, NULL, 0, out, 0) == 0);
+        assert(w->snapshot.lower_bound[k] == 2000);
+        /* Pause RX inside its next publication: the last certificate remains valid. */
+        atomic_fetch_add(&host.frontier[port].version, 1);
+        for (unsigned repeat = 0; repeat < 20; ++repeat) {
+            assert(worker_step_at(w, NULL, 0, out, 0) == 0);
+            assert(w->snapshot.lower_bound[k] == 2000);
+        }
+        atomic_fetch_add(&host.frontier[port].version, 1);
+        worker_end_input(w);
         uint16_t n = worker_step_at(w, NULL, 0, out, 10000); assert(n == 2);
         char name[32]; snprintf(name, sizeof(name), "observer_handoff_%u", k);
         struct rte_ring *ring = rte_ring_create(name, 2, rte_socket_id(), RING_F_SP_ENQ | RING_F_SC_DEQ); assert(ring);

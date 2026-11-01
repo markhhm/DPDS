@@ -92,7 +92,8 @@ static uint64_t watermark(struct worker_state *s, uint16_t port)
 {
     uint64_t w;
     if (s->ended) return UINT64_MAX;
-    if (host_frontier(port, s->consumed, &w) && w > s->admitted_frontier[port]) return w;
+    if (host_frontier(port, s->consumed, &w) && w > s->admitted_frontier[port])
+        s->admitted_frontier[port] = w;
     return s->admitted_frontier[port];
 }
 
