@@ -157,7 +157,7 @@ L0, trace clamp, seven-writer bidirectional evidence and Q-mismatch FAIL cases.
 | Reporter total | — | 7.422 s |
 | Native/capture input, selection and exact Q | — | 6.996 s |
 
-This is a single pinned-CPU run on the shared XBOX, AS 4 GiB/CPU 180 s for
+This is a single pinned-CPU run on a shared Linux host, AS 4 GiB/CPU 180 s for
 binary (600 s for JSONL), warm ordinary filesystem cache, no tmpfs. Reading
 and validation are included; fixture generation and the separately run C
 checker are excluded. The C result and its complete raw-source bindings are
