@@ -8,9 +8,74 @@ import tempfile
 import unittest
 
 from tools.g2.tests.test_bundle import fixture
+from tools.g2.tests.test_pcapng import setup as capture_pair, pcapng
 
 
 class MatrixTests(unittest.TestCase):
+    def test_pcapng_mode_rejects_foreign_run_or_scope_before_conversion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); capture_pair(root,run='registered')
+            for run,scope in [('other','software-only'),('registered','physical')]:
+                matrix=root/'matrix.json'
+                matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1',mode='pcapng',scope=scope,plan={},
+                    runs=[dict(id=run,manifest='pair.json')])))
+                output=root/run
+                result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(output)],
+                                      capture_output=True,text=True)
+                self.assertEqual(result.returncode,2,result.stderr)
+                self.assertEqual(json.loads((output/'summary.json').read_text())['measurement_status'],'INCONCLUSIVE')
+                self.assertFalse((output/run/'capture').exists())
+
+    def test_explicit_software_mode_and_unknown_mode_before_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); source=root/'source'; source.mkdir()
+            fixture(source,run='software')
+            matrix=root/'matrix.json'
+            value=dict(schema='hng-m6-matrix-v1',scope='software-only',mode='unknown',plan={},
+                       runs=[dict(id='software',manifest='source/manifest.json')])
+            matrix.write_text(json.dumps(value))
+            result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(root/'out')],
+                                  capture_output=True,text=True)
+            self.assertEqual(result.returncode,2,result.stderr)
+            self.assertFalse((root/'out').exists())
+            value['mode']='software'; matrix.write_text(json.dumps(value))
+            result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(root/'out')],
+                                  capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads((root/'out/summary.json').read_text())['measurement_status'],'PASS')
+
+    def test_pcapng_mode_reports_three_cells_and_retains_capture_loss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); runs=[]
+            for run,family in [('main-r0','main'),('dropped-r0','boundary'),('last-r0','trace')]:
+                capture=root/run; capture.mkdir()
+                expected=capture_pair(capture,run=run)
+                path=capture/'source/manifest.json'
+                manifest=json.loads(path.read_text()); manifest['condition_id']=run
+                for cell in manifest['required_cells']: cell['condition_id']=run
+                path.write_text(json.dumps(manifest))
+                if run=='dropped-r0':
+                    pcapng(capture/'receiver.pcapng',[row['release_ns']+3 for row in expected],drop=1)
+                runs.append(dict(id=run,family=family,manifest=f'{run}/pair.json'))
+            matrix=root/'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1',scope='software-only',
+                mode='pcapng',plan={},runs=runs)))
+            result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(root/'out')],
+                                  capture_output=True,text=True)
+            self.assertEqual(result.returncode,2,result.stderr)
+            self.assertTrue((root/'out/summary.json').is_file(),result.stderr)
+            summary=json.loads((root/'out/summary.json').read_text())
+            self.assertEqual([run['measurement_status'] for run in summary['runs']],['PASS','INCONCLUSIVE','PASS'])
+            self.assertEqual(summary['measurement_status'],'INCONCLUSIVE')
+            self.assertEqual([run['condition_id'] for run in summary['runs']],['main-r0','dropped-r0','last-r0'])
+            self.assertFalse(summary['g2_qualified'])
+            for run in summary['runs']:
+                report=json.loads((root/'out'/run['report']).read_text())
+                self.assertEqual(run['measurement_status'],report['measurement_status'])
+                self.assertEqual(run['rows'][0]['condition_id'],run['id'])
+                self.assertTrue((root/'out'/run['id']/'results.csv').is_file())
+                self.assertTrue((root/'out'/run['id']/'capture/conversion.json').is_file())
+
     def test_matrix_metadata_must_match_registered_run_and_scope(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

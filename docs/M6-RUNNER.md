@@ -30,6 +30,36 @@ The runner preserves every required row and repeat verdict. It does not pool
 repeats, change sampling, or grant physical qualification. The current G2
 reporter's `g2_qualified=false` is preserved, including for software PASS.
 
+## Registered pcapng capture mode
+
+One optional configuration field selects the input path: `mode` is `software`
+(the default) or `pcapng`. Omitted/default software mode continues to read sealed
+G2 run manifests directly. The CLI stays the same:
+
+```sh
+python3 -m tools.g2.matrix examples/m6-pcapng.json --out reports/m6-captures-01
+```
+
+In `pcapng` mode, each run's `manifest` points to a registered
+[capture-pair manifest](PCAPNG.md), containing that cell's native G2 manifest,
+ingress/egress pcapng paths, interface-to-port maps and clock/coverage metadata.
+Its native manifest's run and scope must match the matrix entry before
+conversion. Pair paths are relative to the matrix; capture/native paths are
+relative to their own pair manifest. No capture or hardware operation is started.
+
+Each fresh per-run process converts with the existing pcapng adapter under
+`<id>/capture/`, then evaluates the converted streams with the existing reporter.
+It finishes that cell before starting the next. Reports, CSVs, small verdicts,
+stderr logs and the combined `summary.json` keep their existing paths and format.
+Capture loss remains INCONCLUSIVE and does not suppress later cells. A measured
+FAIL retains the same aggregate precedence. Conversion failures remain invalid
+or inconclusive evidence, never PASS.
+
+Mode does not set `scope` or grant hardware qualification. Synthetic pcapng tests
+use `scope=software-only`; physical capture manifests require their supplied
+physical calibration. This mode retains all adapter profile, calibration,
+capture-health and source-directory requirements described in its documentation.
+
 ## G short-plan example
 
 The example records planning metadata: main 72 conditions × 3 repeats,
