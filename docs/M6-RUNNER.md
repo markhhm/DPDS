@@ -189,6 +189,43 @@ Missing, unhealthy, changed, ambiguous or incomplete coverage is INCONCLUSIVE.
 The checker can report raw missing identities as FAIL while the reporter accepts
 them as intentional Q/trace loss; its status is not copied blindly into a gate.
 
+### Automatic directional seqcheck in pcapng mode
+
+For a sampled run in `mode=pcapng`, `verification.seqchecks` may be empty.
+The runner infers the direction from the registered pair's interface maps,
+converts the captures, then supplies a checked sequence result to the reporter.
+No additional CLI option is needed. Build the checker before reporting:
+
+```sh
+meson compile -C build seqcheck
+```
+
+The runner finds `seqcheck` on `PATH`, falling back to the checkout's
+`build/seqcheck`. A supplied result is reused only when its registered JSON
+SHA-256, both capture digests/sizes, direction and schema agree. Otherwise a
+valid runner cache is tried, or C seqcheck is executed on the two original
+captures. Checker PASS, FAIL and INVALID exits must agree with their JSON.
+An INVALID diagnostic with unknown input hashes cannot be reused or sealed;
+process/output failures remain INCONCLUSIVE and retryable.
+
+Generated JSON and an atomic hash registration live under
+`.seqchecks/<id>/` in the matrix output, outside the report directory archived
+on interruption. Changed or corrupt cache entries are retained under its
+`.incomplete/` directory before replacement. This permits a partially completed
+report to reuse a verified checker result. Each report also receives its own
+JSON copy and updated converted manifest, covered by its completion receipt.
+The original native manifest, registrations and capture files are not modified.
+No cache receipt is published until both input hashes are known and checked.
+
+Completed reports use the existing resume checks; changed captures invalidate
+them. New reports verify their derived result hash again before sealing.
+This automation applies only to the existing sampled pcapng path. Full
+verification is preserved; native/software input still uses explicit external
+sequence registrations. Capture loss remains INCONCLUSIVE. A normal external
+sequence check does not waive the adapter's synthetic observer-cost warning,
+and an ordinary swap is retained as an order-gate FAIL even if another gate
+keeps the overall report INCONCLUSIVE.
+
 The current sampled pcapng adapter accepts **one direction per capture pair**.
 A combined multi-interface bidirectional pair is INCONCLUSIVE with
 `SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED`: the checker has no interface filter,
