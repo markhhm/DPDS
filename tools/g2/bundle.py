@@ -99,6 +99,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
         if not state["offer"] and row["outcome"]!="invalid_input" and state["terminal"] is None:
             return
         active.pop(key(row), None)
+        custody.forget(key(row))
 
     def delivered(observation):
         if observation["timestamp"] is not None:
@@ -302,6 +303,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
                                 active[key(want)] = dict(expected=want, before=None, receive=None,
                                     offer=None, terminal=None, tx=False, dispatch=None, pending=False, paired=False,
                                     serializer=handle)
+                                custody.track(active[key(want)])
                                 peak = max(peak, len(active))
                     elif event["kind"]=="end":
                         custody.input_end.add(port)
