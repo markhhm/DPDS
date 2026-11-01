@@ -166,6 +166,9 @@ class OnlineTests(unittest.TestCase):
         self.assertTrue(retain.keep(row))
         self.assertFalse(retain.keep(dict(row,arrival_ns=0)))
 
+
+
+class OnlineTimingTests(unittest.TestCase):
     def test_three_timing_faults_have_mixed_population_and_unchanged_limits(self):
         registrations=[manifest() for _ in range(3)]
         for registration in registrations:
