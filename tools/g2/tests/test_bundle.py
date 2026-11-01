@@ -25,7 +25,8 @@ except ImportError:
     build_bundle_report = None
 
 
-def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo"):
+def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
+            length=60, flow_id="f", selected_late=None):
     cfg, reg, cal = config(), manifest(), document()
     reg["run"] = cal["run"] = run
     # Extra lines share the first line's ingress and egress port and differ by VLAN.
@@ -54,10 +55,10 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo"):
     for seq in range(count):
         packet = dict(kind="packet", run=run, stream_id="ingress", seq=seq+1,
             ingress_port=0, ingress_seq=seq, line=names[seq%lines], selection_seq=seq//lines,
-            external_identity=f"f:{seq}", flow_id="f", arrival_ns=100+seq*1000,
-            length=60, vlan_id=vlans[names[seq%lines]], segments=1,
+            external_identity=f"{flow_id}:{seq}", flow_id=flow_id, arrival_ns=100+seq*1000,
+            length=length, vlan_id=vlans[names[seq%lines]], segments=1,
             length_flags=dict(fcs_present=False, vlan_retained=True), app=None,
-            selected_late=None, input_error=None)
+            selected_late=selected_late, input_error=None)
         want = ref.consume(packet)
         rows["ingress"].append(packet)
         rows["expected"].append(want)

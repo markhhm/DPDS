@@ -1,0 +1,11 @@
+{
+  "schema": "hng-pcapng-pair-v1",
+  "manifest": "captures/run/manifest.json",
+  "clock_id": "capture",
+  "mapping_id": "capture-ns",
+  "uncertainty_ns": 1000,
+  "start_ns": 0,
+  "end_ns": 78000000000,
+  "before": {"path": "captures/ingress.pcapng", "interfaces": {"0": 0}},
+  "receiver": {"path": "captures/egress.pcapng", "interfaces": {"0": 1}}
+}
