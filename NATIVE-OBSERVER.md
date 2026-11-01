@@ -66,7 +66,9 @@ use a declared local queue with the same item ordinal and consumed-prefix rules.
 TX records freeze consumed handoff prefixes before arbitration. They include
 coherent, completed-step scheduler input/frontier publications read before the
 actual gate checks. Each scheduler publishes through its own three-slot SPSC
-mailbox with one TX reader. The writer, reader, and atomic middle slot have
+mailbox with one TX reader. A shared TX reads both scheduler mailboxes; dedicated
+TX owners read only their own scheduler's mailbox. Unrelated port frontiers
+remain unknown in dedicated-owner snapshots. The writer, reader, and atomic middle slot have
 distinct ownership; an acquire/release exchange transfers a completed slot.
 A writer paused during its next copy leaves its last completed publication
 readable. Neither path waits or retries, and no frontier or input prefix is

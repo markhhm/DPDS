@@ -51,6 +51,17 @@ def manifest():
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_native_actor_bindings_are_typed_and_match_registered_streams(self):
+        registration=manifest()
+        q=registration['capacity']['handoff_queues'][0]
+        q['handoff_queue_id']='handoff-0'
+        q['extensions']=dict(native_actors=dict(producer=dict(stream_id='host',producer=1),consumer=dict(stream_id='host',producer=3)))
+        validate_registration(registration,config())
+        for role,field,value in [('producer','producer',True),('consumer','producer',6),('consumer','stream_id','unknown')]:
+            broken=copy.deepcopy(registration)
+            broken['capacity']['handoff_queues'][0]['extensions']['native_actors'][role][field]=value
+            self.assert_invalid(broken)
+
     def test_default_streaming_registration_requires_a_positive_identity_index_bound(self):
         registration=manifest()
         registration["capacity"].pop("identity_index_capacity",None)
