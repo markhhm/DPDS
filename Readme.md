@@ -14,23 +14,24 @@ Sparse DPDK port IDs are valid.
 ## Hardware planning
 
 The pool calculator, not mean occupancy, supplies the packet-memory bound.
-The default example has two ingress pools.
-It uses 100 Gbit/s, t=142 ms, delta=320 ms,
+The example inputs use 100 Gbit/s, t=142 ms, delta=320 ms,
 Q=50 ms, 1,522-byte L2 frames, seven lcores and 2 MiB pages.
 
-Early budgets were **20 GiB minimum / 40 GiB recommended**.
-They rounded 19.432 / 38.826 GiB of pools for one / two lines per direction.
+The early **20 GiB minimum** covered cable+LEO in one direction: 19.413 GiB.
+The **40 GiB recommendation** covered both directions: 38.826 GiB.
+
 That [host revision](https://github.com/markhhm/DPDS/tree/749d5543595bcd8fd2fd53eb0dd15fd1fc1c2182)
 used a 2,496-byte mbuf stride. Current observer metadata raises the stride to
 2,624 bytes. The same calculator inputs now give:
 
-| Lines per direction | Pool GiB per direction | Both directions, approximately |
+| Configured directions | Lines per direction | Pool GiB, approximately |
 |---|---:|---:|
-| 1 | 10.214 | 20.43 GiB |
-| 2, cable and LEO | 20.405 | 40.81 GiB |
+| 1 | 2, cable and LEO | 20.405 |
+| 2 | 2 each | 40.81 |
 
 Thus 20 / 40 GiB are historical budgets, not sufficient current reservations.
 The pools alone need at least 21 / 41 whole GiB for these two cases.
+Pool totals exclude the ordinary core heap that the calculator includes in `total_gib`.
 
 Add EAL headroom. Reserve separate ordinary RAM for core and observer metadata.
 Use the [calculator commands](#performance-tools) below with the actual
@@ -44,6 +45,9 @@ See [hardware bring-up](docs/BRING-UP.md) for the unresolved deployment decision
 Requirements: DPDK 26.03 with the null, pcap, ring, and af_packet PMDs;
 libpcap development files when building DPDK; stable Rust; a C compiler; Meson;
 Ninja, and Python 3 for the process tests.
+
+Full checks also need the [Core Python/NumPy environment](dpds-core/README.md#checks-pre-push-hook-and-ci).
+Activate it before Meson setup so child runners use the same interpreter.
 
 ```sh
 git submodule update --init --recursive
