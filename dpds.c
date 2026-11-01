@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -103,16 +105,18 @@ int main(int argc, char **argv)
     int option, observe_fd = -1;
     unsigned observe_capacity = 4096, observe_port = 9000;
     bool observe_software = false;
-    const char *observe_identity = NULL;
+    const char *observe_identity = NULL, *observe_binary = NULL;
     static const struct option options[] = {
         {"observe-fd", required_argument, NULL, 1000}, {"observe-software", no_argument, NULL, 1001},
         {"observe-identity", required_argument, NULL, 1002}, {"observe-capacity", required_argument, NULL, 1003},
-        {"observe-probe-port", required_argument, NULL, 1004}, {NULL, 0, NULL, 0}};
+        {"observe-probe-port", required_argument, NULL, 1004},
+        {"observe-binary", required_argument, NULL, 1005}, {NULL, 0, NULL, 0}};
     while ((option = getopt_long(argc, argv, "c:o:", options, NULL)) != -1) {
         if (option == 'c') config = optarg;
         else if (option == 'o') stats_path = optarg;
         else if (option == 1001) observe_software = true;
         else if (option == 1002) observe_identity = optarg;
+        else if (option == 1005) observe_binary = optarg;
         else if (option == 1000 || option == 1003 || option == 1004) {
             char *end; unsigned long value = strtoul(optarg, &end, 10);
             if (!*optarg || *end || optarg[0] == '-' || value > INT_MAX) rte_exit(EXIT_FAILURE, "Invalid observer integer\n");
@@ -122,6 +126,8 @@ int main(int argc, char **argv)
         }
         else rte_exit(EXIT_FAILURE, "Usage: ... -- [-c config.json] [-o stats.txt]\n");
     }
+    if (observe_binary && observe_fd >= 0)
+        rte_exit(EXIT_FAILURE, "--observe-binary and --observe-fd are mutually exclusive\n");
     if (rte_lcore_count() < 2 || rte_lcore_count() == 6 || rte_lcore_count() > 7)
         rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4, 5 or 7 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "HNG configuration rejected before RX\n");
@@ -134,6 +140,11 @@ int main(int argc, char **argv)
             !rte_eth_dev_is_valid_port(host.lines[i].egress_port))
             rte_exit(EXIT_FAILURE, "Line %zu references an unavailable port\n", i);
     }
+    unsigned workers = rte_lcore_count() - 1;
+    /* 7 lcores: per direction one RX, one scheduler and one TX lcore. */
+    bool io_split = workers == 6, split = workers == 4 || io_split;
+    if (split && (host.port_count != 2 || !host_split_valid()))
+        rte_exit(EXIT_FAILURE, "5 and 7 lcores need two ports, each egress fed by one ingress port\n");
     for (uint16_t i = 0; i < host.port_count; ++i)
         if (host_prepare_port(host.ports[i]) != 0)
             rte_exit(EXIT_FAILURE, "Port %u descriptor preflight failed\n", host.ports[i]);
@@ -150,21 +161,31 @@ int main(int argc, char **argv)
         printf("pool port=%u numa=%d objects=%"PRIu64" object_bytes=%u total_object_bytes=%"PRIu64"\n",
             port, socket, count, size.total_size, count * size.total_size);
     }
-    if (observe_fd >= 0) {
-        if (observe_fd <= STDERR_FILENO) rte_exit(EXIT_FAILURE, "Observer FD must be separate from standard streams\n");
+    if (observe_fd >= 0 || observe_binary) {
+        if (!observe_binary && observe_fd <= STDERR_FILENO) rte_exit(EXIT_FAILURE, "Observer FD must be separate from standard streams\n");
         if (!observe_software || !observe_identity ||
             (strcmp(observe_identity, "stage1") && strcmp(observe_identity, "software-l2")))
             rte_exit(EXIT_FAILURE, "Capture requires --observe-software and --observe-identity stage1|software-l2\n");
+        if (!observe_capacity || observe_capacity > 65536 || !observe_port || observe_port > 65535)
+            rte_exit(EXIT_FAILURE, "Invalid observer capacity/probe port\n");
         for (unsigned p = 0; p < host.port_count; ++p) {
             struct rte_eth_dev_info info;
             if (rte_eth_dev_info_get(host.ports[p], &info) || !info.driver_name ||
                 (strcmp(info.driver_name, "net_pcap") && strcmp(info.driver_name, "net_ring") && strcmp(info.driver_name, "net_null")))
                 rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
         }
-        if (!observer_open(observe_fd, !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2,
-            observe_port, observe_capacity, rte_lcore_count() == 7)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
+        int fd = observe_fd;
+        if (observe_binary) {
+            fd = open(observe_binary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd < 0) rte_exit(EXIT_FAILURE, "Cannot exclusively create observer binary file: %s\n", strerror(errno));
+        }
+        enum observer_identity_policy policy = !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2;
+        bool prepared = observe_binary ? observer_open_binary(fd, policy, observe_port, observe_capacity, io_split) :
+            observer_open(fd, policy, observe_port, observe_capacity, io_split);
+        if (observe_binary) close(fd);
+        if (!prepared) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer capture\n");
     } else if (observe_software || observe_identity)
-        rte_exit(EXIT_FAILURE, "Observer options require --observe-fd\n");
+        rte_exit(EXIT_FAILURE, "Observer options require --observe-fd or --observe-binary\n");
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
         if (initialize_port(port, pools[port]) != 0) rte_exit(EXIT_FAILURE, "Port %u initialization failed\n", port);
@@ -173,11 +194,6 @@ int main(int argc, char **argv)
     printf("clock=software-rx-relative-ns queues=1 offloads=none VLAN=retained FCS=stripped wire_overhead=20\n");
     struct pipeline_stats *stats = rte_zmalloc("stats", sizeof(*stats), 64);
     if (!stats) rte_exit(EXIT_FAILURE, "Cannot allocate counters\n");
-    unsigned workers = rte_lcore_count() - 1;
-    /* 7 lcores: per direction one RX, one scheduler and one TX lcore. */
-    bool io_split = workers == 6, split = workers == 4 || io_split;
-    if (split && (host.port_count != 2 || !host_split_valid()))
-        rte_exit(EXIT_FAILURE, "5 and 7 lcores need two ports, each egress fed by one ingress port\n");
     struct rte_ring *rx_ring = NULL, *tx_ring = NULL, *owner_rings[2] = {0}, *tx_owner_rings[2] = {0};
     if (workers >= 2 && !split) rx_ring = rte_ring_create("rx_ring", SCHED_RX_RING_SZ, rte_socket_id(), RING_F_SC_DEQ | RING_F_SP_ENQ);
     for (unsigned k = 0; split && k < 2; ++k) {

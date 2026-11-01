@@ -10,15 +10,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
+#include <rte_prefetch.h>
 #include "common.h"
 #include "observer.h"
+#include "observer_binary.h"
 
 struct queue {
     struct observer_record *records;
-    uint64_t reserved;
-    _Atomic uint64_t head, tail, attempted, emitted, dropped, capture_drops, high_water, identity_errors, malformed_records;
+    /* Consumer and producer each own a cache line; health readers do not write. */
+    _Alignas(RTE_CACHE_LINE_SIZE) _Atomic uint64_t head;
+    _Alignas(RTE_CACHE_LINE_SIZE) _Atomic uint64_t emitted;
+    _Atomic uint64_t capture_drops;
+    _Alignas(RTE_CACHE_LINE_SIZE) _Atomic uint64_t tail;
+    _Alignas(RTE_CACHE_LINE_SIZE) uint64_t reserved;
+    _Atomic uint64_t attempted, dropped, high_water, identity_errors, malformed_records;
 };
 struct published_snapshot {
     struct observer_snapshot slots[3];
@@ -30,8 +38,8 @@ struct published_snapshot {
 static struct {
     struct published_snapshot snapshots[OBS_QUEUES];
     struct queue queues[OBS_PRODUCERS];
-    _Atomic uint64_t order;
-    _Atomic bool stop;
+    _Alignas(RTE_CACHE_LINE_SIZE) _Atomic uint64_t order;
+    _Alignas(RTE_CACHE_LINE_SIZE) _Atomic bool stop;
     _Atomic unsigned abort_reasons;
     uint16_t ports[OBS_PORTS], port_count;
     bool input_ended[OBS_PORTS];
@@ -39,10 +47,13 @@ static struct {
     int fd;
     unsigned capacity, probe_port;
     enum observer_identity_policy policy;
-    bool enabled, started, complete, write_failed, per_direction;
-    uint64_t intended[HNG_MAX_LINES];
+    bool enabled, started, complete, write_failed, per_direction, binary;
+    _Alignas(RTE_CACHE_LINE_SIZE) struct observer_binary_writer writer;
+    _Alignas(RTE_CACHE_LINE_SIZE) uint64_t intended[HNG_MAX_LINES];
 } capture;
 static struct observer_health last_health[OBS_PRODUCERS];
+static struct observer_storage_health last_storage;
+struct observer_storage_health observer_storage_health(void) { return last_storage; }
 
 bool observer_enabled(void) { return capture.enabled; }
 struct observer_health observer_health(enum observer_producer producer)
@@ -54,51 +65,75 @@ struct observer_health observer_health(enum observer_producer producer)
         capture.capacity, atomic_load(&q->identity_errors), atomic_load(&q->malformed_records)};
 }
 
-bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
+static bool open_capture(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction, bool binary, bool discard)
 {
     struct stat st;
     if (capture.enabled || !capacity || capacity > 65536 || policy > OBS_ID_SOFTWARE_L2 ||
         !host.port_count || host.port_count > OBS_PORTS || (per_direction && host.port_count != 2) ||
         (host.port_count == 2 && host.ports[0] == host.ports[1]) ||
-        !probe_port || probe_port > 65535 || fstat(fd, &st) || (!S_ISFIFO(st.st_mode) && !S_ISSOCK(st.st_mode))) return false;
+        !probe_port || probe_port > 65535 || fstat(fd, &st)) return false;
+    if (discard) {
+        if (!S_ISCHR(st.st_mode) || major(st.st_rdev) != 1 || minor(st.st_rdev) != 3) return false;
+    } else if (binary ? (!S_ISREG(st.st_mode) || st.st_size || lseek(fd, 0, SEEK_CUR) != 0) :
+        (!S_ISFIFO(st.st_mode) && !S_ISSOCK(st.st_mode))) return false;
     memset(&capture, 0, sizeof(capture));
     capture.fd = -1;
     capture.capacity = capacity; capture.policy = policy; capture.probe_port = probe_port;
-    capture.per_direction = per_direction;
+    capture.per_direction = per_direction; capture.binary = binary;
     for (unsigned owner = 0; owner < OBS_QUEUES; ++owner) {
         capture.snapshots[owner].back = 2;
         atomic_init(&capture.snapshots[owner].middle, 1);
     }
     for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
-        capture.queues[p].records = calloc(capacity, sizeof(struct observer_record));
+        size_t bytes = capacity * sizeof(struct observer_record);
+        if (binary) {
+            void *records = NULL;
+            if (posix_memalign(&records, RTE_CACHE_LINE_SIZE, bytes)) goto fail;
+            capture.queues[p].records = records;
+            /* Complete page allocation before the packet path starts. */
+            memset(records, 0, bytes);
+        } else capture.queues[p].records = calloc(capacity, sizeof(struct observer_record));
         if (!capture.queues[p].records) goto fail;
     }
     int flags = fcntl(fd, F_GETFL);
-    if (flags < 0 || (flags & O_ACCMODE) == O_RDONLY) goto fail;
+    if (flags < 0 || (flags & O_ACCMODE) == O_RDONLY || (binary && (flags & O_APPEND))) goto fail;
     capture.fd = dup(fd);
-    if (capture.fd < 0 || fcntl(capture.fd, F_SETFL, fcntl(capture.fd, F_GETFL) | O_NONBLOCK) < 0) goto fail;
+    if (capture.fd < 0) goto fail;
+    if (binary) { if (!observer_binary_init(&capture.writer, capture.fd)) goto fail; }
+    else if (fcntl(capture.fd, F_SETFL, fcntl(capture.fd, F_GETFL) | O_NONBLOCK) < 0) goto fail;
     capture.port_count = host.port_count;
     for (unsigned i = 0; i < host.port_count; ++i) capture.ports[i] = host.ports[i];
     capture.enabled = true;
     return true;
 fail:
+    observer_binary_destroy(&capture.writer);
     for (unsigned p = 0; p < OBS_PRODUCERS; ++p) free(capture.queues[p].records);
     if (capture.fd >= 0) close(capture.fd);
     return false;
 }
 
+bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
+{ return open_capture(fd, policy, probe_port, capacity, per_direction, false, false); }
+
+bool observer_open_binary(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
+{ return open_capture(fd, policy, probe_port, capacity, per_direction, true, false); }
+
+bool observer_open_binary_discard(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
+{ return open_capture(fd, policy, probe_port, capacity, per_direction, true, true); }
+
 struct observer_record *observer_reserve(enum observer_producer producer)
 {
     if (!capture.enabled) return NULL;
     struct queue *q = &capture.queues[producer];
-    uint64_t seq = atomic_fetch_add_explicit(&q->attempted, 1, memory_order_relaxed) + 1;
+    uint64_t seq = atomic_load_explicit(&q->attempted, memory_order_relaxed) + 1;
+    atomic_store_explicit(&q->attempted, seq, memory_order_relaxed);
     uint64_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     if (q->reserved - head == capture.capacity || seq == UINT64_MAX) {
-        atomic_fetch_add_explicit(&q->dropped, 1, memory_order_relaxed);
+        atomic_store_explicit(&q->dropped, atomic_load_explicit(&q->dropped, memory_order_relaxed) + 1, memory_order_relaxed);
         return NULL;
     }
     struct observer_record *dst = &q->records[q->reserved % capture.capacity];
-    memset(dst, 0, sizeof(*dst)); dst->producer_seq = seq;
+    observer_record_init(dst, OBS_PACKET, 0); dst->producer_seq = seq;
     dst->order = atomic_fetch_add_explicit(&capture.order, 1, memory_order_relaxed);
     uint64_t size = ++q->reserved - head;
     if (size > atomic_load_explicit(&q->high_water, memory_order_relaxed))
@@ -116,7 +151,8 @@ bool observer_emit(enum observer_producer producer, const struct observer_record
     struct observer_record *dst = observer_reserve(producer);
     if (!dst) return false;
     uint64_t seq = dst->producer_seq, order = dst->order;
-    *dst = *record; dst->producer_seq = seq; dst->order = order;
+    memcpy(dst, record, offsetof(struct observer_record, items) + record->count * sizeof(record->items[0]));
+    dst->producer_seq = seq; dst->order = order;
     observer_commit(producer);
     return true;
 }
@@ -164,6 +200,18 @@ static void serialize(FILE *f, unsigned producer, const struct observer_record *
     }
     fputs("]}\n", f);
 }
+
+static void binary_failure(void)
+{
+    capture.write_failed = true;
+    for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
+        uint64_t lost = capture.writer.pending[p];
+        atomic_fetch_sub(&capture.queues[p].emitted, lost);
+        atomic_fetch_add(&capture.queues[p].capture_drops, lost);
+        capture.writer.pending[p] = 0;
+    }
+}
+
 static void *consumer(void *unused)
 {
     (void)unused;
@@ -174,29 +222,52 @@ static void *consumer(void *unused)
         capture.per_direction ? "per-direction" : "shared", capture.ports[0]);
     if (capture.port_count == 2) n += snprintf(header + n, sizeof(header) - n, ",%u", capture.ports[1]);
     n += snprintf(header + n, sizeof(header) - n, "]}\n");
-    output(header, (size_t)n);
+    if (capture.binary) {
+        if (!observer_binary_text(&capture.writer, 1, header, (size_t)n)) binary_failure();
+    } else output(header, (size_t)n);
     uint64_t next_order = 0;
     for (;;) {
+        /* Acquire stop before tails: observing stop must include the final publications. */
+        bool stopped = atomic_load_explicit(&capture.stop, memory_order_acquire);
         bool pending = false, emitted = false;
         for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
             struct queue *q = &capture.queues[p];
             uint64_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-            if (head == atomic_load_explicit(&q->tail, memory_order_acquire)) continue;
+            uint64_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+            if (head == tail) continue;
             pending = true;
-            struct observer_record *r = &q->records[head % capture.capacity];
-            if (r->order != next_order) continue;
-            char *data = NULL; size_t length = 0;
-            FILE *f = open_memstream(&data, &length);
-            bool ok = f != NULL;
-            if (ok) { serialize(f, p, r); ok = fclose(f) == 0; }
-            if (ok) ok = output(data, length);
-            free(data);
-            atomic_fetch_add(ok ? &q->emitted : &q->capture_drops, 1);
-            atomic_store_explicit(&q->head, head + 1, memory_order_release);
-            next_order++; emitted = true;
+            while (head != tail) {
+                if (capture.binary && tail - head > 4) {
+                    const char *future = (const char *)&q->records[(head + 4) % capture.capacity];
+                    size_t visible = p == OBS_TX || p == OBS_TX1 ? sizeof(struct observer_record) :
+                        offsetof(struct observer_record, items) + sizeof(struct observer_packet);
+                    visible += RTE_CACHE_LINE_SIZE;
+                    if (visible > sizeof(struct observer_record)) visible = sizeof(struct observer_record);
+                    for (unsigned offset = 0; offset < visible; offset += RTE_CACHE_LINE_SIZE)
+                        rte_prefetch0(future + offset);
+                }
+                struct observer_record *r = &q->records[head % capture.capacity];
+                if (r->order != next_order) break;
+                bool ok;
+                if (capture.binary) {
+                    ok = observer_binary_record(&capture.writer, p, r);
+                    if (!ok) binary_failure();
+                } else {
+                    char *data = NULL; size_t length = 0;
+                    FILE *f = open_memstream(&data, &length);
+                    ok = f != NULL;
+                    if (ok) { serialize(f, p, r); ok = fclose(f) == 0; }
+                    if (ok) ok = output(data, length);
+                    free(data);
+                }
+                if (ok) atomic_store_explicit(&q->emitted, atomic_load_explicit(&q->emitted, memory_order_relaxed) + 1, memory_order_relaxed);
+                else atomic_fetch_add(&q->capture_drops, 1);
+                head++; next_order++; emitted = true;
+            }
+            atomic_store_explicit(&q->head, head, memory_order_release);
         }
-        if (atomic_load_explicit(&capture.stop, memory_order_acquire) && !pending) break;
-        if (!emitted && pending && atomic_load_explicit(&capture.stop, memory_order_acquire)) {
+        if (stopped && !pending) break;
+        if (!emitted && pending && stopped) {
             /* An aborted reservation can leave a global-order hole; discard its blocked suffix. */
             for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
                 struct queue *q = &capture.queues[p];
@@ -205,8 +276,12 @@ static void *consumer(void *unused)
                 atomic_store(&q->head, tail);
             }
         }
-        if (!emitted) { struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL); }
+        if (!emitted) {
+            if (capture.binary) rte_pause();
+            else { struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL); }
+        }
     }
+    if (capture.binary && !observer_binary_flush(&capture.writer)) binary_failure();
     char *data = NULL; size_t length = 0; FILE *f = open_memstream(&data, &length);
     if (f) {
         bool complete = capture.complete && !capture.write_failed && !atomic_load(&capture.abort_reasons);
@@ -221,7 +296,13 @@ static void *consumer(void *unused)
                 ",\"high_water\":%"PRIu64",\"identity_errors\":%"PRIu64",\"malformed_records\":%"PRIu64"}", p ? "," : "", h.records_attempted,
                 h.records_emitted, h.records_dropped, h.capture_drops, h.queue_high_water, h.identity_errors, h.malformed_records);
         }
-        fputs("]}\n", f); if (fclose(f) == 0) output(data, length); free(data);
+        fputs("]}\n", f);
+        if (fclose(f) == 0) {
+            if (capture.binary) {
+                if (!observer_binary_text(&capture.writer, 3, data, length)) binary_failure();
+            } else output(data, length);
+        } else capture.write_failed = true;
+        free(data);
     } else capture.write_failed = true;
     return NULL;
 }
@@ -252,6 +333,10 @@ bool observer_close(bool complete)
         if (last_health[p].records_dropped || last_health[p].capture_drops || last_health[p].identity_errors || last_health[p].malformed_records) ok = false;
         free(capture.queues[p].records);
     }
+    last_storage = capture.binary ? (struct observer_storage_health){OBS_IO_BLOCKS,
+        capture.writer.io_peak, capture.writer.submitted - capture.writer.reaped, capture.writer.io_cpu} :
+        (struct observer_storage_health){0};
+    observer_binary_destroy(&capture.writer);
     close(capture.fd); capture.enabled = false;
     return ok;
 }
@@ -311,12 +396,14 @@ void observer_input(enum observer_producer producer, struct rte_mbuf *m)
     }
     if (!x->classified) x->input_error = 1;
     if (!x->identity_kind) { x->input_error = 2; atomic_fetch_add(&capture.queues[producer].identity_errors, 1); }
-    struct observer_record r = {.kind = OBS_PACKET, .count = 1}; r.items[0] = *x; observer_emit(producer, &r);
+    struct observer_record r; observer_record_init(&r, OBS_PACKET, 1);
+    r.items[0] = *x; observer_emit(producer, &r);
 }
 void observer_terminal(enum observer_producer producer, const struct rte_mbuf *m, enum observer_reason reason, uint64_t at_ns)
 {
     if (!capture.enabled) return;
-    struct observer_record r = {.kind = OBS_TERMINAL, .reason = reason, .at_ns = at_ns, .count = 1};
+    struct observer_record r; observer_record_init(&r, OBS_TERMINAL, 1);
+    r.reason = reason; r.at_ns = at_ns;
     r.items[0] = observer_packet(m); observer_emit(producer, &r);
 }
 void observer_input_end(enum observer_producer producer, uint16_t port, uint64_t next)
@@ -325,14 +412,16 @@ void observer_input_end(enum observer_producer producer, uint16_t port, uint64_t
     int i = input_index(producer, port);
     if (i < 0) return;
     capture.input_ended[i] = true;
-    struct observer_record r = {.kind = OBS_END, .port = port, .actual_selection_seq = next}; observer_emit(producer, &r);
+    struct observer_record r; observer_record_init(&r, OBS_END, 0);
+    r.port = port; r.actual_selection_seq = next; observer_emit(producer, &r);
 }
 
 void observer_resources(uint16_t port, bool end, uint64_t total, uint64_t free_count, const struct rte_eth_stats *nic)
 {
     if (!capture.enabled) return;
-    struct observer_record r = {.kind = OBS_RESOURCES, .port = port, .at_ns = host_now_ns(),
-        .resources = {end, total, free_count, nic != NULL}};
+    struct observer_record r; observer_record_init(&r, OBS_RESOURCES, 0);
+    r.port = port; r.at_ns = host_now_ns();
+    r.resources[0] = end; r.resources[1] = total; r.resources[2] = free_count; r.resources[3] = nic != NULL;
     if (nic) {
         r.resources[4] = nic->ipackets; r.resources[5] = nic->opackets;
         r.resources[6] = nic->imissed; r.resources[7] = nic->ierrors;

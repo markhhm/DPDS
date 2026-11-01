@@ -157,8 +157,8 @@ static void tx_step_clock(struct tx_state *s, struct rte_mbuf **batch, uint16_t 
             if (eligible[line] != open) unchanged = false;
         }
         if (!unchanged) continue;
-        struct observer_record event = {.kind = OBS_ATTEMPT, .port = port, .count = n,
-            .gate_ns = now, .snapshot = s->snapshot};
+        struct observer_record event; observer_record_init(&event, OBS_ATTEMPT, n);
+        event.port = port; event.gate_ns = now; event.snapshot = s->snapshot;
         if (observer_enabled()) {
             event.attempt_id = s->attempt_id[port]++;
             memcpy(event.consumed_dispatch, s->consumed_dispatch, sizeof(event.consumed_dispatch));
