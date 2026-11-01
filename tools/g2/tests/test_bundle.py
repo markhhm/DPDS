@@ -26,7 +26,7 @@ except ImportError:
 
 
 def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
-            length=60, flow_id="f", selected_late=None):
+            length=60, flow_id="f", selected_late=None, trace=None):
     cfg, reg, cal = config(), manifest(), document()
     reg["run"] = cal["run"] = run
     # Extra lines share the first line's ingress and egress port and differ by VLAN.
@@ -37,6 +37,16 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
         reg["required_cells"].append(dict(reg["required_cells"][0], line=name))
     for line in cfg["lines"]:
         line["model"].update(p="0", delta_ns=0)
+    traces = {}
+    if trace is not None:
+        raw_trace = json.dumps(dict(schema='hng-trace-v1', source_id='synthetic',
+            direction='forward', units='ns_owd', conversion='synthetic ns', source_sha256='0'*64,
+            splice_policy='natural_hold', trace_epoch_ns=0, time_scale=1, profile=trace)).encode()
+        (root/'trace.json').write_bytes(raw_trace)
+        cfg['lines'][0]['trace'] = dict(path='trace.json', sha256=hashlib.sha256(raw_trace).hexdigest())
+        cfg['lines'][0]['model']['t_ns'] = 0
+        reg['traces'] = [dict(line='cable', **cfg['lines'][0]['trace'], provenance='synthetic')]
+        traces['cable'] = trace
     reg["sampling"]["oversample_apps"] = []
     for cell in reg["required_cells"]:
         cell.update(mask_bits=0, planned_survivors=count//lines)
@@ -51,7 +61,7 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
     cal["clocks"].append(dict(clock_id="engine", kind="fake", unit="ns", width_bits=64,
                               device_token="fake-engine", mode="synthetic"))
     rows = {role:[] for role in ("ingress", "expected", "before", "receiver", "host", "counters")}
-    ref = Reference(cfg, run)
+    ref = Reference(cfg, run, traces)
     for seq in range(count):
         packet = dict(kind="packet", run=run, stream_id="ingress", seq=seq+1,
             ingress_port=0, ingress_seq=seq, line=names[seq%lines], selection_seq=seq//lines,
@@ -117,7 +127,8 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
             if event["kind"]=="summary":
                 values["expected_sha256"] = digest.hexdigest()
                 values.setdefault("input_streams", input_integrity)
-                values.setdefault("trace_sha256", {})
+                values.setdefault("trace_sha256", {line["name"]:line["trace"]["sha256"]
+                    for line in cfg["lines"] if line["trace"]})
                 values.setdefault("config_file_sha256", hashlib.sha256(json.dumps(cfg).encode()).hexdigest())
             written = writer.emit(event["kind"], **values)
             if event["kind"]=="expected":
@@ -165,6 +176,36 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(row["probe_sent"], 0)
         self.assertEqual(row["serialization"]["modeled"]["wait"]["n"], 400)
         self.assertEqual(row["serialization"]["actual_attempt"]["wait"]["n"], 400)
+
+    def test_trace_l0_uses_registered_reference_owd_and_writes_a_verdict(self):
+        from tools.g2.matrix import report_one
+        trace = dict(end_ns=10**9, terminal='error', terminal_horizon_ns=None,
+            loss_seed=0, outage_action='hold', rows=[
+                dict(at_ns=0, t_ns=100, loss='0', outage=False),
+                dict(at_ns=200_000, t_ns=50, loss='0', outage=False)])
+        for name, profile, added_delay, status, error in (
+                ('trace', trace, 0, 'PASS', 0),
+                ('trace-delay', trace, 600_000, 'FAIL', 600_000),
+                ('fixed', None, 0, 'PASS', 84)):
+            with self.subTest(case=name):
+                root = self.root/name
+                root.mkdir()
+                def calibrate(rows, reg):
+                    reg['timing_mode'] = 'calibration'
+                    if added_delay:
+                        reg['capacity']['max_unresolved'] = 410
+                        for row in rows['receiver']:
+                            row['receive_ns'] += added_delay
+                            row['timestamp']['raw'] += added_delay
+                fixture(root, trace=profile, mutate=calibrate)
+                destination = root/'result'
+                result = report_one(root/'manifest.json', destination, 'demo', 'software-only')
+                report = json.loads((destination/'report.json').read_text())
+                self.assertEqual(result, 0 if status == 'PASS' else 1, report['reason_codes'])
+                self.assertEqual(json.loads((destination/'verdict.json').read_text())['status'], status)
+                self.assertNotIn('trace_calibration_unavailable', report['reason_codes'])
+                self.assertEqual(report['rows'][0]['timing']['main']['p99_abs_error_ns'], error)
+                self.assertFalse(report['g2_qualified'])
 
     def test_two_lines_sharing_one_egress_port_pass_with_per_line_cells(self):
         result = self.run_bundle(count=800, lines=2)

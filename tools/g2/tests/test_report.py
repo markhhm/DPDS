@@ -241,9 +241,12 @@ class ReportTests(unittest.TestCase):
         expected, received = copy.deepcopy(self.expected), copy.deepcopy(self.received)
         expected[0]["release_ns"] = received[0]["receive_ns"] = 2_000_100
         summary = sealed_summary(expected, cfg)
-        result = build_report(expected, summary, received, self.counters, cfg, self.manifest, {"cable": trace})
-        self.assertEqual(result["status"], "PASS")
-        self.assertEqual(result["directions"]["0"]["timing"]["main"]["p99_abs_error_ns"], 0)
+        for mode in ('stress', 'calibration'):
+            with self.subTest(mode=mode):
+                result = build_report(expected, summary, received, self.counters, cfg,
+                                      dict(self.manifest, timing_mode=mode), {"cable": trace})
+                self.assertEqual(result["status"], "PASS")
+                self.assertEqual(result["directions"]["0"]["timing"]["main"]["p99_abs_error_ns"], 0)
 
     def test_late_collision_serialization_is_reported_without_changing_error(self):
         expected = copy.deepcopy(self.expected)

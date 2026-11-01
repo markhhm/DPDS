@@ -57,6 +57,10 @@ canonical profile. It neither splices nor extends the natural 11 s exposure.
   100 ms for B. The zero t/delta/p fields describe the LEO model.
   Its trace supplies delay. The paired cable uses its separately declared fixed t.
 
+- L0/calibration trace lines use the registered per-packet reference OWD
+  (`release_ns - arrival_ns`), including modeled hold/clamp, as in stress mode.
+  Fixed lines keep `t + I*delta`. Timing thresholds and calibration checks are unchanged.
+
 - U uses q=1522/wire=1542 bytes. X uses equal packet counts at q=64/512/1522
   with 64 flows. Budgeting conservatively uses wire=1542 bytes for both profiles.
 

@@ -161,7 +161,6 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
         if manifest["timing_mode"]=="calibration":
             line = next(line for line in config["lines"] if line["name"]==row["line"])
             if line["trace"]:
-                issue("trace_calibration_unavailable", row=row)
                 expected_ns = row["release_ns"]-row["arrival_ns"]
             else:
                 expected_ns = line["model"]["t_ns"]+row["late"]*line["model"]["delta_ns"]
