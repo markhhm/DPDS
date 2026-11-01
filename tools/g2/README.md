@@ -88,9 +88,11 @@ persists across both endpoints does not disappear from the assessment.
 Missing, reset or invalid evidence produces a warning. An incomplete counter
 scope inventory also prevents PASS. Each warning identifies its
 `observer` and `code`. `end_backlog` retains the derived count or null.
+
 This count conservatively includes records that capture output failed to emit.
 It is not a direct queue-length measurement. The loss condition also rejects
 capture-output loss.
+
 Any warning makes the affected report cells INCONCLUSIVE, while their gate
 diagnostics remain available. Structural errors retain INVALID.
 The normalized counter view also includes this assessment.

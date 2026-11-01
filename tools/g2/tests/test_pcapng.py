@@ -108,9 +108,7 @@ class PcapngTests(unittest.TestCase):
                     pcapng(root/f'{role}.pcapng', [row[key]+(3 if role=='receiver' else 0) for row in expected],
                            endian=endian, snaplen=retained, caplen=retained, ip_options=ip_options)
                 result = self.invoke(root)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                report = json.loads((root/'out/reports/demo/report.json').read_text())
-                self.assertEqual(report['measurement_status'], 'PASS', report['reason_codes'])
+                self.assert_healthy_capture_with_cost_warning(root, result)
                 for role in ('before', 'receiver'):
                     rows = list(StreamReader(root/f'out/bundle/{role}.jsonl', role=role))
                     self.assertEqual([row['external_identity'] for row in rows], [FLOW+f':{i}' for i in range(400)])
