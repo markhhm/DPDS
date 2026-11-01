@@ -68,7 +68,9 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
                 for cell in affected(row, tags):
                     cell["incomplete"].add("mismatch_cap_exhausted")
 
-    custody = LiveCustody(config, traces, manifest, active, issue)
+    custody = LiveCustody(config,
+        {name: state["trace"] for name, state in reference.lines.items() if state["trace"] is not None},
+        manifest, active, issue)
 
     def advance(token):
         reader = readers[token]

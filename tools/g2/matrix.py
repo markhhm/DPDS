@@ -11,9 +11,9 @@ import uuid
 
 from .bundle import build_bundle_report
 from .protocol import StreamError, shape
-from .reference import load_config, strict_json
+from .reference import strict_json
 from .report import error_report, write_outputs
-from .validate import preflight
+from .validate import load_registration
 
 
 EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}
@@ -114,8 +114,7 @@ def report_one(manifest_path, output, run_id, scope, mode="software"):
             from .pcapng import prepare_pair
             path = prepare_pair(pair_path, destination / "capture")
             manifest = strict_json(path.read_bytes())
-        checked = preflight(path)
-        config, traces = load_config(path.parent / manifest["config"]["path"])
+        checked, config, traces = load_registration(path)
         sources = {row["stream_id"]: path.parent / row["path"] for row in manifest["streams"]}
         calibration = strict_json((path.parent / manifest["calibration_path"]).read_bytes())
         result = build_bundle_report(config, traces, manifest, sources, calibration, destination)

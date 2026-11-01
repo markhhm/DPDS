@@ -195,7 +195,7 @@ class Reference:
                 trace_reference(line["trace"])
                 if model["t_ns"] or chance or model["delta_ns"] or name not in (traces or {}):
                     raise ValueError("trace needs registered profile, t=0, p=0 and delta=0")
-                trace = Trace(traces[name])
+                trace = traces[name] if isinstance(traces[name], Trace) else Trace(traces[name])
             envelope = line["envelope"]
             fields(envelope, ("min_q_bytes", "max_q_bytes", "burst_bound_packets"))
             low = uint(envelope["min_q_bytes"], "minimum frame")
