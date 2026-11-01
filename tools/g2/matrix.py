@@ -18,15 +18,22 @@ EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}
 WORKER = "from tools.g2.matrix import report_one; import sys; sys.exit(report_one(*sys.argv[1:]))"
 
 
-def report_one(manifest_path, output, run_id, scope):
+def report_one(manifest_path, output, run_id, scope, mode="software"):
     """Keep the reporter's large result in a fresh process, not the controller."""
     path, destination = Path(manifest_path), Path(output)
     destination.mkdir()
     manifest = {"run": run_id, "scope": scope}
     try:
         manifest = strict_json(path.read_bytes())
+        if mode == "pcapng":
+            pair_path = path
+            manifest = strict_json((path.parent / manifest["manifest"]).read_bytes())
         if not isinstance(manifest, dict) or manifest.get("run") != run_id or manifest.get("scope") != scope:
             raise StreamError("MATRIX_METADATA_MISMATCH", "run/scope differs from matrix registration")
+        if mode == "pcapng":
+            from .pcapng import prepare_pair
+            path = prepare_pair(pair_path, destination / "capture")
+            manifest = strict_json(path.read_bytes())
         checked = preflight(path)
         config, traces = load_config(path.parent / manifest["config"]["path"])
         sources = {row["stream_id"]: path.parent / row["path"] for row in manifest["streams"]}
@@ -49,7 +56,10 @@ def report_one(manifest_path, output, run_id, scope):
 def run_matrix(matrix_path, output):
     path = Path(matrix_path)
     matrix = strict_json(path.read_bytes())
-    shape(matrix, ("schema", "scope", "plan", "runs"))
+    shape(matrix, ("schema", "scope", "plan", "runs"), ("mode",))
+    mode = matrix.get("mode", "software")
+    if mode not in ("software", "pcapng"):
+        raise ValueError("unsupported matrix mode")
     if matrix["schema"] != "hng-m6-matrix-v1" or matrix["scope"] not in ("software-only", "physical"):
         raise ValueError("unsupported matrix schema/scope")
     if not isinstance(matrix["plan"], dict) or not isinstance(matrix["runs"], list) or not matrix["runs"]:
@@ -79,7 +89,7 @@ def run_matrix(matrix_path, output):
         with (destination / (run_id + ".stderr.log")).open("w") as log:
             process = subprocess.run([sys.executable, "-c", WORKER,
                 str((path.parent / run["manifest"]).resolve()), str((destination / run_id).resolve()),
-                run_id, matrix["scope"]], stdout=subprocess.DEVNULL, stderr=log)
+                run_id, matrix["scope"], mode], stdout=subprocess.DEVNULL, stderr=log)
         try:
             verdict = strict_json((destination / run_id / "verdict.json").read_bytes())
             if (verdict["run"] != run_id or verdict["scope"] != matrix["scope"]

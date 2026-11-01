@@ -1,0 +1,11 @@
+{
+  "schema": "hng-m6-matrix-v1",
+  "mode": "pcapng",
+  "scope": "physical",
+  "plan": {},
+  "runs": [
+    {"id": "main-r0", "family": "main", "manifest": "captures/main-r0/pair.json"},
+    {"id": "boundary-r0", "family": "boundary", "manifest": "captures/boundary-r0/pair.json"},
+    {"id": "trace-r0", "family": "trace", "manifest": "captures/trace-r0/pair.json"}
+  ]
+}

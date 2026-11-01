@@ -48,9 +48,9 @@ def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution
     path.write_bytes(data)
 
 
-def setup(root, endian='<'):
+def setup(root, endian='<', run='demo'):
     source=root/'source'; source.mkdir()
-    _, registration, sources, calibration=fixture(source, length=146, flow_id=FLOW, selected_late=0)
+    _, registration, sources, calibration=fixture(source, length=146, flow_id=FLOW, selected_late=0,run=run)
     calibration['clocks'].append(dict(clock_id='capture',kind='fake',unit='ns',width_bits=64,
                                      device_token='synthetic-capture',mode='synthetic'))
     calibration['mappings']=[dict(mapping_id='ns',raw_clock_id='capture',target_clock_id='obs',

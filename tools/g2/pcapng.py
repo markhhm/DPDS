@@ -270,7 +270,8 @@ def convert_stream(pair, role, base, manifest, registration, destination, clock,
     return health
 
 
-def convert_pair(pair_path, output):
+def prepare_pair(pair_path, output):
+    """Write converted streams and return their manifest; leave reporting to the caller."""
     pair_path = Path(pair_path)
     pair = strict_json(pair_path.read_bytes())
     shape(pair, ('schema','manifest','clock_id','mapping_id','uncertainty_ns','start_ns','end_ns','before','receiver'))
@@ -367,6 +368,13 @@ def convert_pair(pair_path, output):
     (destination/'conversion.json').write_text(json.dumps(dict(schema='hng-pcapng-conversion-v1',
         run=manifest['run'],scope=manifest['scope'],g2_qualified=False,captures=health,
         source_manifest_sha256=file_hash(path),source_counters_sha256=counters.integrity['file_sha256']),indent=2)+'\n')
+    return bundle/'manifest.json'
+
+
+def convert_pair(pair_path, output):
+    path = prepare_pair(pair_path, output)
+    manifest = strict_json(path.read_bytes())
+    destination = Path(output)
     matrix = dict(schema='hng-m6-matrix-v1',scope=manifest['scope'],plan={},
                   runs=[dict(id=manifest['run'],manifest='bundle/manifest.json')])
     (destination/'matrix.json').write_text(json.dumps(matrix)+'\n')
