@@ -147,6 +147,29 @@ def normalize_counters(rows, manifest):
                     issue("observer_queue_overflow")
     result["reason_codes"] = sorted(reasons)
     result["measurement_status"] = "INVALID" if invalid else "INCONCLUSIVE" if reasons else "PASS"
+    cost = dict(status="PASS", warnings=[], end_backlog={})
+    counts = ("records_attempted", "records_emitted", "records_dropped")
+    gauges = ("queue_high_water", "queue_capacity")
+    fields = (*counts, "capture_drops", *gauges)
+    for token, values in result["observer"].items():
+        end = snapshots.get(("observer", token), {}).get("end")
+        descriptors = result["descriptors"].get("observer:"+token, {})
+        available = (not invalid and end is not None and all(values.get(name) is not None for name in fields)
+                     and all((descriptors.get(name, {}).get("semantics")=="gauge") == (name in gauges)
+                             for name in fields))
+        backlog = (end["values"]["records_attempted"]-end["values"]["records_emitted"]
+                   -end["values"]["records_dropped"]) if available else None
+        cost["end_backlog"][token] = backlog
+        checks = dict(observer_cost_unavailable=not available or bool(reasons),
+            observer_cost_loss=any(values.get(name) for name in ("records_dropped", "capture_drops")),
+            observer_cost_queue_full=(values.get("queue_capacity")==0 or
+                all(values.get(name) is not None for name in gauges)
+                and values["queue_high_water"]>=values["queue_capacity"]),
+            observer_cost_backlog=backlog is not None and backlog != 0)
+        cost["warnings"].extend(dict(observer=token, code=code) for code, warning in checks.items() if warning)
+    if cost["warnings"]:
+        cost["status"] = "INCONCLUSIVE"
+    result["observer_cost"] = cost
     return result
 
 

@@ -32,6 +32,8 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
     before_order = ReceiveOrder(manifest["capacity"]["max_unresolved"], "ingress_port", "before_seq")
     order_high, flow_high = {}, {}
     limit = manifest["capacity"]["max_unresolved"]
+    cost = dict(status="INCONCLUSIVE", warnings=[dict(observer=None, code="observer_cost_unavailable")],
+                end_backlog={})
 
     def affected(row, tags=None):
         if tags is not None:
@@ -199,6 +201,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
         except StreamError as exc:
             counters = dict(ports={}, observer={}, reason_codes=[exc.code], measurement_status=exc.measurement_status)
             issue(exc.code, exc.measurement_status)
+        cost = counters.get("observer_cost", cost)
         expected_readers = [reader for reader in readers.values() if reader.header["role"]=="expected"]
         if len(expected_readers)!=1:
             raise StreamError("EXPECTED_PARTITION_UNSUPPORTED", "one ordered reference stream is required")
@@ -428,6 +431,8 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
         if witnesses is not None:
             witnesses.finish(readers)
         active.clear()
+    for warning in cost["warnings"]:
+        issue(warning["code"])
     result = cells.finish(identity_report)
     serializations = serializer.finish()
     for row in result["rows"]:
@@ -490,7 +495,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
         stage1_source_commit=manifest["stage1_source_commit"], stage1_source_review=manifest["stage1_source_review"],
         directions={port:dict(required_cells=sum(row["direction"]==port for row in required)) for port in {row["direction"] for row in required}},
         stream_integrity=[reader.integrity for reader in readers.values()],
-        observer_cost=dict(active_join_limit=limit, active_join_peak=peak, active_join_live=0,
+        observer_cost=dict(cost, active_join_limit=limit, active_join_peak=peak, active_join_live=0,
                            processing_qualified=False, storage_qualified=False),
         registration=manifest, counters=locals().get("counters"),
         mismatches=dict(cap=cells.retention.cap, records=mismatch_records,

@@ -57,7 +57,9 @@ def error_report(exc, manifest):
                          "g2_pass":False,"g2_qualified":False,"reason_codes":[code]})
     return dict(schema="hng-g2-report-v1",run=manifest.get("run"),condition_id=manifest.get("condition_id"),
         status="INVALID",measurement_status=state,scope=manifest.get("scope","software-only"),g2_qualified=False,
-        reason_codes=[code],reason=str(exc),rows=rows,sources={},directions={},stream_integrity=[],observer_cost={},
+        reason_codes=[code],reason=str(exc),rows=rows,sources={},directions={},stream_integrity=[],
+        observer_cost=dict(status="INCONCLUSIVE", warnings=[dict(observer=None, code="observer_cost_unavailable")],
+                           end_backlog={}),
         registration=manifest,stage1_source_commit=manifest.get("stage1_source_commit"),
         stage1_source_review=manifest.get("stage1_source_review"),unavailable=["handled_setup_or_schema_error"])
 

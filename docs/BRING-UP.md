@@ -114,12 +114,10 @@ See the [observation tools](../tools/g2/README.md) for current software limits.
    observer counters, the reporter's `observer_cost` object and associated
    reason codes in `OBSERVER_COST_REPORT`.
 
-Require all three conditions before M6:
-
-- Require measured `records_dropped=0` and `capture_drops=0` for every observer.
-- Require measured `queue_capacity>0` and `queue_high_water<queue_capacity` for every observer queue.
-- The reporter's `observer_cost` assessment has no warnings. Missing or
-  inconclusive cost evidence does not pass.
+Require the reporter's [`observer_cost` assessment](../tools/g2/README.md#observer-cost-assessment)
+to have `status=PASS` and an empty `warnings` list before M6.
+It requires zero observer loss, strict queue headroom and zero backlog at capture end.
+Missing or inconclusive cost evidence does not pass.
 
 Record the gate decision, `EVIDENCE_COMMIT`, `RUN_ID`, `HOST_REV`, `CORE_REV` and
 `OBSERVER_REV` with the report. Preserve configuration and calibration hashes.

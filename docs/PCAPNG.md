@@ -71,6 +71,14 @@ capture failure.
 
 ## Output and limits
 
+The adapter supplies synthetic queue counters for the converted before/receiver
+streams: capacity is 1, and high-water is 1 for a nonempty capture.
+These counters cannot prove physical queue headroom. The reporter's
+[`observer_cost` assessment](../tools/g2/README.md#observer-cost-assessment)
+therefore warns and keeps such cells INCONCLUSIVE, even with complete healthy
+pcapng files. Capture health and gate diagnostics remain in the report.
+Use native physical observer evidence for the bring-up cost pilot.
+
 `bundle/` holds before/receiver/counter streams and an updated manifest.
 Its `source` symlink references the original native bundle, so keep that source
 directory available when rerunning or archiving. `conversion.json` retains

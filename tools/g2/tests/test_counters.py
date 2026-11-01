@@ -51,6 +51,86 @@ def records():
 
 
 class CounterTests(unittest.TestCase):
+    def test_observer_cost_requires_zero_loss_strict_headroom_and_an_empty_end(self):
+        cases = [({}, 'PASS', None),
+                 ({'records_dropped': 1, 'records_attempted': 11}, 'INCONCLUSIVE', 'observer_cost_loss'),
+                 ({'capture_drops': 1}, 'INCONCLUSIVE', 'observer_cost_loss'),
+                 ({'queue_high_water': 4096}, 'INCONCLUSIVE', 'observer_cost_queue_full'),
+                 ({'queue_capacity': 0}, 'INCONCLUSIVE', 'observer_cost_queue_full'),
+                 ({'queue_high_water': None}, 'INCONCLUSIVE', 'observer_cost_unavailable'),
+                 ({'records_attempted': 11}, 'INCONCLUSIVE', 'observer_cost_backlog')]
+        for changes, status, warning in cases:
+            with self.subTest(changes=changes):
+                rows = records()
+                end = next(row for row in rows if row['scope']=='observer' and row['scope_id']=='host'
+                           and row['phase']=='end')
+                end['values'].update(changes)
+                for name, value in changes.items():
+                    if value is None:
+                        end['descriptors'][name].update(status='missing', reason='not_recorded')
+                result = normalize_counters(rows, manifest())
+                cost = result.get('observer_cost', {})
+                self.assertEqual(cost.get('status'), status)
+                if warning:
+                    self.assertIn(dict(observer='host', code=warning), cost['warnings'])
+                else:
+                    self.assertEqual(cost['warnings'], [])
+                    self.assertEqual(cost['end_backlog'], dict(ingress=0, before=0, receiver=0, host=0))
+
+    def test_observer_cost_checks_absolute_end_backlog_not_only_deltas(self):
+        rows = records()
+        for row in rows:
+            if row['scope']=='observer' and row['scope_id']=='host':
+                row['values']['records_attempted'] += 1
+        result = normalize_counters(rows, manifest())
+        self.assertEqual(result['measurement_status'], 'PASS')
+        self.assertEqual(result['observer']['host']['records_attempted'], 10)
+        self.assertEqual(result.get('observer_cost', {}).get('status'), 'INCONCLUSIVE')
+        self.assertEqual(result['observer_cost']['end_backlog']['host'], 1)
+
+    def test_observer_cost_checks_individual_native_producers_not_just_aggregate(self):
+        rows = records()
+        for row in copy.deepcopy(rows[-2:]):
+            row['scope_id'] = 'native-producer-3'
+            row['values']['queue_capacity'] = 8
+            row['values']['queue_high_water'] = 8 if row['phase']=='end' else 0
+            rows.append(row)
+        cost = normalize_counters(rows, manifest()).get('observer_cost', {})
+        self.assertEqual(cost.get('status'), 'INCONCLUSIVE')
+        self.assertIn(dict(observer='native-producer-3', code='observer_cost_queue_full'), cost['warnings'])
+
+    def test_observer_cost_missing_end_or_reset_never_becomes_zero_backlog(self):
+        for reset in (False, True):
+            rows = records()
+            if reset:
+                rows[-1]['reset_generation'] = 1
+            else:
+                rows.pop()
+            cost = normalize_counters(rows, manifest()).get('observer_cost', {})
+            self.assertEqual(cost.get('status'), 'INCONCLUSIVE')
+            self.assertIn(dict(observer='host', code='observer_cost_unavailable'), cost['warnings'])
+            self.assertIsNone(cost['end_backlog']['host'])
+
+    def test_observer_cost_rejects_invalid_snapshots_and_incomplete_scope_inventory(self):
+        for fault in ('duplicate_end', 'time_backward', 'scope_capacity'):
+            with self.subTest(fault=fault):
+                rows, registration = records(), manifest()
+                if fault=='duplicate_end':
+                    rows.append(dict(copy.deepcopy(rows[-1]), seq=len(rows)+1))
+                elif fault=='time_backward':
+                    rows[-2]['at_ns'] = 101
+                else:
+                    registration['capacity']['max_unresolved'] = 5
+                    for row in copy.deepcopy(rows[-2:]):
+                        row.update(scope_id='native-producer-3', seq=len(rows)+1)
+                        row['values']['queue_high_water'] = 4096
+                        rows.append(row)
+                result = normalize_counters(rows, registration)
+                self.assertNotEqual(result['measurement_status'], 'PASS')
+                self.assertEqual(result.get('observer_cost', {}).get('status'), 'INCONCLUSIVE')
+                self.assertTrue(any(row['code']=='observer_cost_unavailable'
+                                    for row in result['observer_cost']['warnings']))
+
     def test_deltas_exclude_pre_run_counts_and_preserve_terminal_descriptors(self):
         self.assertTrue(callable(normalize_counters), "typed counter normalization is missing")
         result = normalize_counters(iter(records()), manifest())
