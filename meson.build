@@ -9,6 +9,11 @@ core = declare_dependency(
   link_args: ['-L' + meson.project_source_root() / 'dpds-core/target/release', '-ldpds_core'],
   compile_args: ['-I' + meson.project_source_root() / 'dpds-core/target'], sources: cargo_build)
 python = find_program('python3')
+seqcheck = executable('seqcheck', 'tools/seqcheck/seqcheck.c',
+  dependencies: [dependency('libcrypto'), dependency('threads')], install: true)
+test('seqcheck', python, args: ['-m', 'unittest', '-v', 'tools.seqcheck.test_seqcheck'],
+  env: ['SEQCHECK_BINARY=' + seqcheck.full_path()],
+  workdir: meson.project_source_root(), depends: seqcheck)
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
 core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'],

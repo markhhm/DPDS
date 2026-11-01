@@ -18,7 +18,7 @@ jobs:
       - name: Build user-local DPDK with virtual PMDs
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential meson ninja-build pkg-config libpcap-dev libnuma-dev python3-pyelftools
+          sudo apt-get install -y build-essential libssl-dev meson ninja-build pkg-config libpcap-dev libnuma-dev python3-pyelftools
           cd "$RUNNER_TEMP"
           curl -fsSLO https://fast.dpdk.org/rel/dpdk-26.03.tar.xz
           tar -xf dpdk-26.03.tar.xz

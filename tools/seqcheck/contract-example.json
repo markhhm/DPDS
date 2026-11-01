@@ -1,0 +1,79 @@
+{
+  "schema": "hng-seqcheck-v1",
+  "scope": "supplied-captures",
+  "status": "FAIL",
+  "complete": true,
+  "inputs": {
+    "ingress": {
+      "path": "ingress.pcapng",
+      "sha256": "23f07a11fc5b200a6f63700f27d41485d34c468aa717e4f47b3b1c8b83944336",
+      "byte_size": 424,
+      "packets": 3,
+      "health": {
+        "complete": true,
+        "capture_drops": 0
+      },
+      "error": null
+    },
+    "receiver": {
+      "path": "receiver.pcapng",
+      "sha256": "6ee99666ed65c5272ad195eb7296c85663b59fee166b2f9dca5948742325c05f",
+      "byte_size": 332,
+      "packets": 2,
+      "health": {
+        "complete": true,
+        "capture_drops": 0
+      },
+      "error": null
+    }
+  },
+  "totals": {
+    "ingress": 3,
+    "receiver": 2,
+    "ordinary_reorder": 0,
+    "missing": 1,
+    "duplicate_ingress": 0,
+    "duplicate_receiver": 0,
+    "unexpected": 0,
+    "flag_mismatch": 0
+  },
+  "flows": [
+    {
+      "flow_id": "c0000201:c6336402:1111:9000",
+      "vlan_id": 100,
+      "ingress": 3,
+      "receiver": 2,
+      "ordinary_reorder": 0,
+      "missing": 1,
+      "duplicate_ingress": 0,
+      "duplicate_receiver": 0,
+      "unexpected": 0,
+      "flag_mismatch": 0
+    }
+  ],
+  "details_limit": 2,
+  "details": {
+    "ordinary_reorder": [],
+    "missing": [
+      {
+        "flow_id": "c0000201:c6336402:1111:9000",
+        "vlan_id": 100,
+        "sequence": 1,
+        "ingress_rank": 1
+      }
+    ],
+    "duplicate_ingress": [],
+    "duplicate_receiver": [],
+    "unexpected": [],
+    "flag_mismatch": []
+  },
+  "details_truncated": {
+    "ordinary_reorder": false,
+    "missing": false,
+    "duplicate_ingress": false,
+    "duplicate_receiver": false,
+    "unexpected": false,
+    "flag_mismatch": false
+  },
+  "error": null
+}
