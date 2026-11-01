@@ -124,8 +124,6 @@ int main(int argc, char **argv)
     }
     if (rte_lcore_count() < 2 || rte_lcore_count() == 6 || rte_lcore_count() > 7)
         rte_exit(EXIT_FAILURE, "HNG requires 2, 3, 4, 5 or 7 lcores\n");
-    if (observe_fd >= 0 && rte_lcore_count() == 7)
-        rte_exit(EXIT_FAILURE, "Observation is unsupported with 7 lcores\n");
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "HNG configuration rejected before RX\n");
     uint16_t port;
     RTE_ETH_FOREACH_DEV(port) host.ports[host.port_count++] = port;
@@ -164,7 +162,7 @@ int main(int argc, char **argv)
                 rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
         }
         if (!observer_open(observe_fd, !strcmp(observe_identity, "stage1") ? OBS_ID_STAGE1 : OBS_ID_SOFTWARE_L2,
-            observe_port, observe_capacity)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
+            observe_port, observe_capacity, rte_lcore_count() == 7)) rte_exit(EXIT_FAILURE, "Cannot prepare bounded observer pipe/socket\n");
     } else if (observe_software || observe_identity)
         rte_exit(EXIT_FAILURE, "Observer options require --observe-fd\n");
     for (uint16_t i = 0; i < host.port_count; ++i) {

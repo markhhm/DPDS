@@ -76,6 +76,27 @@ TERMINALS = {"q_drop", "trace_loss_drop", "trace_outage_drop", "delay_storage_dr
              "missed_deadline_outage_drop", "shutdown_drop"}
 
 
+def native_stage_allowed(kind, producer, reason=None):
+    """V2 actor IDs identify the stage that can attest each record."""
+    if type(producer) is not int:
+        return False
+    if kind in {"packet", "expected", "frontier", "end"}:
+        return producer in (0, 5)
+    if kind in {"offer", "dispatch"}:
+        return producer in (1, 2)
+    if kind == "attempt":
+        return producer in (3, 6)
+    if kind == "counter":
+        return producer == 4
+    if kind == "terminal":
+        if reason == "handoff_drop":
+            return producer in (0, 5, 1, 2)
+        if reason in {"terminal_tx_drop", "missed_deadline_outage_drop"}:
+            return producer in (3, 6)
+        return reason in TERMINALS and producer in (1, 2)
+    return True
+
+
 def _port_map(value, frontier=False):
     if not isinstance(value, dict):
         raise ValueError("port prefix/frontier must be an object")
@@ -143,12 +164,19 @@ def _validate_record(row, role):
     identifier(row["run"], "run")
     identifier(row["stream_id"], "stream_id")
     uint(row["seq"], "stream sequence")
-    if isinstance(row.get("extensions"), dict) and "native_observer_v1" in row["extensions"]:
-        native = row["extensions"]["native_observer_v1"]
-        shape(native, ("producer", "producer_seq", "order"))
-        uint(native["producer"], "native producer", 4)
-        uint(native["producer_seq"], "native producer sequence")
-        uint(native["order"], "native reservation order")
+    extensions = row.get("extensions", {})
+    if isinstance(extensions, dict):
+        versions = [name for name in ("native_observer_v1", "native_observer_v2") if name in extensions]
+        if len(versions) > 1:
+            raise ValueError("conflicting native provenance")
+        for version in versions:
+            native = extensions[version]
+            shape(native, ("producer", "producer_seq", "order"))
+            uint(native["producer"], "native producer", 4 if version.endswith("v1") else 6)
+            uint(native["producer_seq"], "native producer sequence")
+            uint(native["order"], "native reservation order")
+            if version.endswith("v2") and not native_stage_allowed(row["kind"], native["producer"], row.get("reason")):
+                raise ValueError("native actor cannot attest this stage/reason")
     kind = row["kind"]
     if not isinstance(kind, str) or kind not in ROLES[role] | {"gap"}:
         raise ValueError(f"unsupported {role} record kind {kind!r}")
@@ -355,9 +383,31 @@ def validate_record(row, role):
         raise StreamError("RECORD_SCHEMA", str(exc)) from exc
 
 
+def handoff_actors(queue):
+    """Validate the explicit v2 scheduler/TX binding, if one is registered."""
+    value = queue.get("extensions", {}).get("native_actors")
+    if value is None:
+        return {}
+    shape(value, ("producer", "consumer"))
+    result = {}
+    for role, allowed in (("producer", (1, 2)), ("consumer", (3, 6))):
+        item = value[role]
+        shape(item, ("stream_id", "producer"))
+        identifier(item["stream_id"], "native actor stream")
+        uint(item["producer"], "native actor", 6)
+        if item["producer"] not in allowed:
+            raise ValueError("native actor role mismatch")
+        result[role] = item["stream_id"], item["producer"]
+    if (queue["handoff_queue_id"] != f"handoff-{result['producer'][1]-1}" or
+            result["consumer"][1] == 6 and result["producer"][1] != 2):
+        raise ValueError("native queue ownership mismatch")
+    return result
+
+
 def actor(row):
     """A normalized logical stream may preserve several native SPSC actors."""
-    provenance = row.get("extensions", {}).get("native_observer_v1")
+    extensions = row.get("extensions", {})
+    provenance = extensions.get("native_observer_v2", extensions.get("native_observer_v1"))
     return (row["stream_id"], provenance["producer"]) if provenance is not None else row["stream_id"]
 
 

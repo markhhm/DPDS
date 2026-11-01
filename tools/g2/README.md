@@ -289,3 +289,25 @@ Tests preserve the thresholds: 5% at 0.2 ms is detected and passes the timing
 gates; 60% at 0.2 ms fails the median gate; 5% at 0.6 ms fails the p99 gate.
 Ordinary swaps, storage loss and 1% observer loss are tested with their required
 FAIL/FAIL/INCONCLUSIVE verdicts.
+
+## Native v2 ownership
+
+Native software-PMD capture supports 2, 3, 4, 5 and 7 lcores. Each RX and
+TX writer has its own SPSC observer queue; the seven-lcore layout uses two
+RX writers and two TX writers. This remains software-only observation.
+
+The native adapter reads both `hng-native-v1` (five producers) and
+`hng-native-v2` (seven producers). V2 adds `layout` (`shared` or
+`per-direction`) and an ordered `ports` array to the header. IDs 0–4 retain
+their meanings; RX1 is 5 and TX1 is 6. Normalized records preserve the
+versioned `native_observer_v2` provenance extension. V1 still rejects ID 5.
+
+Register each v2 handoff queue's `extensions.native_actors` as producer and
+consumer `{stream_id,producer}` objects. `handoff-0` binds scheduler 1 to TX 3;
+`handoff-1` binds scheduler 2 to TX 6 in a per-direction layout, or TX 3 when
+shared. Attempts report every queue prefix, with zero for unowned queues.
+Foreign zeroes do not reset the actual consumer's progress. Missing bindings,
+foreign nonzero prefixes, gaps and ownership conflicts cannot qualify as PASS.
+Dispatch frontiers are required for inputs feeding the selected egress; an
+unrelated direction's unknown frontier remains unknown. Runtime report v1
+and software-only qualification rules remain unchanged.

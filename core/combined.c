@@ -45,7 +45,7 @@ int lcore_receive_worker_transmit(struct lcore_parameters *parameters)
             rx.stats->enqueued += count;
         } else {
             if (!wk.ended) for (unsigned p = 0; p < host.port_count; ++p)
-                observer_input_end(host.ports[p], rx.sequence[host.ports[p]]);
+                observer_input_end(rx.producer, host.ports[p], rx.sequence[host.ports[p]]);
             worker_end_input(&wk);
         }
         uint16_t out = worker_step(&wk, batch, count, output);
