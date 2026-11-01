@@ -140,7 +140,8 @@ def _health(payload, header, counts, seen):
         if (health['emitted'] != counts[producer]
                 or health['attempted'] != health['emitted'] + health['dropped'] + health['capture_drops']
                 or health['attempted'] < seen[producer] or health['high_water'] > header['capacity']):
-            raise ValueError('native binary health counters disagree with capture')
+            raise ValueError(f'native binary health counters disagree with capture: producer={producer}, '
+                             f'health={health}, decoded={counts[producer]}, last_sequence={seen[producer]}')
         loss |= any(health[name] for name in ('dropped', 'capture_drops', 'identity_errors', 'malformed_records'))
     if loss and value['complete']:
         raise ValueError('native binary health claims complete despite loss')

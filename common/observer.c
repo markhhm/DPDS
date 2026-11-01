@@ -227,6 +227,8 @@ static void *consumer(void *unused)
     } else output(header, (size_t)n);
     uint64_t next_order = 0;
     for (;;) {
+        /* Acquire stop before tails: observing stop must include the final publications. */
+        bool stopped = atomic_load_explicit(&capture.stop, memory_order_acquire);
         bool pending = false, emitted = false;
         for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
             struct queue *q = &capture.queues[p];
@@ -264,8 +266,8 @@ static void *consumer(void *unused)
             }
             atomic_store_explicit(&q->head, head, memory_order_release);
         }
-        if (atomic_load_explicit(&capture.stop, memory_order_acquire) && !pending) break;
-        if (!emitted && pending && atomic_load_explicit(&capture.stop, memory_order_acquire)) {
+        if (stopped && !pending) break;
+        if (!emitted && pending && stopped) {
             /* An aborted reservation can leave a global-order hole; discard its blocked suffix. */
             for (unsigned p = 0; p < OBS_PRODUCERS; ++p) {
                 struct queue *q = &capture.queues[p];

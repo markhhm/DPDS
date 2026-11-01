@@ -120,3 +120,6 @@ binary_io = executable('observer-binary-io-test', ['tests/observer_binary_io.c',
 test('observer-binary-io', python, args: [meson.project_source_root() / 'tests/eal_args.py',
   binary_io.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-binary-io'],
   depends: binary_io, timeout: 30, is_parallel: false)
+
+test('observer-shutdown', python, args: [meson.project_source_root() / 'tests/observer_shutdown.py', dpds_exe],
+  timeout: 30, is_parallel: false)
