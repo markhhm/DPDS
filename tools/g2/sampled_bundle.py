@@ -203,7 +203,11 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
             row['timing'][name]['status']='not_checked'
         incomplete=issues or any(gate['status']=='INCONCLUSIVE' for gate in row['gates'].values()) or row['measurement_status']=='INCONCLUSIVE'
         failed=row['measurement_status']=='FAIL' or any(gate['status']=='FAIL' for gate in row['gates'].values())
-        state='INCONCLUSIVE' if incomplete else 'FAIL' if failed else 'PASS'
+        if issues or any(check[name]['status']=='INCONCLUSIVE' for name in ('order','storage')):
+            state='INCONCLUSIVE'
+        elif failed:state='FAIL'
+        elif incomplete:state='INCONCLUSIVE'
+        else:state='PASS'
         row.update(measurement_status=state,status='INVALID' if state=='INCONCLUSIVE' else state,
                    g2_pass=state=='PASS',g2_qualified=False,
                    error_median_ms=None if row['timing']['main']['median_abs_error_ns'] is None else row['timing']['main']['median_abs_error_ns']/1e6,

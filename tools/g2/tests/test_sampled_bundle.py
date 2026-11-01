@@ -204,6 +204,29 @@ class SampledBundleTests(unittest.TestCase):
             self.assertEqual(result['measurement_status'],'FAIL')
             self.assertIn('sample_q_decision_mismatch',result['reason_codes'])
 
+    def test_complete_capture_proving_real_missing_delivery_fails(self):
+        def missing(rows,reg):rows['receiver'].pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root,mutate=missing,flow_id='0a000001:0a000002:1:9000')
+            checker(root,reg,400,missing=1)
+            result=build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+            self.assertEqual(result['rows'][0]['gates']['storage']['status'],'FAIL')
+            self.assertEqual(result['measurement_status'],'FAIL')
+
+    def test_capture_drop_with_missing_sample_remains_inconclusive(self):
+        def missing(rows,reg):rows['receiver'].pop(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root,mutate=missing,flow_id='0a000001:0a000002:1:9000')
+            checker(root,reg,400,missing=1)
+            path=root/'seqcheck.json';doc=json.loads(path.read_bytes())
+            doc.update(status='INVALID',complete=False,error='capture drop')
+            doc['inputs']['receiver']['health'].update(complete=False,capture_drops=1)
+            raw=json.dumps(doc).encode();path.write_bytes(raw)
+            reg['verification']['seqchecks'][0]['sha256']=hashlib.sha256(raw).hexdigest()
+            result=build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+
+
     def test_unsampled_custody_diagnostics_do_not_invalidate_sampled_verdict(self):
         def mutate(rows,reg):
             rows['host']=[r for r in rows['host'] if r['kind']!='dispatch']

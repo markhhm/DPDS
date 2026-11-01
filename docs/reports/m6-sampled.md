@@ -20,6 +20,9 @@ physical calibration requirement is weakened. Saturated observer queues,
 absolute end backlog, missing input population, invalid capture/clock evidence
 and incomplete counter endpoints cannot yield a sampled PASS. Gate coverage is
 the complete supplied input run, not independent attribution to each phase.
+When healthy complete capture evidence proves unexplained missing delivery,
+the result is FAIL even if that missing packet also removes a timing sample.
+Unhealthy/incomplete capture evidence remains INCONCLUSIVE.
 
 The external checker is [DPDS PR #32](https://github.com/markhhm/DPDS/pull/32),
 revision `13aa2ba`. Its frozen contract and real missing=1 fixture were checked.
