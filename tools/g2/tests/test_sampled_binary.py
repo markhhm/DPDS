@@ -3,7 +3,9 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import struct
 import tempfile
 import unittest
 
@@ -13,6 +15,70 @@ from tools.g2.tests.test_registration import manifest
 
 
 class SampledBinaryTests(unittest.TestCase):
+    def test_unsampled_capture_timestamps_still_require_valid_calibration(self):
+        from tools.g2.calibration import Calibration
+        from tools.g2.matrix import report_one
+        from tools.g2.online import sample
+        from tools.g2.pcapng import convert_stream
+        from tools.g2.tests.binary_sample_fixture import END, FLOW, make_case
+        for width,code in ((64,'CLOCK_EXTRAPOLATION'),(50,'CLOCK_WIDTH')):
+            with self.subTest(width=width),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);data=make_case(root,count=1001,mask_bits=1)
+                self.assertFalse(sample(dict(run='demo',ingress_port=0,external_identity=f'{FLOW}:1000'),17,1))
+                path=root/'receiver.pcapng';raw=bytearray(path.read_bytes());position=0
+                while position<len(raw):
+                    kind,size=struct.unpack_from('<II',raw,position)
+                    if kind==6:last_packet=position
+                    if kind==5:stats=position
+                    position+=size
+                stamp=2*10**15
+                for at in (last_packet+12,stats+12):struct.pack_into('<II',raw,at,stamp>>32,stamp&0xffffffff)
+                position=stats+20
+                while True:
+                    kind,size=struct.unpack_from('<HH',raw,position)
+                    if not kind:break
+                    if kind==3:struct.pack_into('<II',raw,position+4,stamp>>32,stamp&0xffffffff)
+                    position+=4+((size+3)&~3)
+                path.write_bytes(raw)
+                data['calibration']['clocks'][0]['width_bits']=width
+                (root/'calibration.json').write_text(json.dumps(data['calibration']))
+                check=json.loads((root/'seqcheck.json').read_text())
+                check['inputs']['receiver']['sha256']=hashlib.sha256(raw).hexdigest()
+                (root/'seqcheck.json').write_text(json.dumps(check))
+                reg=data['binary_manifest']
+                reg['verification']['seqchecks'][0]['sha256']=hashlib.sha256((root/'seqcheck.json').read_bytes()).hexdigest()
+                (root/'binary.json').write_text(json.dumps(reg))
+                pair=json.loads((root/'pair.json').read_text())
+                stream=next(s for s in data['legacy_manifest']['streams'] if s['role']=='receiver')
+                converted=convert_stream(pair,'receiver',root,data['legacy_manifest'],stream,root/'invalid.jsonl',
+                    Calibration(data['calibration'],'software-only','demo'),(0,END))
+                self.assertFalse(converted['complete']);self.assertEqual(converted['reason_codes'],[code])
+                self.assertEqual(report_one(root/'binary.json',root/'report','demo','software-only'),2)
+                self.assertEqual(json.loads((root/'report/report.json').read_text())['reason_codes'],[code])
+
+    def test_before_and_receiver_cannot_alias_the_same_capture(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_sample_fixture import make_case
+        for hardlink in (False,True):
+            with self.subTest(hardlink=hardlink),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);data=make_case(root)
+                data['config']['lines'][0]['model']['t_ns']=0
+                reg=data['binary_manifest'];config_path=root/reg['config']['path']
+                config_path.write_text(json.dumps(data['config']))
+                reg['config']['sha256']=hashlib.sha256(config_path.read_bytes()).hexdigest()
+                receiver='alias.pcapng' if hardlink else 'before.pcapng'
+                if hardlink:os.link(root/'before.pcapng',root/receiver)
+                pair=json.loads((root/'pair.json').read_text());pair['receiver']['path']=receiver
+                (root/'pair.json').write_text(json.dumps(pair))
+                check=json.loads((root/'seqcheck.json').read_text())
+                check['inputs']['receiver'].update(path=receiver,sha256=hashlib.sha256((root/receiver).read_bytes()).hexdigest())
+                (root/'seqcheck.json').write_text(json.dumps(check))
+                registration=reg['verification']['seqchecks'][0];registration['receiver_path']=receiver
+                registration['sha256']=hashlib.sha256((root/'seqcheck.json').read_bytes()).hexdigest()
+                (root/'binary.json').write_text(json.dumps(reg))
+                self.assertEqual(report_one(root/'binary.json',root/'report','demo','software-only'),2)
+                self.assertEqual(json.loads((root/'report/report.json').read_text())['reason_codes'],['PCAPNG_SOURCE'])
+
     def test_seven_writer_bidirectional_verdicts_are_byte_identical(self):
         from tools.g2.matrix import report_one
         from tools.g2.tests.binary_split_fixture import make_case

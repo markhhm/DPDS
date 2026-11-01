@@ -180,6 +180,10 @@ class NativeInput:
             _require(pair['start_ns']<=coverage[0]<coverage[1]<=pair['end_ns'] and
                 mapping['valid_from_raw']<=coverage[0]<coverage[1]<mapping['valid_to_raw'],
                 'CLOCK_COVERAGE_WINDOW','capture/mapping does not cover measurement and drain')
+            before=(pair_path.parent/pair['before']['path']).resolve()
+            receiver=(pair_path.parent/pair['receiver']['path']).resolve()
+            _require(before!=receiver and not before.samefile(receiver),
+                     'PCAPNG_SOURCE','before and receiver must be different capture files')
             for role in ('before','receiver'):
                 shape(pair[role],('path','interfaces'))
                 interfaces={int(k):v for k,v in pair[role]['interfaces'].items()}
@@ -197,6 +201,11 @@ class NativeInput:
                         _require((self.root/source).resolve()==path,'SEQCHECK_SOURCE_HASH','seqcheck differs from converted capture source')
                 reader=CaptureArrays(path,interfaces,pair['start_ns'],pair['end_ns'],manifest['identity_profile']['probe_port'])
                 for rows in reader.batches():
+                    raw_min,raw_max=int(rows['raw'].min()),int(rows['raw'].max())
+                    _require(raw_max<1<<clock.clocks[pair['clock_id']]['width_bits'],
+                             'CLOCK_WIDTH','raw timestamp exceeds clock width')
+                    _require(mapping['valid_from_raw']<=raw_min and raw_max<mapping['valid_to_raw'],
+                             'CLOCK_EXTRAPOLATION','raw timestamp is outside mapping validity')
                     line_ids=np.full(len(rows),-1,dtype=np.int16)
                     ingress=np.zeros(len(rows),dtype=np.uint16)
                     for i,line in enumerate(manifest['lines']):
