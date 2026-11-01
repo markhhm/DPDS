@@ -149,6 +149,36 @@ class Trace:
         return next(row["at_ns"] for row in self.rows[index:] if not row["outage"])
 
 
+def q_admit(state, arrival, q):
+    """Advance the exact service ledger; propagation never releases Q bytes."""
+    ledger = state['ledger']
+    while ledger and ledger[0][0] <= arrival:
+        state['used'] -= ledger.popleft()[1]
+    model = state['config']['model']
+    if state['used'] + q > model['q_bytes']:
+        return None
+    finish = max(Fraction(arrival), state['tail']) + Fraction(8*(q+20)*10**9, model['c_bps'])
+    state['tail'] = finish
+    ledger.append((finish,q))
+    state['used'] += q
+    return finish
+
+
+def trace_decision(state, service, ordinal):
+    trace = state['trace']
+    index = trace.index(service)
+    raw = service + trace.rows[index]['t_ns']
+    deadline = max(raw, state['floor'])
+    if selected(trace.losses[index], trace.seed, ordinal):
+        outcome, release = 'trace_loss', None
+    else:
+        release = trace.release(deadline)
+        outcome = 'trace_outage' if release is None else 'accepted'
+    if outcome == 'accepted':
+        state['floor'] = deadline
+    return deadline, release, outcome, deadline-raw
+
+
 class Reference:
     """One bounded Q ledger per line. Emits decisions immediately in ingress order.
 
@@ -302,38 +332,21 @@ class Reference:
         state["seq"] += 1
         self.count += 1
         self.digest.update(canonical(event) + b"\n")
-        ledger = state["ledger"]
-        while ledger and ledger[0][0] <= arrival:
-            state["used"] -= ledger.popleft()[1]
+        finish = q_admit(state, arrival, q)
         is_late = selected(state["chance"], line["model"]["seed"], ordinal)
         result = dict(event, kind="expected", egress_port=line["egress_port"],
                       l2_bytes=q, wire_bytes=q + 20, outcome="q_drop", late=is_late,
                       service_ns=None, deadline_ns=None, release_ns=None, clamp_extra_ns=0)
         model = line["model"]
-        if state["used"] + q <= model["q_bytes"]:
-            finish = max(Fraction(arrival), state["tail"]) + Fraction(8 * (q + 20) * 10**9, model["c_bps"])
+        if finish is not None:
             service = -(-finish.numerator // finish.denominator)
             deadline = service + model["t_ns"] + is_late * model["delta_ns"]
             release, outcome, clamp = deadline, "accepted", 0
             trace = state["trace"]
             if trace:
-                index = trace.index(service)
-                raw = service + trace.rows[index]["t_ns"]
-                deadline = max(raw, state["floor"])
-                clamp = deadline - raw
-                if selected(trace.losses[index], trace.seed, ordinal):
-                    outcome, release = "trace_loss", None
-                else:
-                    release = trace.release(deadline)
-                    if release is None:
-                        outcome = "trace_outage"
+                deadline, release, outcome, clamp = trace_decision(state, service, ordinal)
             uint(deadline, "deadline")
             uint(service, "service completion")
-            if outcome == "accepted" and trace:
-                state["floor"] = deadline
-            state["tail"] = finish
-            ledger.append((finish, q))
-            state["used"] += q
             result.update(outcome=outcome, late=is_late, service_ns=service,
                           deadline_ns=deadline, release_ns=release, clamp_extra_ns=clamp)
         result["q_bytes"] = state["used"]
