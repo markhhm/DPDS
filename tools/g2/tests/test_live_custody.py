@@ -15,6 +15,98 @@ def actor(row, producer):
 
 
 class LiveCustodyTests(unittest.TestCase):
+    def test_many_inflight_dispatches_and_attempts_require_linear_row_work(self):
+        reads = [0]
+        class Row(dict):
+            def __getitem__(self, name):
+                reads[0] += 1
+                return super().__getitem__(name)
+        count = 512
+        rows = [Row(expected(i, release=100_000+i)) for i in range(count)]
+        events = []
+        for first in range(0, count, 16):
+            batch = rows[first:first+16]
+            events += [dispatch(batch, first=first, at=200_000, count=count),
+                       attempt(batch, handoffs=range(first, first+len(batch)), aid=first//16,
+                               at=200_001+first, consumed=first+len(batch), count=count)]
+        checker, active, issues = self.audit(rows, events)
+        self.assertEqual(issues, [])
+        self.assertEqual(checker.counts['tx_accepted'], count)
+        self.assertLess(reads[0], count*120, 'head lookup must not scan all in-flight rows per identity')
+
+    def test_frontier_checks_advance_instead_of_rescanning_all_active_rows(self):
+        reads = [0]
+        class Row(dict):
+            def __getitem__(self, name):
+                reads[0] += 1
+                return super().__getitem__(name)
+        count = 512
+        rows = [Row(expected(i)) for i in range(count)]
+        checker, active, issues = self.audit(rows, [])
+        reads[0] = 0
+        for prefix in range(1, count+1):
+            event = envelop([dispatch([], count=prefix)])[0]
+            event['frontiers']['0'].update(through_ns=9+prefix, input_complete=False)
+            self.assertTrue(checker.snapshot(event))
+        self.assertEqual(issues, [])
+        self.assertLess(reads[0], count*50, 'frontier validation must advance an ingress prefix')
+
+    def test_unseen_earlier_release_cannot_hide_a_wrong_dispatch_head(self):
+        rows = [expected(0, release=300), expected(1, release=400), expected(2, release=190)]
+        event = dispatch([rows[1]], at=400, count=2)
+        event['frontiers']['0'].update(through_ns=11, input_complete=False)
+        _, _, issues = self.audit(rows, [event])
+        self.assertEqual(issues, [('dispatch_wrong_head', 'FAIL'), ('unsafe_dispatch_frontier', 'INCONCLUSIVE')])
+
+    def test_equal_release_and_sequence_keep_active_insertion_order_across_ports(self):
+        cfg, reg = config(), manifest()
+        cfg['lines'].append(dict(copy.deepcopy(cfg['lines'][0]), name='other', ingress_port=1))
+        reg['ports'].append(dict(reg['ports'][0], ingress_port=1))
+        first = dict(expected(line='other'), ingress_port=1, external_identity='z')
+        second = dict(expected(), external_identity='a')
+        for selected, want in [([first, second], []), ([second, first], [('dispatch_wrong_head', 'FAIL')])]:
+            event = dispatch(selected)
+            event.update(seen_next_ingress_seq={'0':1, '1':1}, frontiers={
+                str(port):dict(through_ns=None, input_complete=True) for port in (0, 1)})
+            _, _, issues = self.audit([first, second], [event], cfg, reg)
+            self.assertEqual(issues, want)
+
+    def test_closed_trace_line_does_not_hide_the_open_line_tx_head(self):
+        cfg = config()
+        other = copy.deepcopy(cfg['lines'][0])
+        other.update(name='leo', trace=dict(path='fixture', sha256='0'*64))
+        other['model'].update(t_ns=0, delta_ns=0, p='0')
+        cfg['lines'].append(other)
+        trace = dict(end_ns=1000, loss_seed=0, outage_action='hold', terminal='error', terminal_horizon_ns=None,
+            rows=[dict(at_ns=at, t_ns=0, loss='0', outage=down) for at, down in [(0, False), (150, True), (250, False)]])
+        rows = [expected(0, line='leo', release=70), expected(1, release=100), expected(2, release=110)]
+        events = [dispatch(rows), attempt([rows[2]], handoffs=[2], consumed=3, count=3, at=200)]
+        _, _, issues = self.audit(rows, events, cfg, traces={'leo':trace})
+        self.assertEqual(issues, [('tx_wrong_head', 'FAIL')])
+
+    def test_retired_states_and_stale_index_entries_do_not_accumulate(self):
+        import weakref
+        class State(dict):
+            pass
+        checker, active, issues = self.audit([], [])
+        for seq in range(512):
+            row = expected(seq)
+            state = State(expected=row, offer=True, terminal=None, tx=False, dispatch=None, pending=False)
+            identity = key(row)
+            active[identity] = state
+            checker.track(state)
+            checker.input_next[0] = seq+1
+            self.assertTrue(checker.snapshot(envelop([dispatch([], count=seq+1)])[0]))
+            reference = weakref.ref(state)
+            active.pop(identity)
+            checker.forget(identity)
+            del state
+            self.assertIsNone(reference())
+        self.assertEqual(issues, [])
+        self.assertEqual(checker.records, {})
+        self.assertTrue(all(len(heap)<=64 for heap in checker.release_index.values()))
+        self.assertTrue(all(len(queue)<=64 for ports in checker.frontier_index.values() for queue in ports.values()))
+
     def test_native_v2_wrong_stage_cannot_supply_an_offer_or_model_terminal(self):
         row=expected(outcome='q_drop')
         for event in (offer(row),terminal(row,'q_drop')):

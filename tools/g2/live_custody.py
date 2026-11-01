@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bounded scheduler and TX custody checks over active independent decisions."""
-from collections import Counter
+from collections import Counter, deque
+import heapq
 
 from .custody import MODEL_REASONS
 from .reference import Trace
@@ -30,6 +31,91 @@ class LiveCustody:
         self.input_next = {row["ingress_port"]:0 for row in manifest["ports"]}
         self.input_end = set()
         self.input_frontier = {port:None for port in self.input_next}
+        self.records, self.frontier_index, self.release_index = {}, {}, {}
+        self.serial, self.scanning, self.last_input = 0, False, {}
+        for state in active.values():
+            self.track(state)
+
+    def _live(self, entry):
+        order, identity = entry[-2:]
+        record = self.records.get(identity)
+        return record[1] if (record is not None and record[0]==order
+                            and self.active.get(identity) is record[1]) else None
+
+    def _candidate(self, entry, pending):
+        state = self._live(entry)
+        return state if (state is not None and state['expected']['outcome']=='accepted'
+            and state['offer'] and state['terminal'] is None and not state['tx']
+            and (state['pending'] if pending else state['dispatch'] is None)) else None
+
+    def _push(self, state, pending, owner=None):
+        row = state['expected']
+        identity = key(row)
+        entry = row['release_ns'], row['ingress_seq'], self.records[identity][0], identity
+        if self._candidate(entry, pending):
+            heapq.heappush(self.release_index.setdefault((pending, owner, row['line']), []), entry)
+
+    def track(self, state):
+        if self.scanning:
+            return
+        row = state['expected']
+        identity, port = key(row), row['ingress_port']
+        previous = self.last_input.get(port)
+        if (identity in self.records or port not in self.input_next or row['line'] not in self.lines
+                or row['egress_port']!=self.lines[row['line']]['egress_port']
+                or previous and (row['ingress_seq']<=previous[0] or row['arrival_ns']<previous[1])):
+            self.scanning = True
+            return
+        self.last_input[port] = row['ingress_seq'], row['arrival_ns']
+        self.records[identity] = self.serial, state
+        entry = row['ingress_seq'], self.serial, identity
+        self.serial += 1
+        for ports in self.frontier_index.values():
+            ports[port].append(entry)
+        if state['offer'] and row['outcome']=='accepted':
+            self._offered(state)
+
+    def _offered(self, state):
+        if self.scanning or state['expected']['outcome']!='accepted':
+            return
+        row = state['expected']
+        for owner in self.frontier_index:
+            if row['ingress_seq'] < self.snapshots.get((owner, row['ingress_port']), (0,))[0]:
+                self._push(state, False, owner)
+        if state['pending']:
+            self._push(state, True)
+
+    def forget(self, identity):
+        self.records.pop(identity, None)
+        bound = 2*len(self.records)+64
+        for ports in self.frontier_index.values():
+            for port, queue in ports.items():
+                if len(queue)>bound:
+                    ports[port] = deque(entry for entry in queue if self._live(entry) is not None)
+        for index, heap in self.release_index.items():
+            if len(heap)>bound:
+                heap[:] = [entry for entry in heap if self._candidate(entry, index[0])]
+                heapq.heapify(heap)
+
+    def _prefix(self, owner, port, count):
+        if owner not in self.frontier_index:
+            ports = {value:deque() for value in self.input_next}
+            for identity, (order, state) in self.records.items():
+                row = state['expected']
+                ports[row['ingress_port']].append((row['ingress_seq'], order, identity))
+            self.frontier_index[owner] = ports
+        queue = self.frontier_index[owner][port]
+        while queue:
+            state = self._live(queue[0])
+            if state is None:
+                queue.popleft()
+            elif queue[0][0]<count:
+                queue.popleft()
+                if state['expected']['outcome']=='accepted':
+                    self._push(state, False, owner)
+            else:
+                break
+        return queue
 
     def state(self, item):
         state = self.active.get(key(item))
@@ -45,6 +131,7 @@ class LiveCustody:
     def snapshot(self, event):
         seen, frontiers = event["seen_next_ingress_seq"], event["frontiers"]
         if set(seen) != {str(port) for port in self.input_next} or set(frontiers) != set(seen):
+            self.scanning = True
             self.issue("ingress_prefix_missing", "INCONCLUSIVE", event)
             return False
         valid = True
@@ -55,19 +142,31 @@ class LiveCustody:
             if count > total or ended and (port not in self.input_end or count != total):
                 self.issue("ingress_prefix", "INCONCLUSIVE", event)
                 valid = False
+                self.scanning = True
             if old and (count < old[0] or old[2] and not ended or not ended and old[1] is not None and
                         (through is None or through < old[1])):
                 self.issue("backward_frontier", "INCONCLUSIVE", event)
                 valid = False
+                self.scanning = True
             # The join driver consumes ingress through the declared closed frontier.
             if through is not None and self.input_frontier[port] is not None and through > self.input_frontier[port] and port not in self.input_end:
                 self.issue("frontier_unverified", "INCONCLUSIVE", event)
                 valid = False
-            for state in self.active.values():
-                row = state["expected"]
-                if row["ingress_port"]==port and row["ingress_seq"]>=count and through is not None and row["arrival_ns"]<=through:
-                    self.issue("frontier_unconsumed_input", "INVALID", row)
-                    valid = False
+                self.scanning = True
+            indexed = not self.scanning
+            queue = self._prefix(actor(event), port, count) if indexed else None
+            if through is not None:
+                states = (self._live(entry) for entry in queue) if indexed else self.active.values()
+                for state in states:
+                    if state is None:
+                        continue
+                    row = state["expected"]
+                    if indexed and row['arrival_ns']>through:
+                        break
+                    if row["ingress_port"]==port and row["ingress_seq"]>=count and row["arrival_ns"]<=through:
+                        self.issue("frontier_unconsumed_input", "INVALID", row)
+                        valid = False
+                        self.scanning = True
             self.snapshots[actor(event), port] = count, through, ended
         return valid
 
@@ -81,7 +180,8 @@ class LiveCustody:
             self.issue("trace_gate_coverage", "INCONCLUSIVE", row)
             return False
 
-    def _head(self, event, at, pending, selected=()):
+    def _scan_head(self, event, at, pending, selected=()):
+        # Invalid index invariants retain the original diagnostic order.
         heads = []
         for state in self.active.values():
             row = state["expected"]
@@ -96,6 +196,36 @@ class LiveCustody:
                 continue
             heads.append(row)
         return min(heads, key=lambda row:(row["release_ns"], row["ingress_seq"])) if heads else None
+
+    def _head(self, event, at, pending, selected=(), deferred=None):
+        if self.scanning:
+            return self._scan_head(event, at, pending, selected)
+        heads = []
+        owner = None if pending else actor(event)
+        for name, line in self.lines.items():
+            if line['egress_port']!=event['egress_port']:
+                continue
+            heap = self.release_index.get((pending, owner, name), [])
+            while heap:
+                if self._candidate(heap[0], pending) is None:
+                    heapq.heappop(heap)
+                elif heap[0][-1] in selected:
+                    if deferred is None:
+                        return self._scan_head(event, at, pending, selected)
+                    deferred.append((heap, heapq.heappop(heap)))
+                else:
+                    break
+            if not heap or heap[0][0]>at:
+                continue
+            trace = self.traces.get(name) if pending else None
+            if trace is not None:
+                try:
+                    if trace.rows[trace.index(at)]['outage']:
+                        continue
+                except ValueError:
+                    return self._scan_head(event, at, pending, selected)
+            heads.append(heap[0])
+        return self._live(min(heads))['expected'] if heads else None
 
     def consume(self, event, prefixes):
         if set(prefixes)!=set(self.queues):
@@ -124,7 +254,10 @@ class LiveCustody:
                 if state is None:
                     self.issue("missing_dispatch", "INCONCLUSIVE", event)
                 else:
+                    was_pending = state['pending']
                     state["pending"] = True
+                    if not was_pending and not self.scanning and state['expected']['outcome']=='accepted':
+                        self._push(state, True)
             queue["consumed"] = end
 
     def event(self, event):
@@ -144,6 +277,7 @@ class LiveCustody:
             if kind=="offer":
                 if state["offer"]:
                     self.issue("duplicate_offer", "INVALID", row)
+                was_offered = bool(state['offer'])
                 if row["ingress_seq"]<=self.last_offer.get(row["ingress_port"], -1):
                     self.issue("offer_order", "FAIL", row)
                 self.last_offer[row["ingress_port"]] = row["ingress_seq"]
@@ -153,6 +287,8 @@ class LiveCustody:
                 if event["actual_selection_seq"]!=row["selection_seq"]:
                     self.issue("selection_divergence", "FAIL", row)
                 state["offer"] = event
+                if not was_offered:
+                    self._offered(state)
             else:
                 if state["terminal"] is not None or state["tx"]:
                     self.issue("double_terminal", "INVALID", row)
@@ -230,6 +366,7 @@ class LiveCustody:
             self.issue("port_mapping", "INVALID", event)
         self.consume(event, event["consumed_dispatch"])
         selected = set()
+        deferred = []
         last_gate = event["gate_ns"]
         for index, item in enumerate(event["offered"]):
             if "consumed_dispatch" in item:
@@ -253,7 +390,7 @@ class LiveCustody:
                 self.issue("tx_before_release", "FAIL", row)
             if not self.gate(row["line"], at, row):
                 self.issue("tx_gate_closed", "FAIL", row)
-            head = self._head(event, at, True, selected)
+            head = self._head(event, at, True, selected, deferred)
             if head is not None and key(head)!=key(row):
                 self.issue("tx_wrong_head", "FAIL", row)
             selected.add(key(row))
@@ -262,3 +399,6 @@ class LiveCustody:
                 state["pending"] = False
                 self.counts["tx_accepted"] += 1
                 self.port_counts[row["ingress_port"], "tx_accepted"] += 1
+        for heap, entry in deferred:
+            if self._candidate(entry, True):
+                heapq.heappush(heap, entry)
