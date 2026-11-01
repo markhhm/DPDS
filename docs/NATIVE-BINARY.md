@@ -44,6 +44,16 @@ capture, malformed input, or an I/O error. An argument error also exits with cod
 `2`. A failed decode can leave a partial JSONL file without a final health seal.
 Do not treat that partial file as complete evidence.
 
+Large sampled M6 reports can instead read this binary file directly, using
+bounded NumPy columns and raw directional pcapng inputs. They do not need the
+JSONL decode/adapter prepass. Register `verification.native_binary` and
+`verification.capture_pairs` as described in the
+[M6 runner](M6-RUNNER.md#direct-binary-input-for-sampled-runs).
+The direct reader validates every frame, tagged value, producer sequence and
+health seal before a complete result. Sampling does not exempt unselected
+records from wire/actor/profile checks. Full custody remains diagnostic under
+the sampled policy; independent full-capture seqcheck gates remain mandatory.
+
 Connect inherited descriptors 4, 5, and 6 to the oracle and retention
 consumer. Then pass decoded input through a pipe:
 

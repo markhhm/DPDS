@@ -56,6 +56,13 @@ def source_hashes(path, mode):
             # A pending result is generated in the runner's output, never in the source tree.
             if mode != "pcapng" or result.is_file():
                 files.append(result)
+        if 'native_binary' in verification:
+            files.append(path.parent/verification['native_binary']['path'])
+            for entry in verification['capture_pairs']:
+                pair_path=path.parent/entry
+                pair=strict_json(pair_path.read_bytes())
+                files.append(pair_path)
+                files.extend(pair_path.parent/pair[role]['path'] for role in ('before','receiver'))
     return {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
 
 

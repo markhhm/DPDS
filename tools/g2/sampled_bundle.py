@@ -57,23 +57,39 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
 
     def key(row):return row['ingress_port'],row['external_identity']
 
-    counters=normalize_counters(rows('counters'),manifest)
+    binary='native_binary' in manifest['verification']
+    counter_rows=list(rows('counters')) if binary else None
+    counters=None if binary else normalize_counters(rows('counters'),manifest)
+    prepared=None
+    if binary:
+        from .sampled_native import NativeInput
+        mark=time.perf_counter()
+        prepared=NativeInput(config,manifest,registration_root,reference,cells,clock,counter_rows)
+        counters=prepared.counters
+        timings['native_input_s']=time.perf_counter()-mark
+        readers.update(prepared.readers)
+        inputs.update(prepared.inputs);runtime.update(prepared.runtime)
     issues.update(counters['reason_codes'])
     cost=counters.get('observer_cost',dict(status='INCONCLUSIVE',warnings=[],end_backlog={}))
     for warning in cost.get('warnings',[]):issue(warning['code'])
+    def expected_rows():
+        if prepared is not None:
+            yield from prepared.expected
+            return
+        for event in rows('ingress'):
+            wanted=False
+            if event['kind']=='packet':
+                inputs[str(event['ingress_port'])]+=1
+                bound(event['ingress_port'],event['arrival_ns'])
+                cell=cells._cell(event)
+                if cell is not None:
+                    mask=cell['registration'].get('mask_bits',manifest['sampling']['mask_bits'])
+                    wanted=sample(event,manifest['sampling']['seed'],mask)
+            row=reference.consume(event,wanted)
+            if row is not None:yield row
     mark=time.perf_counter()
-    for event in rows('ingress'):
-        wanted=False
-        cell=None
-        if event['kind']=='packet':
-            inputs[str(event['ingress_port'])]+=1
-            bound(event['ingress_port'],event['arrival_ns'])
-            cell=cells._cell(event)
-            if cell is not None:
-                mask=cell['registration'].get('mask_bits',manifest['sampling']['mask_bits'])
-                wanted=sample(event,manifest['sampling']['seed'],mask)
-        row=reference.consume(event,wanted)
-        if row is None:continue
+    for row in expected_rows():
+        cell=cells._cell(row)
         token=key(row)
         if token in selected:raise StreamError('DUPLICATE_SAMPLE','sample identity repeats')
         tag=(str(row['ingress_port']),row['line'],cell['registration']['phase'])
@@ -86,7 +102,7 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
     timings['arrival_prefix_s']=time.perf_counter()-mark
     mark=time.perf_counter()
     for role in ('before','receiver'):
-        for observation in rows(role):
+        for observation in prepared.rows(role) if prepared is not None else rows(role):
             observed[role][str(observation['ingress_port'])]+=1
             state=selected.get(key(observation))
             if state is None:continue
@@ -111,7 +127,7 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
             except StreamError as error:issue(error.code)
     timings['sample_pair_scan_s']=time.perf_counter()-mark
     mark=time.perf_counter()
-    for event in rows('host'):
+    for event in prepared.rows('host') if prepared is not None else rows('host'):
         diagnostics[event['kind']]+=1
         port=event.get('ingress_port')
         if port is None:
@@ -133,6 +149,9 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
             if state['terminal'] is not None:issue('duplicate_sample_terminal',row)
             state['terminal']=event
     timings['host_diagnostic_scan_s']=time.perf_counter()-mark
+    if prepared is not None:
+        observed=prepared.observed
+        diagnostics=prepared.diagnostics
     expected_reasons=dict(q_drop='q_drop',trace_loss='trace_loss_drop',trace_outage='trace_outage_drop')
     for state in selected.values():
         row,before,received=state['expected'],state['before'],state['receive']
