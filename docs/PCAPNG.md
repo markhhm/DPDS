@@ -25,6 +25,26 @@ profile is the existing single-VLAN Ethernet/IPv4/UDP Stage 1 probe, including
 its 64-bit sequence and selected-late payload flag. No flow identity is guessed
 from a NIC name or from timing. Other identity profiles are outside this adapter.
 
+## Snaplen and packet lengths
+
+Captures can retain a prefix instead of the full frame. Keep at least
+59 bytes for single-VLAN Ethernet (18), IPv4 without options (20), UDP (8)
+and the probe header (13). IPv4 options increase the requirement to at most
+99 bytes (18 + 60 + 8 + 13). Use a fixed snaplen of 128 bytes to cover
+this profile and reduce storage compared with full MTU frames.
+
+The adapter checks identity fields through the probe header: flow addresses,
+ports, VLAN, sequence, magic and selected-late flag. It uses the Enhanced
+Packet Block's original wire length for the reported frame length, excluding
+FCS. Captured length must not exceed wire length or a nonzero interface snaplen.
+IPv4 and UDP lengths must agree and fit the original wire length.
+The retained prefix must contain the full identity headers.
+
+This path does not verify payload bytes after the probe header or full-frame
+byte fidelity. A short identity prefix remains INCONCLUSIVE. A valid snaplen
+prefix does not waive block integrity, capture-health or clock checks.
+Block metadata, padding and final statistics still require storage.
+
 ## Clock and capture-health requirements
 
 Both files must use the same declared `clock_id` and `mapping_id`, an explicit
@@ -49,7 +69,7 @@ empty drain after the last recorded packet.
 The supported pcapng profile follows the
 [IETF pcapng draft](https://www.ietf.org/ietf-ftp/internet-drafts/draft-ietf-opsawg-pcapng-06.html):
 one version 1.0 section, either byte order, Ethernet Interface Description Blocks
-with `if_tsresol=9`, and full Enhanced Packet Blocks. Signed `if_tsoffset` is
+with `if_tsresol=9`, and Enhanced Packet Blocks with complete identity prefixes. Signed `if_tsoffset` is
 applied with integer arithmetic. Per-interface capture order is retained;
 timestamps are never sorted or repaired. Simple/obsolete packet blocks, retained
 FCS, fragmented/non-probe packets, unknown interfaces, invalid options, and
@@ -60,7 +80,7 @@ Each mapped interface needs final Interface Statistics after its last packet:
 The time bounds must cover the declared interval and captured packets; delivered
 count must match the file's packet count. Drop counts must be known and zero.
 Positive EPB/ISB drop counts, counter resets, timestamp regressions, missing
-statistics, packet truncation, and file truncation make the corresponding
+statistics, truncated identity headers, and file truncation make the corresponding
 sealed stream incomplete. Unknown loss counts are retained as null, not zero.
 This also detects truncation at a complete packet-block boundary before final
 statistics. A capture tool that omits this health evidence stays INCONCLUSIVE.
