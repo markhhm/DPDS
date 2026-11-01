@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Evaluate registered M6 runs sequentially with the existing G2 reporter."""
+"""Evaluate registered M6 runs with the existing G2 reporter."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -42,6 +44,12 @@ def source_hashes(path, mode):
     files += [path.parent / row["path"] for row in manifest["traces"]]
     files += [path.parent / row["path"] for row in manifest["streams"]
               if mode != "pcapng" or row["role"] not in {"before", "receiver"}]
+    verification = manifest.get("verification", {})
+    if not isinstance(verification, dict):
+        raise ValueError("verification must be an object")
+    if verification.get("mode") == "sampled":
+        files += [path.parent / row[field] for row in verification.get("seqchecks", [])
+                  for field in ("path", "ingress_path", "receiver_path")]
     return {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
 
 
@@ -117,7 +125,8 @@ def report_one(manifest_path, output, run_id, scope, mode="software"):
         checked, config, traces = load_registration(path)
         sources = {row["stream_id"]: path.parent / row["path"] for row in manifest["streams"]}
         calibration = strict_json((path.parent / manifest["calibration_path"]).read_bytes())
-        result = build_bundle_report(config, traces, manifest, sources, calibration, destination)
+        result = build_bundle_report(config, traces, manifest, sources, calibration, destination,
+                                     registration_root=path.parent)
         result["sources"].update(checked["sources"])
     except (ValueError, KeyError, TypeError, OSError, MemoryError) as error:
         print(str(error), file=sys.stderr)
@@ -145,7 +154,7 @@ def report_one(manifest_path, output, run_id, scope, mode="software"):
 def run_matrix(matrix_path, output):
     path = Path(matrix_path)
     matrix = strict_json(path.read_bytes())
-    shape(matrix, ("schema", "scope", "plan", "runs"), ("mode",))
+    shape(matrix, ("schema", "scope", "plan", "runs"), ("mode", "workers"))
     mode = matrix.get("mode", "software")
     if mode not in ("software", "pcapng"):
         raise ValueError("unsupported matrix mode")
@@ -153,6 +162,10 @@ def run_matrix(matrix_path, output):
         raise ValueError("unsupported matrix schema/scope")
     if not isinstance(matrix["plan"], dict) or not isinstance(matrix["runs"], list) or not matrix["runs"]:
         raise ValueError("matrix requires plan metadata and at least one registered run")
+    workers = matrix.get("workers", 1)
+    available_cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    if type(workers) is not int or not 1 <= workers <= available_cpus:
+        raise ValueError("matrix workers must be a positive integer no greater than available CPUs")
     ids, manifests, names = set(), set(), {"summary.json"}
     for run in matrix["runs"]:
         shape(run, ("id", "manifest"), ("family",))
@@ -184,8 +197,7 @@ def run_matrix(matrix_path, output):
         archive(destination, destination / ".matrix.json.tmp")
         write_json(marker, registration)
     archive(destination, destination / "summary.json", destination / ".summary.json.tmp")
-    results = []
-    for run in matrix["runs"]:
+    def evaluate(run):
         run_id = run["id"]
         source, target = (path.parent / run["manifest"]).resolve(), destination / run_id
         log_path = destination / (run_id + ".stderr.log")
@@ -205,9 +217,13 @@ def run_matrix(matrix_path, output):
                 verdict = dict(run=run_id, scope=matrix["scope"], status="INVALID",
                                measurement_status="INCONCLUSIVE", g2_qualified=False,
                                reason_codes=["REPORTER_PROCESS_ERROR"], rows=[])
-        results.append(dict(verdict, id=run_id, reporter_exit=returncode,
-                            family=run.get("family"),
-                            report=run_id + "/report.json", stderr=run_id + ".stderr.log"))
+        return dict(verdict, id=run_id, reporter_exit=returncode, family=run.get("family"),
+                    report=run_id + "/report.json", stderr=run_id + ".stderr.log")
+    if workers == 1:
+        results = list(map(evaluate, matrix["runs"]))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(evaluate, matrix["runs"]))
     state = ("FAIL" if any(run["measurement_status"] == "FAIL" for run in results) else
              "INCONCLUSIVE" if any(run["measurement_status"] != "PASS" for run in results) else "PASS")
     result = dict(schema="hng-m6-report-v1", scope=matrix["scope"], plan=matrix["plan"],
