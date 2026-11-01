@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Binary sampled input keeps registration and verdict boundaries explicit."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +13,65 @@ from tools.g2.tests.test_registration import manifest
 
 
 class SampledBinaryTests(unittest.TestCase):
+    def test_seven_writer_bidirectional_verdicts_are_byte_identical(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_split_fixture import make_case
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);make_case(root)
+            for mode in ('legacy','binary'):
+                self.assertEqual(report_one(root/f'{mode}.json',root/f'{mode}-report','demo','software-only'),0)
+            for name in ('verdict.json','results.csv','summary.txt'):
+                self.assertEqual((root/'binary-report'/name).read_bytes(),(root/'legacy-report'/name).read_bytes(),name)
+
+    def test_observed_q_mismatch_stays_a_byte_identical_fail(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.native_adapter import NativeAdapter
+        from tools.g2.native_binary import decode
+        from tools.g2.tests.binary_sample_fixture import make_case
+        from tools.g2.tests.test_native_binary import MAGIC,entry,frame,line
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);data=make_case(root)
+            decoded=io.StringIO()
+            with (root/'native.hngb').open('rb') as source:decode(source,decoded)
+            records=[json.loads(raw) for raw in decoded.getvalue().splitlines()]
+            output=[MAGIC,frame(1,line(records[0]),0)]
+            for i,row in enumerate(records[1:-1],1):
+                if row['kind']==1 and row['actual_selection_seq']==0:row['actual_selection_seq']=999
+                common=[row['at_ns'],row['gate_ns'],row['submit_before_ns'],row['submit_after_ns'],*row['resources'],
+                    row['actual_selection_seq'],row['attempt_id'],*row['consumed_dispatch'],row['first_handoff_seq'],
+                    row['handoff_queue'],row['port'],row['accepted_count']]
+                value=entry(producer=row['producer'],kind=row['kind'],reason=row['reason'],seq=row['producer_seq'],
+                    order=row['order'],common=common,snapshot=row['snapshot'],items=row['items'])
+                output.append(frame(2,value,i))
+            output.append(frame(3,line(records[-1]),len(output)-1))
+            (root/'native.hngb').write_bytes(b''.join(output))
+            targets=[io.StringIO() for _ in range(3)]
+            raw=''.join(json.dumps(row)+'\n' for row in records)
+            self.assertTrue(NativeAdapter(io.StringIO(raw),*targets,run='demo',lines=data['config']['lines']).process()['complete'])
+            for role,text in zip(('ingress','host'),targets):
+                path=root/f'{role}.jsonl';path.write_text(text.getvalue())
+                next(s for s in data['legacy_manifest']['streams'] if s['role']==role)['file_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+            data['binary_manifest']['verification']['native_binary']['sha256']=hashlib.sha256((root/'native.hngb').read_bytes()).hexdigest()
+            (root/'legacy.json').write_text(json.dumps(data['legacy_manifest']))
+            (root/'binary.json').write_text(json.dumps(data['binary_manifest']))
+            for mode in ('legacy','binary'):
+                self.assertEqual(report_one(root/f'{mode}.json',root/f'{mode}-report','demo','software-only'),1)
+            for name in ('verdict.json','results.csv','summary.txt'):
+                self.assertEqual((root/'binary-report'/name).read_bytes(),(root/'legacy-report'/name).read_bytes(),name)
+
+    def test_crc_failure_cannot_be_a_sampled_pass(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_sample_fixture import make_case
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);data=make_case(root)
+            path=root/'native.hngb';raw=bytearray(path.read_bytes());raw[28]^=1;path.write_bytes(raw)
+            data['binary_manifest']['verification']['native_binary']['sha256']=hashlib.sha256(raw).hexdigest()
+            (root/'binary.json').write_text(json.dumps(data['binary_manifest']))
+            self.assertEqual(report_one(root/'binary.json',root/'out','demo','software-only'),2)
+            report=json.loads((root/'out/report.json').read_text())
+            self.assertEqual(report['measurement_status'],'INCONCLUSIVE')
+            self.assertEqual(report['reason_codes'],['NATIVE_BINARY_FORMAT'])
+
     def test_native_and_jsonl_verdict_artifacts_are_byte_identical(self):
         from tools.g2.matrix import report_one
         from tools.g2.tests.binary_sample_fixture import make_case

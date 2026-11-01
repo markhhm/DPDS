@@ -28,6 +28,14 @@ def _words(data, positions, dtype):
     return data[positions[:,None]+np.arange(dtype.itemsize)].view(dtype).reshape(-1)
 
 
+def _epb_run(data, cursor, size, order, limit):
+    count = min((len(data)-cursor)//size,limit)
+    headers = np.ndarray((count,2),dtype=order+'u4',buffer=data,offset=cursor,strides=(size,4))
+    trailers = np.ndarray((count,),dtype=order+'u4',buffer=data,offset=cursor+size-4,strides=(size,))
+    mismatches = np.flatnonzero((headers[:,0] != 6) | (headers[:,1] != size) | (trailers != size))
+    return int(mismatches[0]) if len(mismatches) else count
+
+
 class CaptureArrays:
     def __init__(self, path, interfaces, start_ns, end_ns, probe_port=9000, batch_size=65536):
         if type(batch_size) is not int or batch_size <= 0:
@@ -182,7 +190,12 @@ class CaptureArrays:
                     ordinal += 1
                     if kind == 6:
                         if size < 32: fail('PCAPNG_TRUNCATED','truncated packet block')
-                        positions.append(cursor); blocks.append(ordinal)
+                        # Each candidate's type, length and trailer is checked before advancing.
+                        count = _epb_run(data,cursor,size,order,self.batch_size-len(positions))
+                        positions.extend(range(cursor,cursor+count*size,size))
+                        blocks.extend(range(ordinal,ordinal+count))
+                        cursor += (count-1)*size
+                        ordinal += count-1
                     else:
                         if positions:
                             yield self._decode(data,positions,blocks,order)

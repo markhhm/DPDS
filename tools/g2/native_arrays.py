@@ -80,10 +80,8 @@ class _Columns:
                 raise ValueError('unknown native binary integer tag')
             widths = tags[wide].astype(np.int64)-0x7f
             positions = self.take(rows[wide], widths)
-            decoded = np.zeros(len(wide), dtype=np.uint64)
-            for byte in range(int(widths.max())):
-                selected = np.flatnonzero(widths > byte)
-                decoded[selected] |= self.data[positions[selected]+byte].astype(np.uint64) << np.uint64(byte*8)
+            decoded = self.data[positions[:, None]+np.arange(8)].view('<u8').reshape(-1)
+            decoded &= np.uint64((1 << 64)-1) >> ((8-widths).astype(np.uint64)*np.uint64(8))
             if np.any(decoded < 128) or np.any((widths > 1) & (self.data[positions+widths-1] == 0)):
                 raise ValueError('noncanonical native binary integer')
             values[wide] = decoded
@@ -196,7 +194,8 @@ class NativeArrays:
             raise ValueError('native binary source changed while reading')
 
     def _batch(self, buffers, starts, ends):
-        data = np.concatenate(buffers) if len(buffers) > 1 else buffers[0]
+        # Eight-byte gathers may cross fields; take() still enforces each entry end.
+        data = np.concatenate(buffers+[np.zeros(7, dtype=np.uint8)])
         batch = _decode(data, starts, ends)
         events = batch['events']
         if np.any(events['order'] != np.arange(self._order, self._order+len(events), dtype=np.uint64)):

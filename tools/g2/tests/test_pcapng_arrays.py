@@ -18,6 +18,51 @@ class CaptureArraysTests(unittest.TestCase):
         from tools.g2.pcapng_arrays import CaptureArrays
         return CaptureArrays(path, {0: 3}, start, end, **kwargs)
 
+    def test_epb_run_stops_at_first_nonmatching_frame(self):
+        from tools.g2.pcapng_arrays import _epb_run
+        for endian in ('<','>'):
+            for fault in ('metadata','length','trailer'):
+                with self.subTest(endian=endian,fault=fault):
+                    blocks=bytearray(b''.join(struct.pack(endian+'IIIII',6,20,0,0,20) for _ in range(5)))
+                    position=3*20+dict(metadata=0,length=4,trailer=16)[fault]
+                    struct.pack_into(endian+'I',blocks,position,dict(metadata=5,length=24,trailer=16)[fault])
+                    data=np.frombuffer(blocks,dtype=np.uint8)
+                    self.assertEqual(_epb_run(data,0,20,endian,5),3)
+                    self.assertEqual(_epb_run(data,0,20,endian,2),2)
+
+    def test_variable_blocks_and_embedded_metadata_match_streaming_reader(self):
+        for endian in ('<','>'):
+            for fault in (None,'trailer','length'):
+                with self.subTest(endian=endian,fault=fault), tempfile.TemporaryDirectory() as tmp:
+                    path=Path(tmp)/'capture.pcapng';pcapng(path,list(range(12)),endian=endian)
+                    original=path.read_bytes();blocks=[];cursor=packet=0
+                    while cursor < len(original):
+                        kind,size=struct.unpack_from(endian+'II',original,cursor)
+                        block=bytearray(original[cursor:cursor+size]);cursor+=size
+                        if kind == 6:
+                            packet+=1
+                            if packet == 5:
+                                # Unknown blocks are allowed and must break an EPB run.
+                                blocks.append(struct.pack(endian+'III',1234,12,12))
+                            if packet in (4,5,6):
+                                # Omit EPB options to change size within the packet run.
+                                block=block[:4]+struct.pack(endian+'I',size-16)+block[8:-20]+struct.pack(endian+'I',size-16)
+                            if packet == 12 and fault:
+                                struct.pack_into(endian+'I',block,4 if fault=='length' else len(block)-4,
+                                                 14 if fault=='length' else 12)
+                        blocks.append(block)
+                    path.write_bytes(b''.join(blocks))
+                    reference=Capture(path,{0:3},0,10**9);reader=self.reader(path,batch_size=7)
+                    if fault:
+                        with self.assertRaises(ValueError) as expected: list(reference.packets())
+                        with self.assertRaises(ValueError) as actual: list(reader.batches())
+                        self.assertEqual(actual.exception.code,expected.exception.code)
+                    else:
+                        expected=list(reference.packets());rows=np.concatenate(list(reader.batches()))
+                        np.testing.assert_array_equal(rows['raw'],[row[1] for row in expected])
+                        np.testing.assert_array_equal(rows['ordinal'],np.arange(12))
+                        self.assertEqual(reader.descriptions,reference.descriptions)
+
     def test_array_records_match_streaming_observations_and_health(self):
         manifest = dict(lines=[dict(name='line', ingress_port=3, egress_port=4, vlan_id=100)],
                         identity_profile=dict(probe_port=9000))

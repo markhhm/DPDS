@@ -131,11 +131,14 @@ def sample_mask(run, seed, mask_bits, items):
     for start in range(0, len(items), _CHUNK_ROWS):
         chunk = items[start:start + _CHUNK_ROWS]
         chunk_kinds = np.ones(len(chunk), dtype=np.uint8) if kinds is None else kinds[start:start + _CHUNK_ROWS]
-        keys = np.rec.fromarrays([chunk[name] for name in fields] + [chunk_kinds],
-                                 names=fields + ('identity_kind',))
-        groups, inverse = np.unique(keys, return_inverse=True)
+        columns = [chunk[name] for name in fields] + [chunk_kinds]
+        keys = np.rec.fromarrays(columns, names=fields + ('identity_kind',))
+        if all(np.all(values == values[0]) for values in columns):
+            groups, inverse = keys[:1], None
+        else:
+            groups, inverse = np.unique(keys, return_inverse=True)
         for index, group in enumerate(groups):
-            selected = np.flatnonzero(inverse == index)
+            selected = np.arange(len(chunk)) if inverse is None else np.flatnonzero(inverse == index)
             port = int(group['ingress_port'])
             if group['identity_kind'] == 2:
                 flow = f'software-l2-{port}'

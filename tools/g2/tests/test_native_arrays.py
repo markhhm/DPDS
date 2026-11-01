@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import random
 import struct
 import tempfile
 import unittest
@@ -76,6 +77,58 @@ class NativeArraysTests(unittest.TestCase):
                             snapshot=((65535, maximum, maximum, 1), (1, 2, 3, 0)),
                             items=(packet, [0]*22)), seal=health((0, 0, 0, 0, 0, 0, 1)))
         self.assert_parity(raw)
+
+    def test_final_item_integer_widths_one_through_eight_preserve_entry_boundaries(self):
+        values = (128, 255, 256, 65535, 65536, 16777215, 16777216, 4294967295,
+                  4294967296, 1099511627775, 1099511627776, 281474976710655,
+                  281474976710656, 72057594037927935, 72057594037927936, 18446744073709551615)
+        records = []
+        for index, value in enumerate(values):
+            packet = [0]*21+[value]
+            # rx_flags is the final tagged integer, with no following entry bytes.
+            wire = entry(seq=index+1, order=index, items=(packet,))
+            records.append(wire)
+            with self.subTest(value=value, final=True):
+                raw = capture(entry(items=(packet,)))
+                self.assert_parity(raw, chunk_records=1)
+        raw = capture(b''.join(records), seal=health((len(records), 0, 0, 0, 0, 0, 0)))
+        # The next entry's bytes must not contaminate a shorter integer's value.
+        self.assert_parity(raw, chunk_records=1)
+        self.assert_parity(raw, chunk_records=7)
+
+    def test_truncated_final_integer_cannot_borrow_from_the_next_entry(self):
+        for width, value in enumerate((128, 256, 65536, 16777216, 4294967296,
+                                       1099511627776, 281474976710656, 72057594037927936), 1):
+            raw = entry(items=([0]*21+[value],))
+            body = raw[2:-1]
+            broken = struct.pack('<H', len(body))+body
+            with self.subTest(width=width):
+                self.rejects(capture(broken))
+                self.rejects(capture(broken+entry(seq=2, order=1), seal=health((2, 0, 0, 0, 0, 0, 0))))
+
+    def test_mixed_sparse_widths_match_reference_across_frames_and_batch_cuts(self):
+        rng = random.Random(917)
+        candidates = (0, 1, 127, 128, 255, 256, 65535, 65536, 2**24-1, 2**32-1,
+                      2**40+1, 2**48+1, 2**53+1, 2**56+1, 2**64-1)
+        def sparse(maxima):
+            return [rng.choice([value for value in candidates if value <= maximum]) for maximum in maxima]
+        counts, records = [0]*7, []
+        for order in range(257):
+            producer = order % 7
+            counts[producer] += 1
+            snapshots = tuple((rng.randrange(65536), rng.choice(candidates), rng.choice(candidates), rng.randrange(2))
+                              for _ in range(order % 3))
+            records.append(entry(producer=producer, kind=order % 8, reason=order % 256,
+                seq=counts[producer], order=order, common=sparse(native_binary.COMMON_MAX), snapshot=snapshots,
+                items=tuple(sparse(native_binary.ITEM_MAX) for _ in range(order % 17))))
+        parts, payload, sequence = [MAGIC, frame(1, HEADER, 0)], b'', 1
+        for record in records:
+            if len(payload)+len(record) > 65516:
+                parts.append(frame(2, payload, sequence))
+                payload, sequence = b'', sequence+1
+            payload += record
+        parts += [frame(2, payload, sequence), frame(3, line(health(counts)), sequence+1)]
+        self.assert_parity(b''.join(parts), chunk_records=23)
 
     def test_batch_boundaries_preserve_all_kinds_producer_sequences_and_links(self):
         counts = [0]*7

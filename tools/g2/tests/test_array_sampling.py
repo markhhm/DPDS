@@ -2,6 +2,7 @@
 """The bulk selector must retain exactly the scalar SHA-256 population."""
 import hashlib
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -84,6 +85,32 @@ class ArraySamplingTests(unittest.TestCase):
         rows['identity'][:20] = [10**width - 1 for width in range(1, 20)] + [2**64 - 1]
         np.testing.assert_array_equal(sample_mask('chunks', 2**63, 4, rows),
                                       scalar_mask('chunks', 2**63, 4, rows))
+
+    def test_uniform_flow_chunks_match_scalar_without_sorting(self):
+        rows = items(8209)
+        for field in ('ingress_port', 'source', 'destination', 'source_port', 'destination_port'):
+            rows[field] = rows[field][0]
+        rows['identity'][8190:8195] = [2**53 - 1, 2**53, 2**53 + 1, 2**64 - 2, 2**64 - 1]
+        run = 'uniform-台灣😀"\\\n'
+        for kind in (1, 2, None):
+            rows['identity_kind'] = 1 if kind is None else kind
+            given = rows if kind is not None else rows[[name for name in rows.dtype.names if name != 'identity_kind']]
+            expected = scalar_mask(run, 2**64 - 1, 3, rows)
+            with self.subTest(kind=kind), patch('tools.g2.array_sampling.np.unique',
+                    side_effect=AssertionError('uniform flow must not sort')):
+                np.testing.assert_array_equal(sample_mask(run, 2**64 - 1, 3, given), expected)
+
+    def test_each_varying_flow_field_keeps_distinct_hashes(self):
+        for field in ('ingress_port', 'source', 'destination', 'source_port', 'destination_port', 'identity_kind'):
+            rows = items(64)
+            rows['source_port'] = 1111
+            for name in rows.dtype.names:
+                if name != 'identity':
+                    rows[name] = rows[name][0]
+            rows[field][32:] += 1
+            with self.subTest(field=field):
+                np.testing.assert_array_equal(sample_mask('mixed-field', 9, 1, rows),
+                                              scalar_mask('mixed-field', 9, 1, rows))
 
     def test_empty_and_default_stage1_kind(self):
         self.assertEqual(sample_mask('empty', 0, 10, items(0)).dtype, np.dtype(bool))
