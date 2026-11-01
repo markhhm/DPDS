@@ -130,7 +130,10 @@ test('observer-shutdown', python, args: [meson.project_source_root() / 'tests/ob
   timeout: 30, is_parallel: false)
 
 test('g2-sampled', python, args: ['-m','unittest','tools.g2.tests.test_sampled_reference',
-  'tools.g2.tests.test_sampled_bundle','tools.g2.tests.test_seqcheck'],
+  'tools.g2.tests.test_sampled_bundle','tools.g2.tests.test_seqcheck',
+  'tools.g2.tests.test_native_arrays','tools.g2.tests.test_array_sampling',
+  'tools.g2.tests.test_pcapng_arrays','tools.g2.tests.test_native_projection',
+  'tools.g2.tests.test_sampled_binary','tools.g2.tests.test_sampled_columns'],
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
 test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix'],

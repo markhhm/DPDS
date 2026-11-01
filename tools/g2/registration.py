@@ -68,9 +68,19 @@ def _validate(manifest, config):
         raise ValueError("unsupported timing mode")
     verification = manifest.get('verification')
     if verification is not None:
-        shape(verification, ('mode','seqchecks'))
+        shape(verification, ('mode','seqchecks'), ('native_binary','capture_pairs'))
         if verification['mode'] != 'sampled' or not isinstance(verification['seqchecks'],list):
             raise ValueError('unsupported verification mode/seqchecks')
+        binary=verification.get('native_binary')
+        if 'native_binary' in verification:
+            shape(binary,('path','sha256'))
+            identifier(binary['path'],'native binary path');digest(binary['sha256'])
+            pairs=verification.get('capture_pairs')
+            if not isinstance(pairs,list) or not 1<=len(pairs)<=2 or len(set(pairs))!=len(pairs):
+                raise ValueError('native binary requires one or two capture pairs')
+            for path in pairs:identifier(path,'capture pair path')
+        elif 'capture_pairs' in verification:
+            raise ValueError('capture pairs require native binary input')
         for pair in verification['seqchecks']:
             shape(pair, ('path','sha256','ingress_port','egress_port','ingress_path','receiver_path'))
             digest(pair['sha256'])
@@ -234,7 +244,10 @@ def _validate(manifest, config):
         ids.add(stream["stream_id"])
         paths.add(stream["path"])
         roles.add(stream["role"])
-    if roles != set(ROLES) and not (verification is not None and roles == set(ROLES)-{"expected"}):
+    binary=verification is not None and 'native_binary' in verification
+    if binary and roles!={'counters'}:
+        raise ValueError('binary input registers only its counter stream')
+    if not binary and roles != set(ROLES) and not (verification is not None and roles == set(ROLES)-{"expected"}):
         raise ValueError("missing required stream role")
     capacity = manifest["capacity"]
     shape(capacity, ("max_unresolved", "timing_sample_capacity", "max_diagnostics", "max_join_lag_ns",
@@ -260,7 +273,7 @@ def _validate(manifest, config):
         if queue["handoff_queue_id"] in queues or not uint(queue["capacity"], "handoff capacity"):
             raise ValueError("duplicate/empty handoff queue")
         for stream, _ in handoff_actors(queue).values():
-            if not any(row["stream_id"] == stream and row["role"] == "host" for row in manifest["streams"]):
+            if not (binary and stream=='native-host') and not any(row["stream_id"] == stream and row["role"] == "host" for row in manifest["streams"]):
                 raise ValueError("native actor requires a registered host stream")
         queues.add(queue["handoff_queue_id"])
     if not queues:

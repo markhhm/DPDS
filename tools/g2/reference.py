@@ -149,7 +149,7 @@ class Trace:
         return next(row["at_ns"] for row in self.rows[index:] if not row["outage"])
 
 
-def q_admit(state, arrival, q):
+def q_admit(state, arrival, q, service=None):
     """Advance the exact service ledger; propagation never releases Q bytes."""
     ledger = state['ledger']
     while ledger and ledger[0][0] <= arrival:
@@ -157,7 +157,7 @@ def q_admit(state, arrival, q):
     model = state['config']['model']
     if state['used'] + q > model['q_bytes']:
         return None
-    finish = max(Fraction(arrival), state['tail']) + Fraction(8*(q+20)*10**9, model['c_bps'])
+    finish = max(Fraction(arrival), state['tail']) + (Fraction(8*(q+20)*10**9, model['c_bps']) if service is None else service)
     state['tail'] = finish
     ledger.append((finish,q))
     state['used'] += q

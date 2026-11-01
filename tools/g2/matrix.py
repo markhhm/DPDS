@@ -50,6 +50,13 @@ def source_hashes(path, mode):
     if verification.get("mode") == "sampled":
         files += [path.parent / row[field] for row in verification.get("seqchecks", [])
                   for field in ("path", "ingress_path", "receiver_path")]
+        if 'native_binary' in verification:
+            files.append(path.parent/verification['native_binary']['path'])
+            for entry in verification['capture_pairs']:
+                pair_path=path.parent/entry
+                pair=strict_json(pair_path.read_bytes())
+                files.append(pair_path)
+                files.extend(pair_path.parent/pair[role]['path'] for role in ('before','receiver'))
     return {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
 
 
