@@ -16,15 +16,15 @@ from tools.g2.tests.test_bundle import fixture
 FLOW = 'c0000201:c6336402:1111:9000'
 
 
-def frame(sequence):
-    payload = encode_probe(sequence, False)
-    ip = bytes.fromhex('450000800000000040110000c0000201c6336402')
+def frame(sequence, ip_options=0):
+    payload = encode_probe(sequence, False)[:100-ip_options]
+    ip = bytes([0x40+(20+ip_options)//4])+bytes.fromhex('0000800000000040110000c0000201c6336402')+bytes(ip_options)
     udp = struct.pack('!HHHH', 1111, 9000, 8+len(payload), 0)
     return bytes.fromhex('ffffffffffff020000000001810000640800') + ip + udp + payload
 
 
 def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution=9,
-           start=0, end=10**9, offset=0):
+           start=0, end=10**9, offset=0, snaplen=65535, caplen=None, wirelen=None, ip_options=0):
     def block(kind, body):
         size = len(body)+12
         return struct.pack(endian+'II', kind, size)+body+struct.pack(endian+'I', size)
@@ -33,11 +33,13 @@ def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution
     def options(values):
         return b''.join(option(*item) for item in values)+bytes(4)
     data = block(0x0a0d0d0a, struct.pack(endian+'IHHq', 0x1a2b3c4d, 1, 0, -1))
-    data += block(1, struct.pack(endian+'HHI', 1, 0, 65535)+options([
+    data += block(1, struct.pack(endian+'HHI', 1, 0, snaplen)+options([
         (9, bytes([resolution])),(14,struct.pack(endian+'q',offset))]))
     for seq, time in enumerate(times):
-        packet = frame(seq)
-        body = struct.pack(endian+'IIIII', 0, time>>32, time & 0xffffffff, len(packet), len(packet))
+        packet = frame(seq, ip_options)
+        original_length = len(packet) if wirelen is None else wirelen
+        packet = packet[:caplen]
+        body = struct.pack(endian+'IIIII', 0, time>>32, time & 0xffffffff, len(packet), original_length)
         body += packet+bytes((-len(packet))%4)
         data += block(6, body+options([(4, struct.pack(endian+'Q', epb_drop))]))
     counts = [(2, struct.pack(endian+'II', start>>32, start & 0xffffffff)),
@@ -89,6 +91,36 @@ class PcapngTests(unittest.TestCase):
             self.assertEqual(before[0]['external_identity'],FLOW+':0')
             self.assertEqual(before[0]['timestamp']['raw'],100)
             self.assertTrue((root/'out/reports/demo/results.csv').exists())
+
+    def test_snaplen_preserves_probe_identity_and_original_wire_length(self):
+        for endian, retained, ip_options in [('<', 128, 0), ('>', 59, 0), ('<', 99, 40)]:
+            with self.subTest(endian=endian, retained=retained, ip_options=ip_options), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); expected = setup(root, endian=endian)
+                for role, key in [('before', 'arrival_ns'), ('receiver', 'release_ns')]:
+                    pcapng(root/f'{role}.pcapng', [row[key]+(3 if role=='receiver' else 0) for row in expected],
+                           endian=endian, snaplen=retained, caplen=retained, ip_options=ip_options)
+                result = self.invoke(root)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads((root/'out/reports/demo/report.json').read_text())
+                self.assertEqual(report['measurement_status'], 'PASS', report['reason_codes'])
+                for role in ('before', 'receiver'):
+                    rows = list(StreamReader(root/f'out/bundle/{role}.jsonl', role=role))
+                    self.assertEqual([row['external_identity'] for row in rows], [FLOW+f':{i}' for i in range(400)])
+                    self.assertEqual({row['length'] for row in rows}, {146})
+
+    def test_missing_probe_prefix_and_inconsistent_lengths_are_inconclusive(self):
+        for caplen, snaplen, wirelen in [(58, 58, 146), (18, 18, 146), (146, 65535, 145),
+                                        (59, 59, 145), (128, 127, 146)]:
+            with self.subTest(caplen=caplen, snaplen=snaplen, wirelen=wirelen), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); expected = setup(root)
+                pcapng(root/'receiver.pcapng', [row['release_ns']+3 for row in expected],
+                       snaplen=snaplen, caplen=caplen, wirelen=wirelen)
+                result = self.invoke(root)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                report = json.loads((root/'out/reports/demo/report.json').read_text())
+                self.assertEqual(report['measurement_status'], 'INCONCLUSIVE')
+                health = json.loads((root/'out/conversion.json').read_text())['captures']['receiver']
+                self.assertFalse(health['complete'])
 
     def test_counter_rewrite_cannot_launder_a_source_hash_mismatch(self):
         with tempfile.TemporaryDirectory() as temporary:

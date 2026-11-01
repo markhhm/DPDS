@@ -10,7 +10,7 @@ import sys
 from .calibration import Calibration
 from .counters import OBSERVER_FIELDS
 from .matrix import run_matrix, EXIT
-from .probe import decode_probe
+from .probe import HEADER, decode_probe
 from .protocol import StreamError, StreamReader, StreamWriter, shape, identifier
 from .reference import strict_json, uint
 from .validate import preflight
@@ -117,7 +117,7 @@ class Capture:
                     if kind == 6:
                         caplen, wirelen = struct.unpack_from(order+'II', body, 12)
                         padded = (caplen+3) & ~3
-                        if (caplen != wirelen or len(body) < 20+padded
+                        if (caplen > wirelen or len(body) < 20+padded
                                 or info['snaplen'] and caplen > info['snaplen']):
                             fail('PCAPNG_TRUNCATED', 'packet bytes were truncated')
                         opts = options(body[20+padded:], order)
@@ -135,7 +135,7 @@ class Capture:
                         if info['first'] is None: info['first'] = raw
                         info.update(last=raw, packet_block=ordinal, packets=info['packets']+1)
                         self.records += 1
-                        yield interface, raw, body[20:20+caplen]
+                        yield interface, raw, body[20:20+caplen], wirelen
                     else:
                         opts = options(body[12:], order)
                         required = [option(opts, code, 8) for code in (2, 3, 5, 7, 8)]
@@ -172,7 +172,7 @@ class Capture:
                 fail('PCAPNG_HEALTH_UNKNOWN', 'final capture statistics do not certify the registered window/packet count')
 
 
-def observation(frame, port, role, manifest):
+def observation(frame, wirelen, port, role, manifest):
     if len(frame) < 18 or frame[12:14] != b'\x81\0' or frame[16:18] != b'\x08\0':
         fail('PCAPNG_IDENTITY', 'retained single-VLAN IPv4 UDP probes are required')
     vlan = struct.unpack_from('!H', frame, 14)[0] & 4095
@@ -181,21 +181,23 @@ def observation(frame, port, role, manifest):
     if len(lines) != 1:
         fail('PCAPNG_IDENTITY', 'packet has no unique registered line')
     ip = 18
+    if len(frame) < ip+20:
+        fail('PCAPNG_IDENTITY', 'truncated IPv4 header')
     ihl = (frame[ip] & 15)*4
-    if len(frame) < ip+20 or frame[ip] >> 4 != 4 or ihl < 20 or len(frame) < ip+ihl+8:
+    if frame[ip] >> 4 != 4 or ihl < 20 or len(frame) < ip+ihl+8+HEADER.size:
         fail('PCAPNG_IDENTITY', 'truncated or unsupported IPv4 header')
     total, fragments = struct.unpack_from('!HH', frame, ip+2)[0], struct.unpack_from('!H', frame, ip+6)[0]
     udp = ip+ihl
     sport, dport, size = struct.unpack_from('!HHH', frame, udp)
     if (frame[ip+9] != 17 or fragments & 0x3fff or dport != manifest['identity_profile']['probe_port']
-            or total != ihl+size or size < 8 or ip+total > len(frame)):
+            or total != ihl+size or size < 8+HEADER.size or ip+total > wirelen):
         fail('PCAPNG_IDENTITY', 'unsupported or truncated probe packet')
-    sequence, late = decode_probe(frame[udp+8:udp+size])
+    sequence, late = decode_probe(frame[udp+8:udp+8+HEADER.size])
     source, destination = struct.unpack_from('!II', frame, ip+12)
     flow = f'{source:08x}:{destination:08x}:{sport}:{dport}'
     line = lines[0]
     return dict(ingress_port=line['ingress_port'], egress_port=line['egress_port'], line=line['name'],
-                external_identity=f'{flow}:{sequence}', flow_id=flow, length=len(frame), vlan_id=vlan,
+                external_identity=f'{flow}:{sequence}', flow_id=flow, length=wirelen, vlan_id=vlan,
                 app=None, selected_late=int(late))
 
 
@@ -248,8 +250,8 @@ def convert_stream(pair, role, base, manifest, registration, destination, clock,
         initial = file_signature(capture.path)
         if not capture.path.is_file():
             fail('PCAPNG_SOURCE', 'a closed regular capture file is required')
-        for interface, raw, packet in capture.packets():
-            values = observation(packet, interfaces[interface], role, manifest)
+        for interface, raw, packet, wirelen in capture.packets():
+            values = observation(packet, wirelen, interfaces[interface], role, manifest)
             timestamp = dict(raw=raw, clock_id=pair['clock_id'], mapping_id=pair['mapping_id'],
                              point='external_rx', uncertainty_ns=pair['uncertainty_ns'])
             clock.map_timestamp(timestamp, raw, order_key=(role, interface))
