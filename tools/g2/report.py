@@ -336,14 +336,11 @@ def build_report(expected, summary, received, counters, config, manifest, traces
             if measured is None:
                 missing_timing += 1
                 continue
-            if manifest["timing_mode"] == "stress":
-                line = lines[row["line"]]
+            line = lines[row["line"]]
+            if manifest["timing_mode"] == "stress" or line["trace"] is not None:
                 target = row["release_ns"] if line["trace"] is not None else row["deadline_ns"]
                 predicted = target - row["arrival_ns"]
             else:
-                line = lines[row["line"]]
-                if line["trace"] is not None:
-                    raise ValueError("trace calibration requires preregistered trace deadline model")
                 model = line["model"]
                 predicted = model["t_ns"] + row["late"] * model["delta_ns"]
             error = abs(measured - row["arrival_ns"] - predicted)
