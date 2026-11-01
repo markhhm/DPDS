@@ -11,6 +11,34 @@ Every flow on that line shares one C/Q state. Cable and LEO in both directions
 use four independent states. The configuration gives the egress port explicitly.
 Sparse DPDK port IDs are valid.
 
+## Hardware planning
+
+The pool calculator, not mean occupancy, supplies the packet-memory bound.
+The default example has two ingress pools.
+It uses 100 Gbit/s, t=142 ms, delta=320 ms,
+Q=50 ms, 1,522-byte L2 frames, seven lcores and 2 MiB pages.
+
+Early budgets were **20 GiB minimum / 40 GiB recommended**.
+They rounded 19.432 / 38.826 GiB of pools for one / two lines per direction.
+That [host revision](https://github.com/markhhm/DPDS/tree/749d5543595bcd8fd2fd53eb0dd15fd1fc1c2182)
+used a 2,496-byte mbuf stride. Current observer metadata raises the stride to
+2,624 bytes. The same calculator inputs now give:
+
+| Lines per direction | Pool GiB per direction | Both directions, approximately |
+|---|---:|---:|
+| 1 | 10.214 | 20.43 GiB |
+| 2, cable and LEO | 20.405 | 40.81 GiB |
+
+Thus 20 / 40 GiB are historical budgets, not sufficient current reservations.
+The pools alone need at least 21 / 41 whole GiB for these two cases.
+
+Add EAL headroom. Reserve separate ordinary RAM for core and observer metadata.
+Use the [calculator commands](#performance-tools) below with the actual
+frame, trace, port and NUMA layout. Smaller frames or longer holds need more memory.
+
+These estimates do not qualify a physical allocation or 100G operation.
+See [hardware bring-up](docs/BRING-UP.md) for the unresolved deployment decisions.
+
 ## Build and software checks
 
 Requirements: DPDK 26.03 with the null, pcap, ring, and af_packet PMDs;
@@ -228,10 +256,13 @@ and recycles its own mbufs. Two fixtures:
   Arrivals at 25 Gbit/s per direction (`-g 493440`) keep about 294,000 packets
   in flight per owner, a quarter of 100G, so that the run fits in about 2.1 GB.
 
+Set `BENCH_CPUS` to three available physical CPU IDs: main, owner 0, owner 1.
+Run one benchmark at a time and record load average with its results.
+
 ```sh
 cd build
-python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 -- -r 3
-python3 ../perf/sched_bench.py ./hng-sched-bench --cpus 2,6,10 --memory 1800 -- \
+python3 ../perf/sched_bench.py ./hng-sched-bench --cpus "$BENCH_CPUS" -- -r 3
+prlimit --as=4294967296 -- python3 ../perf/sched_bench.py ./hng-sched-bench --cpus "$BENCH_CPUS" --memory 1800 -- \
   -c sched_bench_prod.json -g 493440 -n 3000000 -w 470000000 -m 640000 -r 3
 ```
 
@@ -254,8 +285,9 @@ lines of one direction. Without `--verify` it needs no EAL:
 Defaults: 7 lcores (the per-direction RX, scheduler and TX layout; each lcore
 adds one mempool cache). For trace lines,
 `--trace-max-delay-ms D --trace-max-hold-ms H` sizes storage for the largest
-trace delay plus the longest outage hold, as the engine does. The 2 MiB page
-result is marked unverified: only 4 KiB pages were checked.
+trace delay plus the longest outage hold, as the engine does. Unverified page
+estimates require an allocation check. The [small 2 MiB check](docs/reports/m4-io-split.md)
+passed on its recorded revision; production-sized allocations remain unverified.
 It mirrors the engine's startup storage check, which assumes that every packet
 is late, so the required size does not depend on p. The `mean_occupancy` lines
 use t + p*delta and are estimates, not sizing bounds. `--min-frame` is the
@@ -271,11 +303,60 @@ the prediction with the real allocation made by the production pool function: th
 process heap growth across engine load. It uses the page size the EAL really
 uses (4 KiB under `--no-huge`) and fails above 5% error:
 
+Set `POOL_CPU` to an allowed CPU ID. This small verification uses ordinary pages.
+
 ```sh
-./build/hng-pool-calc -l 0 --no-pci --no-huge --no-telemetry -m 512 \
+./build/hng-pool-calc --lcores="0@$POOL_CPU" --no-pci --no-huge --no-telemetry --in-memory -m 512 \
   --vdev=net_null0 --vdev=net_null1 -- \
   --c-bps 1000000000 --t-ms 20 --delta-ms 40 --q-ms 5 --burst 256 --lines-per-port 2 --verify
 ```
+
+## How to check accuracy (software-only)
+
+Run from the host root after the build above. Set `PYTHON` to the absolute path
+of a Python 3.11+ interpreter with the pinned core's NumPy requirements installed.
+No command below establishes physical timing, throughput or G2 acceptance.
+
+### M2: injected faults
+
+```sh
+prlimit --as=4294967296 -- "$PYTHON" -m unittest \
+  tools.g2.tests.test_report tools.g2.tests.test_protocol tools.g2.tests.test_calibration
+```
+
+These fixtures inject reordered/duplicate identities, timing errors, capture
+gaps and invalid calibration. They assert the required failure or inconclusive verdict.
+
+### M3: a registered canonical replay
+
+Set `RAW` to the downloaded Garcia ZIP directory and `OUT` to a new external
+evidence directory. This example uses the registered 11 s UL corridor-A case.
+
+```sh
+mkdir -p "$OUT"
+CARGO_BUILD_JOBS=1 prlimit --as=4294967296 -- cargo build --locked --release \
+  --manifest-path dpds-core/Cargo.toml --bin trace_replay
+prlimit --as=4294967296 -- "$PYTHON" dpds-core/scripts/garcia_trace.py \
+  "$RAW/2025-04-16-09-26-16__ul.csv.zip" "$OUT/canonical.json" \
+  --start-ns 38000000000 --duration-ns 11000000000 --corridor A --seed 1 \
+  --queue-drain-ns 1000000 --pool dpds-core/docs/reports/m3-canonical-pool-11s.json --pool-index 8
+prlimit --as=4294967296 -- "$PYTHON" dpds-core/scripts/replay_trace.py \
+  "$OUT/canonical.json" --source "$RAW/2025-04-16-09-26-16__ul.csv.zip" \
+  --runner dpds-core/target/release/trace_replay --output "$OUT/replay.json"
+```
+
+The adopted converter tolerance is 0.01 ms. Check oracle mismatches and the
+`realized_lateness` verdict. One case is not the complete canonical assessment:
+the [56-case report](dpds-core/docs/reports/m3-canonical.md) retains 24 PASS,
+0 FAIL and 32 INCONCLUSIVE. It also records the pcap and final-core replay evidence.
+The separate `meson test -C build core-pcap-replay --print-errorlogs` command
+runs both synthetic Core pcap tests and rejects every skip.
+
+### M4: benchmark and allocation checks
+
+Use the existing [performance commands](#performance-tools) for the scheduler
+bench, pool estimates and small allocation verification. CPU timings and memory
+estimates remain software-only. They do not measure wire-time accuracy.
 
 ## Configuration and packet contract
 
