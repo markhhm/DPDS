@@ -133,3 +133,8 @@ private measurement archive. Million-packet inputs are not committed or made
 part of routine CI. Unit tests cover full/sample agreement at selected
 identities, Q boundaries, unsampled trace floor influence, changed hashes,
 missing checker evidence, gate failures and deterministic parallel resume.
+
+The complete matrix suite runs as its own mandatory Meson `g2-matrix` test.
+Under four-CPU affinity, `g2-software` took 52.41 s and `g2-matrix` 20.99 s;
+all 243 tests from the former combined target still execute (223 + 20).
+This split preserves assertions, fixture populations and existing timeouts.

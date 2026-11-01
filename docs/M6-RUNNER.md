@@ -259,3 +259,9 @@ an observation window outside the supplied complete captures.
 The [million-packet measurement and updated budget](reports/m6-sampled.md)
 separate complete reporter throughput from the Q-only microbenchmark. The
 current normalized-input pipeline has not demonstrated one-day M6 processing.
+
+Run the sampled and matrix regression suites with:
+
+```sh
+meson test -C build g2-sampled g2-matrix --print-errorlogs
+```
