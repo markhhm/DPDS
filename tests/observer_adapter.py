@@ -119,12 +119,110 @@ class NativeBoundary(unittest.TestCase):
                       for _ in range(4)])
         return '\n'.join(json.dumps(r) for r in [header, row, end]+([health] if sealed else []))+'\n'
 
-    def normalize(self, source):
+    def normalize(self, source, ingress_port=0):
         outputs = [io.StringIO() for _ in range(3)]
         adapter = NativeAdapter(io.StringIO(source), *outputs, run='demo',
-                                lines=[dict(name='cable', ingress_port=0, egress_port=1, vlan_id=100)])
+                                lines=[dict(name='cable', ingress_port=ingress_port, egress_port=1-ingress_port, vlan_id=100)])
         result = adapter.process()
         return result, [[json.loads(r) for r in output.getvalue().splitlines()] for output in outputs]
+
+    def single_direction(self, *, inactive_count=0, inactive_packet=False, dropped=0):
+        rows = [json.loads(row) for row in self.fixture().splitlines()]
+        extra = dict(rows[2], port=1, actual_selection_seq=inactive_count)
+        attempt = dict(rows[2], producer=3, kind=6, producer_seq=1, port=1,
+                       snapshot=[[0, 1, (1 << 64)-1, True],
+                                 [1, inactive_count, (1 << 64)-1, True]])
+        resources = [dict(rows[2], kind=7, producer=4, port=port, resources=[phase, 10, 10, 0]+[0]*6)
+                     for port in (0, 1) for phase in (0, 1)]
+        events = [rows[1], rows[2], extra, attempt, *resources]
+        if inactive_packet:
+            packet = dict(rows[1], items=[list(rows[1]['items'][0])])
+            packet['items'][0][11] = 1
+            events.insert(2, packet)
+        counts = [0]*5
+        for order, row in enumerate(events):
+            counts[row['producer']] += 1
+            row.update(order=order, producer_seq=counts[row['producer']])
+        for producer, count in enumerate(counts):
+            rows[-1]['producers'][producer].update(attempted=count, emitted=count, high_water=count)
+        rows[-1]['producers'][0].update(attempted=counts[0]+dropped, dropped=dropped)
+        return '\n'.join(map(json.dumps, [rows[0], *events, rows[-1]]))+'\n'
+
+    def test_single_direction_projects_empty_physical_port_to_registered_ingress(self):
+        result, streams = self.normalize(self.single_direction())
+        self.assertTrue(result['complete'], result)
+        ingress = [row for row in streams[0] if row['kind'] in ('packet', 'end')]
+        self.assertEqual([row['ingress_port'] for row in ingress], [0, 0])
+        attempt = next(row for row in streams[1] if row['kind'] == 'attempt')
+        self.assertEqual(attempt['seen_next_ingress_seq'], {'0': 1})
+        self.assertEqual(set(attempt['frontiers']), {'0'})
+        self.assertEqual({row['scope_id'] for row in streams[2] if row.get('scope') == 'port'}, {'0'})
+        self.assertEqual({row['scope_id'] for row in streams[2] if row.get('scope') == 'pool'}, {'0', '1'})
+        native = next(row for row in streams[2]
+                      if row.get('scope_id') == 'native-producer-0' and row.get('phase') == 'end')
+        self.assertEqual(native['values']['records_emitted'], 3)
+
+    def test_inactive_port_evidence_cannot_hide_packets_or_capture_loss(self):
+        for changes in ({'inactive_count': 1}, {'inactive_packet': True}, {'dropped': 1}):
+            with self.subTest(changes=changes):
+                result, streams = self.normalize(self.single_direction(**changes))
+                self.assertFalse(result['complete'])
+                self.assertTrue(all(not stream[-1]['complete'] for stream in streams))
+
+    def test_inactive_snapshot_cannot_hide_nonzero_or_duplicate_prefixes(self):
+        for snapshot in ([[0, 1, (1 << 64)-1, True], [1, 1, 0, False]],
+                         [[1, 0, 0, False], [1, 0, 0, False]]):
+            rows = [json.loads(row) for row in self.single_direction().splitlines()]
+            next(row for row in rows if row.get('kind') == 6)['snapshot'] = snapshot
+            with self.subTest(snapshot=snapshot):
+                result, streams = self.normalize('\n'.join(map(json.dumps, rows))+'\n')
+                self.assertFalse(result['complete'])
+                self.assertTrue(all(not stream[-1]['complete'] for stream in streams))
+
+    def test_single_direction_both_owners_and_native_layouts_reach_reference(self):
+        from tools.g2.reference import Reference
+        from tools.g2.tests.test_reference import config
+        for owner in (0, 1):
+            for layout in ('v1', 'shared', 'per-direction'):
+                rows = [json.loads(row) for row in self.single_direction().splitlines()]
+                if owner:
+                    for row in rows[1:-1]:
+                        row['port'] = 1-row['port']
+                        for item in row['items']:
+                            item[11] = 1-item[11]
+                        for entry in row['snapshot']:
+                            entry[0] = 1-entry[0]
+                if layout != 'v1':
+                    rows[0].update(schema='hng-native-v2', ports=[0, 1], layout=layout)
+                    rows[-1]['producers'] += [dict(rows[-1]['producers'][1]) for _ in range(2)]
+                    counts = [0]*7
+                    for row in rows[1:-1]:
+                        if row['kind'] in (0, 4):
+                            row['producer'] = 5 if layout == 'per-direction' and row['port'] == 1 else 0
+                        elif row['kind'] == 6:
+                            row['producer'] = 6 if layout == 'per-direction' and owner else 3
+                        counts[row['producer']] += 1
+                        row['producer_seq'] = counts[row['producer']]
+                    for producer, count in enumerate(counts):
+                        rows[-1]['producers'][producer].update(attempted=count, emitted=count, high_water=count)
+                with self.subTest(owner=owner, layout=layout):
+                    result, streams = self.normalize('\n'.join(map(json.dumps, rows))+'\n', owner)
+                    self.assertTrue(result['complete'], result)
+                    cfg = config()
+                    cfg['lines'][0].update(ingress_port=owner, egress_port=1-owner)
+                    reference = Reference(cfg, 'demo')
+                    for row in streams[0][1:-1]:
+                        reference.consume(row)
+                    self.assertEqual(reference.finish()['end_counts'], {str(owner): 1})
+                    attempt = next(row for row in streams[1] if row['kind'] == 'attempt')
+                    self.assertEqual(attempt['consumed_dispatch'], {'handoff-0': 0, 'handoff-1': 0})
+
+    def test_discarded_port_cannot_hide_marker_items(self):
+        rows = [json.loads(row) for row in self.single_direction().splitlines()]
+        next(row for row in rows if row.get('kind') == 4 and row['port'] == 1)['items'] = rows[1]['items']
+        result, streams = self.normalize('\n'.join(map(json.dumps, rows))+'\n')
+        self.assertFalse(result['complete'])
+        self.assertTrue(all(not stream[-1]['complete'] for stream in streams))
 
     def test_exact_input_identity_and_standard_seals(self):
         result, streams = self.normalize(self.fixture())

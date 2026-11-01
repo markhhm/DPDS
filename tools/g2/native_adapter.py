@@ -65,6 +65,8 @@ class NativeAdapter:
         self.header = None
         self.ends = set()
         self.input_ports = {line['ingress_port'] for line in lines}
+        self.physical_ports = ports
+        self.unused_frontiers = {}
 
     def _emit(self, index, kind, **values):
         if self.provenance is not None:
@@ -153,7 +155,7 @@ class NativeAdapter:
                           self.at_ns if phase == 'end' else 0, values, source=f'native-normalized-{role}')
 
     def _port_counters(self):
-        ports = self.input_ports | set(self.custody) | {port for port, _ in self.resources}
+        ports = self.input_ports | set(self.custody)
         incomplete = self.health is None or self.errors['malformed_native_record'] or any(
             p['dropped'] or p['capture_drops'] for p in (self.health or {}).get('producers', []))
         names = ('rx_returned', 'tx_accepted')+REASONS+('still_owned',)
@@ -222,14 +224,19 @@ class NativeAdapter:
     def _snapshot(self, raw):
         if not isinstance(raw, list) or len(raw) > 2:
             raise ValueError('invalid raw snapshot')
-        seen, frontiers = {}, {}
+        seen, frontiers, raw_ports = {}, {}, set()
         for entry in raw:
             if not isinstance(entry, list) or len(entry) != 4:
                 raise ValueError('invalid raw port snapshot')
             port, next_seq, lower, ended = entry
             uint(port, 'port', 65535); uint(next_seq, 'seen prefix'); uint(lower, 'lower bound')
-            if type(ended) is not bool or str(port) in seen or (lower == U64 and not ended):
+            if type(ended) is not bool or port in raw_ports or (lower == U64 and not ended):
                 raise ValueError('invalid raw closed frontier')
+            raw_ports.add(port)
+            if port not in self.input_ports:
+                if port not in self.physical_ports or next_seq:
+                    raise ValueError('snapshot contains unregistered ingress traffic')
+                continue
             seen[str(port)] = next_seq
             frontiers[str(port)] = dict(through_ns=lower-1 if lower and lower != U64 else None, input_complete=ended)
         return dict(seen_next_ingress_seq=seen, frontiers=frontiers)
@@ -331,6 +338,8 @@ class NativeAdapter:
         self.at_ns = max(self.at_ns, row['at_ns'], row['submit_after_ns'], *(i['arrival_ns'] for i in items))
         if kind == 0:
             x = items[0]; identity, flow = self._identity(x)
+            if x['ingress_port'] not in self.input_ports:
+                raise ValueError('packet on unregistered ingress port')
             if identity is None:
                 self.logical_identity_errors[0] += 1
             error = None if not x['input_error'] else ('invalid-input-profile' if x['input_error'] == 1 else 'unsupported-packet-occurrence-identity')
@@ -347,6 +356,15 @@ class NativeAdapter:
                 extensions=dict(raw_vlan_id=vlan, raw_vlan_stripped=x['stripped'], rx_flags=x['rx_flags']))
             self.custody.setdefault(x['ingress_port'], Counter())['rx_returned'] += 1
         elif kind in (3, 4):
+            port = row['port']
+            if port not in self.input_ports:
+                if (port not in self.physical_ports or row['actual_selection_seq'] or items
+                        or port in self.ends or row['at_ns'] < self.unused_frontiers.get(port, 0)):
+                    raise ValueError('invalid unused ingress marker')
+                self.unused_frontiers[port] = row['at_ns']
+                if kind == 4:
+                    self.ends.add(port)
+                return
             self._emit(0, 'frontier' if kind == 3 else 'end', ingress_port=row['port'],
                 next_ingress_seq=row['actual_selection_seq'], **(dict(through_ns=row['at_ns']) if kind == 3 else {}))
             if kind == 4:
