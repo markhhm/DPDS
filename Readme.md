@@ -33,6 +33,8 @@ between lcores for integrity checks; this is unsuitable for performance measurem
 The [M6 runner](docs/M6-RUNNER.md) evaluates registered captures sequentially
 through the G2 reporter. It includes a G short-plan example and three software
 PCAP smoke runs; these do not qualify physical hardware.
+The [pcapng adapter](docs/PCAPNG.md) converts a registered same-clock capture pair
+to the existing observation streams and reporter, retaining capture-health failures.
 
 The tests cover four independent queues, VLAN classification, sparse ports,
 the RX frontier, delayed ordinary packets, partial TX, and ownership at shutdown.
