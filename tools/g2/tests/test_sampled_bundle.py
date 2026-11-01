@@ -83,6 +83,88 @@ class SampledBundleTests(unittest.TestCase):
             self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
             self.assertIn('seqcheck_sample_flow_mismatch',result['reason_codes'])
 
+    def run_mutation(self, mutate):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root,mutate=mutate,flow_id='0a000001:0a000002:1:9000')
+            checker(root,reg,400)
+            return build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+
+    def test_observer_full_watermark_is_inconclusive(self):
+        def change(rows,reg):
+            for row in rows['counters']:
+                if row['scope']=='observer':row['values']['queue_high_water']=row['values']['queue_capacity']
+        result=self.run_mutation(change)
+        self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+        self.assertIn('observer_cost_queue_full',result['reason_codes'])
+
+    def test_ingress_prefix_must_cover_native_and_receiver_population(self):
+        def change(rows,reg):
+            rows['ingress'][-2:]=[dict(rows['ingress'][-1],next_ingress_seq=399)]
+        result=self.run_mutation(change)
+        self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+        self.assertIn('counter_ingress_mismatch',result['reason_codes'])
+
+    def test_absolute_end_backlog_is_not_hidden_by_balanced_deltas(self):
+        from tools.g2.protocol import StreamReader, StreamWriter
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg,reg,sources,cal=fixture(root,flow_id='0a000001:0a000002:1:9000')
+            checker(root,reg,400)
+            events=list(StreamReader(sources['counters'],'counters'))
+            sources['counters'].unlink()
+            writer=StreamWriter(sources['counters'],'demo','counters','counters','engine')
+            for event in events:
+                if event['scope']=='observer':event['values']['records_attempted']+=1
+                writer.emit('counter',**{k:v for k,v in event.items() if k not in ('kind','run','stream_id','seq')})
+            writer.finish()
+            next(s for s in reg['streams'] if s['role']=='counters')['file_sha256']=hashlib.sha256(sources['counters'].read_bytes()).hexdigest()
+            result=build_bundle_report(cfg,{},reg,sources,cal,registration_root=root)
+            self.assertEqual(result['counters']['measurement_status'],'PASS')
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+            self.assertIn('observer_cost_backlog',result['reason_codes'])
+
+    def test_counter_endpoint_must_cover_runtime_in_engine_domain(self):
+        for wrong_clock in (False,True):
+            def change(rows,reg):
+                for row in rows['counters']:
+                    if row['scope']=='port' and row['phase']=='end':
+                        if wrong_clock:row['clock_id']='wrong'
+                        else:row['at_ns']=1
+            result=self.run_mutation(change)
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+
+    def test_selected_host_evidence_matches_original_identity_fields(self):
+        for field,value in (('ingress_seq',999),('line','other')):
+            def change(rows,reg):rows['host'][0][field]=value
+            result=self.run_mutation(change)
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+            self.assertIn('sample_host_identity_mismatch',result['reason_codes'])
+
+    def test_selected_terminal_matches_original_identity_fields(self):
+        for field,value in (('ingress_seq',999),('line','other')):
+            def change(rows,reg):
+                original=rows['host'][0]
+                terminal=dict(kind='terminal',ingress_port=0,ingress_seq=0,external_identity=original['external_identity'],
+                              line=original['line'],at_ns=original['at_ns'],reason='shutdown_drop')
+                terminal[field]=value;rows['host'].append(terminal)
+            result=self.run_mutation(change)
+            self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+            self.assertIn('sample_host_identity_mismatch',result['reason_codes'])
+
+    def test_clock_step_cannot_hide_behind_unchanged_pair_owd(self):
+        def change(rows,reg):
+            for role,timekey in (('before','ingress_ts_ns'),('receiver','receive_ns')):
+                rows[role][0][timekey],rows[role][1][timekey]=rows[role][1][timekey],rows[role][0][timekey]
+                rows[role][0]['timestamp'],rows[role][1]['timestamp']=rows[role][1]['timestamp'],rows[role][0]['timestamp']
+        result=self.run_mutation(change)
+        self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+        self.assertIn('CLOCK_BACKWARD',result['reason_codes'])
+
+    def test_one_run_cannot_claim_pooled_repeat_verdict(self):
+        def change(rows,reg):reg['required_cells'][0].update(repeat='pooled',pooled_repeats=[0,1])
+        result=self.run_mutation(change)
+        self.assertEqual(result['measurement_status'],'INCONCLUSIVE')
+        self.assertIn('pooled_repeat_evidence_unavailable',result['reason_codes'])
+
     def test_sparse_selection_uses_existing_cell_hash(self):
         from tools.g2.online import sample
         from tools.g2.protocol import StreamReader

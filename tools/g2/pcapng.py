@@ -310,6 +310,11 @@ def prepare_pair(pair_path, output):
             raise ValueError('capture interfaces require unique registered physical ports')
     before = pair_path.parent/pair['before']['path']
     receiver = pair_path.parent/pair['receiver']['path']
+    # shortcut: seqcheck has no interface filter; use directional capture pairs until the adapter can prove a split.
+    if manifest.get('verification',{}).get('mode')=='sampled' and any(
+            len(pair[role]['interfaces'])!=1 for role in ('before','receiver')):
+        fail('SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED',
+             'sampled pcapng requires one direction per pair; use directional runs or normalized streams with directional seqchecks')
     for check in manifest.get('verification',{}).get('seqchecks',[]):
         if ((path.parent/check['ingress_path']).resolve()!=before.resolve() or
                 (path.parent/check['receiver_path']).resolve()!=receiver.resolve()):

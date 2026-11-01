@@ -24,6 +24,7 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
     reference=SampledReference(config,manifest['run'],traces,manifest['timing_mode'])
     selected={};readers={};issues=set();failures=Counter();diagnostics=Counter();timings={}
     limits={};inputs=Counter();sample_counts=Counter();observed={'before':Counter(),'receiver':Counter()};all_reasons=set()
+    runtime={}
     cap=manifest['capacity']['timing_sample_capacity']
     lines={line['name']:line for line in config['lines']}
 
@@ -33,28 +34,40 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
         if row is None and not fail:issues.add(code)
         if row is not None:cells.violation(row,code,'FAIL' if fail else 'INCONCLUSIVE')
 
+    def bound(port,value):
+        if port is None:return
+        token=str(port)
+        low,high=runtime.get(token,(value,value))
+        runtime[token]=(min(low,value),max(high,value))
+
     def rows(role):
         for registration in manifest['streams']:
             if registration['role']!=role:continue
             reader=StreamReader(sources[registration['stream_id']],role,manifest['run'])
             readers[registration['stream_id']]=reader
-            if reader.header['stream_id']!=registration['stream_id']:
-                raise StreamError('STREAM_REGISTRATION','stream differs from registration')
-            for row in reader:yield row
-            if reader.integrity['file_sha256']!=registration['file_sha256']:
-                raise StreamError('SOURCE_HASH_MISMATCH','stream differs from registered hash')
+            try:
+                if reader.header['stream_id']!=registration['stream_id']:
+                    raise StreamError('STREAM_REGISTRATION','stream differs from registration')
+                if role in ('ingress','host') and reader.header['clock_id']!=manifest['clocks']['engine']:
+                    raise StreamError('CLOCK_RUNTIME_DOMAIN','native stream is not in engine time','INCONCLUSIVE')
+                for row in reader:yield row
+                if reader.integrity['file_sha256']!=registration['file_sha256']:
+                    raise StreamError('SOURCE_HASH_MISMATCH','stream differs from registered hash')
+            finally:reader._source.close()
 
     def key(row):return row['ingress_port'],row['external_identity']
 
     counters=normalize_counters(rows('counters'),manifest)
     issues.update(counters['reason_codes'])
     cost=counters.get('observer_cost',dict(status='INCONCLUSIVE',warnings=[],end_backlog={}))
+    for warning in cost.get('warnings',[]):issue(warning['code'])
     mark=time.perf_counter()
     for event in rows('ingress'):
         wanted=False
         cell=None
         if event['kind']=='packet':
             inputs[str(event['ingress_port'])]+=1
+            bound(event['ingress_port'],event['arrival_ns'])
             cell=cells._cell(event)
             if cell is not None:
                 mask=cell['registration'].get('mask_bits',manifest['sampling']['mask_bits'])
@@ -86,14 +99,31 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
             if observation['selected_late'] is not None and observation['selected_late']!=int(row['late']):
                 issue('probe_flag_mismatch',row,True)
             state[field]=observation
+    for role,field,ordinal,timekey,portkey in (('before','before','before_seq','ingress_ts_ns','ingress_port'),
+                                              ('receiver','receive','receive_seq','receive_ns','egress_port')):
+        observations=[item[field] for item in selected.values() if item[field] is not None]
+        seen=set()
+        for observation in sorted(observations,key=lambda row:(row[portkey],row[ordinal])):
+            token=(observation[portkey],observation[ordinal])
+            if token in seen:issue('sample_observation_ordinal_duplicate')
+            seen.add(token)
+            try:clock.map_timestamp(observation['timestamp'],observation[timekey],order_key=(role,observation[portkey]))
+            except StreamError as error:issue(error.code)
     timings['sample_pair_scan_s']=time.perf_counter()-mark
     mark=time.perf_counter()
     for event in rows('host'):
         diagnostics[event['kind']]+=1
+        port=event.get('ingress_port')
+        if port is None:
+            port=next((p['ingress_port'] for p in manifest['ports'] if p['egress_port']==event.get('egress_port')),None)
+        for name in ('at_ns','gate_ns','submit_after_ns'):
+            if name in event:bound(port,event[name])
         if event['kind'] not in ('offer','terminal'):continue
         state=selected.get(key(event))
         if state is None:continue
         row=state['expected']
+        if event['ingress_seq']!=row['ingress_seq'] or event['line']!=row['line']:
+            issue('sample_host_identity_mismatch',row)
         if event['kind']=='offer':
             if state['offer'] is not None:issue('duplicate_sample_offer',row)
             state['offer']=event
@@ -131,9 +161,23 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
                 target=row['release_ns']-row['arrival_ns'] if line['trace'] else line['model']['t_ns']+row['late']*line['model']['delta_ns']
             cells.delivery(row,pair['owd_ns'],pair['uncertainty_ns'],target,pair['raw_owd_ns'])
         except StreamError as error:issue(error.code,row)
+    for port in (str(p['ingress_port']) for p in manifest['ports']):
+        values=counters.get('ports',{}).get(port,{})
+        if inputs[port]!=values.get('rx_returned'):issue('counter_ingress_mismatch')
+        endpoint=counters.get('endpoints',{}).get('port:'+port,{})
+        if port in runtime:
+            low,high=runtime[port]
+            if (endpoint.get('start_clock_id')!=manifest['clocks']['engine'] or
+                    endpoint.get('end_clock_id')!=manifest['clocks']['engine'] or
+                    endpoint.get('start_ns') is None or endpoint.get('start_ns')>low or
+                    endpoint.get('end_ns') is None or endpoint.get('end_ns')<high):
+                issue('counter_window_incomplete')
+    for cell in cells.cells.values():
+        if cell['registration']['repeat']=='pooled':cell['incomplete'].add('pooled_repeat_evidence_unavailable')
     checks=load_checks(manifest['verification']['seqchecks'],registration_root,manifest,counters)
     for port,check in checks.items():
         if check['totals'] is not None:
+            if inputs[port]!=check['totals']['ingress']:issue('seqcheck_ingress_prefix_mismatch')
             for role in ('before','receiver'):
                 expected=check['totals']['ingress' if role=='before' else 'receiver']
                 if observed[role][port]!=expected:issue('seqcheck_stream_count_mismatch')

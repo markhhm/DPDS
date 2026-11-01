@@ -155,6 +155,20 @@ class SeqcheckTests(unittest.TestCase):
         self.assertEqual(result["storage"], dict(status="FAIL", threshold=0, value=2))
         self.assertIn("seqcheck_missing", result["reason_codes"])
 
+    def test_two_directional_results_keep_independent_port_totals(self):
+        forward=self.registration()
+        reverse=copy.deepcopy(self.doc)
+        reverse['flows'][0]['flow_id']='0a000002:0a000001:1000:9000'
+        reverse['flows'][0]['vlan_id']=200
+        raw=json.dumps(reverse).encode();(self.root/'reverse.json').write_bytes(raw)
+        backward=dict(forward,path='reverse.json',sha256=hashlib.sha256(raw).hexdigest(),ingress_port=1,egress_port=0)
+        self.manifest['ports'].append(dict(ingress_port=1,egress_port=0))
+        self.manifest['lines'].append(dict(name='reverse',ingress_port=1,egress_port=0,vlan_id=200))
+        self.counters['ports']['1']=dict(self.counters['ports']['0'])
+        result=load_checks([forward,backward],self.root,self.manifest,self.counters)
+        self.assertEqual({p:c['storage']['status'] for p,c in result.items()},{'0':'PASS','1':'PASS'})
+        self.assertEqual(result['1']['flows'][0]['vlan_id'],200)
+
     def test_malformed_counter_evidence_raises_stream_error(self):
         self.counters["ports"]["0"] = []
         with self.assertRaises(StreamError):
