@@ -30,6 +30,35 @@ def swap_probe_identities(path):
 
 
 class MatrixSeqcheckTests(unittest.TestCase):
+    def test_native_binary_pair_runs_without_packet_jsonl_and_resumes(self):
+        from tools.g2.tests.binary_sample_fixture import make_case
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=make_case(root)
+            manifest=case['binary_manifest'];manifest['verification']['seqchecks']=[]
+            (root/'binary.json').write_text(json.dumps(manifest))
+            for name in ('native.jsonl','native-counters.jsonl','ingress.jsonl','host.jsonl','before.jsonl','receiver.jsonl','seqcheck.json'):
+                (root/name).unlink()
+            matrix=root/'matrix.json'
+            matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1',scope='software-only',mode='pcapng',
+                plan={},runs=[dict(id='demo',manifest='pair.json')])))
+            source=(root/'binary.json').read_bytes()
+            for attempt in range(2):
+                result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(root/'out')],
+                    capture_output=True,text=True,timeout=30)
+                self.assertEqual(result.returncode,0,result.stderr)
+                report=json.loads((root/'out/demo/report.json').read_text())
+                self.assertEqual(report['measurement_status'],'PASS')
+                self.assertIn('native_input_s',report['processing'])
+                registration=json.loads((root/'out/demo/capture/bundle/manifest.json').read_text())
+                self.assertEqual(len(registration['verification']['seqchecks']),1)
+                check_path=root/'out/demo/capture/bundle'/registration['verification']['seqchecks'][0]['path']
+                check=json.loads(check_path.read_text());self.assertTrue(check['complete'])
+                self.assertEqual(check['totals']['ingress'],400)
+                self.assertFalse((check_path.parent/'before.jsonl').exists())
+                if attempt==0:seal=(root/'out/demo/.complete.json').stat().st_mtime_ns
+                else:self.assertEqual((root/'out/demo/.complete.json').stat().st_mtime_ns,seal)
+            self.assertEqual((root/'binary.json').read_bytes(),source)
+
     def fixture(self, root, cases=('reordered', 'dropped', 'normal')):
         runs = []
         for run in cases:

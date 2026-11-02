@@ -295,12 +295,6 @@ def prepare_pair(pair_path, output):
             or mapping['raw_origin'] != mapping['target_origin_ns']
             or any(target != mapping['target_clock_id'] for target in manifest['clocks']['observation'].values())):
         raise ValueError('same-clock capture requires a registered identity nanosecond mapping')
-    streams = {}
-    for role in ('before','receiver','counters'):
-        selected = [row for row in manifest['streams'] if row['role'] == role]
-        if len(selected) != 1:
-            raise ValueError('one registered before/receiver/counters stream is required')
-        streams[role] = selected[0]
     for role in ('before','receiver'):
         shape(pair[role], ('path','interfaces'))
         identifier(pair[role]['path'], 'capture path')
@@ -323,6 +317,26 @@ def prepare_pair(pair_path, output):
             raise ValueError('seqcheck input captures differ from the converted capture pair')
     if before.resolve() == receiver.resolve() or before.is_file() and receiver.is_file() and before.samefile(receiver):
         raise ValueError('before and receiver must be different capture files')
+    if 'native_binary' in manifest.get('verification',{}):
+        # The binary reporter validates raw captures; keep only a derived registration here.
+        bundle=Path(output)/'bundle';bundle.mkdir(parents=True,exist_ok=False)
+        (bundle/'source').symlink_to(path.parent,target_is_directory=True)
+        for field in (manifest['config'],*manifest['traces'],*manifest['streams'],manifest['verification']['native_binary']):
+            if not Path(field['path']).is_absolute():field['path']='source/'+field['path']
+        manifest['verification']['capture_pairs']=[p if Path(p).is_absolute() else 'source/'+p
+                                                   for p in manifest['verification']['capture_pairs']]
+        for check in manifest['verification']['seqchecks']:
+            for name in ('path','ingress_path','receiver_path'):
+                if not Path(check[name]).is_absolute():check[name]='source/'+check[name]
+        if not Path(manifest['calibration_path']).is_absolute():manifest['calibration_path']='source/'+manifest['calibration_path']
+        (bundle/'manifest.json').write_text(json.dumps(manifest,allow_nan=False)+'\n')
+        return bundle/'manifest.json'
+    streams = {}
+    for role in ('before','receiver','counters'):
+        selected = [row for row in manifest['streams'] if row['role'] == role]
+        if len(selected) != 1:
+            raise ValueError('one registered before/receiver/counters stream is required')
+        streams[role] = selected[0]
     destination = Path(output)
     destination.mkdir(parents=True, exist_ok=False)
     bundle = destination/'bundle'; bundle.mkdir()

@@ -602,8 +602,13 @@ packet stream. There is no native decode-to-JSONL prepass. Source/resume checks
 bind the native file, pair metadata, raw pcapng files, checker JSON, counters,
 configuration, traces and calibration.
 
-Use matrix `mode=software` for this native input path, as for existing native
-manifests. The manifest's `scope` independently declares software-only or
+Use matrix `mode=software` with explicit sequence registrations, or point a
+`mode=pcapng` run at its directional pair document to generate/reuse C seqcheck
+automatically. In the latter case, no packet JSONL conversion is performed:
+the runner writes a derived manifest binding the original native binary,
+capture pairs and sealed counters, then invokes the same sampled reporter.
+The original inputs are unchanged and completed reports remain resumable.
+The manifest's `scope` independently declares software-only or
 physical evidence. Physical calibration and observer-cost requirements still
 apply; choosing the binary reader does not qualify hardware.
 
