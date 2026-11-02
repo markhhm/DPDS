@@ -35,6 +35,30 @@ def fixture(root, *, drift_ns=0, errors=(500,500), count=400):
     return path
 
 
+def physical_metadata(matrix):
+    """Exercise physical schema logic using synthetic bytes, never hardware evidence."""
+    root=matrix.parent;doc=json.loads(matrix.read_text());doc['scope']='physical'
+    matrix.write_text(json.dumps(doc))
+    for run in doc['runs']:
+        folder=root/run['id']/'source'
+        path=folder/'manifest.json';reg=json.loads(path.read_text());reg['scope']='physical'
+        path.write_text(json.dumps(reg))
+        path=folder/'calibration.json';cal=json.loads(path.read_text())
+        for clock in cal['clocks']:
+            clock.update(kind='engine_monotonic' if clock['clock_id']=='engine' else 'nic_rx',mode='hardware')
+        cal['qualification'].update(scope='physical',offered_bps=136000000)
+        for key in ('source_versions','firmware_versions','driver_versions','timestamp_points'):cal[key]={'fixture':'test-only'}
+        path.write_text(json.dumps(cal))
+
+
+def p1_manifest(root,scope='software-only'):
+    path=root/'p1-0.json'
+    path.write_text(json.dumps(dict(schema='hng-p1-0-v1',scope=scope,status='FAIL',
+        versions={'observed':{'fixture':'version'}},byte_accounting={'fixture':'preserve'},
+        clock_uncertainty_ns=123,clock_qualification={'status':'old'},checks=['preserve'])))
+    return path
+
+
 class M5QualifyTests(unittest.TestCase):
     def invoke(self,matrix,out,*args):
         return subprocess.run([sys.executable,'-m','tools.g2.m5_qualify',str(matrix),
@@ -158,6 +182,71 @@ class M5QualifyTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             process=self.invoke(matrix,root/'qualification')
             self.assertEqual(process.returncode,0,process.stderr)
+
+    def test_manifest_export_preserves_environment_status_and_synthetic_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root);source=p1_manifest(root);original=source.read_bytes()
+            out=root/'qualification';target=root/'qualified.json'
+            process=self.invoke(matrix,out,'--p1-manifest',source,'--manifest-out',target)
+            self.assertEqual(process.returncode,0,process.stderr)
+            updated=json.loads(target.read_text());report=json.loads((out/'qualification.json').read_text())
+            expected=json.loads(original);expected.update(clock_uncertainty_ns=None,clock_qualification=report)
+            self.assertEqual(updated,expected)
+            self.assertEqual(report['sources'][str(source.resolve())],hashlib.sha256(original).hexdigest())
+            self.assertEqual(source.read_bytes(),original)
+
+    def test_physical_metadata_exports_only_passed_clock_bounds(self):
+        for error,status,bound in ((500,'PASS',500),(50000,'FAIL',None)):
+            with self.subTest(error=error),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);matrix=fixture(root,errors=(error,error));physical_metadata(matrix)
+                source=p1_manifest(root,'physical');target=root/'qualified.json'
+                process=self.invoke(matrix,root/'qualification','--p1-manifest',source,'--manifest-out',target)
+                self.assertEqual(process.returncode,0 if status=='PASS' else 1,process.stderr)
+                updated=json.loads(target.read_text())
+                self.assertEqual(updated['status'],'FAIL')
+                self.assertEqual(updated['clock_uncertainty_ns'],bound)
+                self.assertEqual(updated['clock_qualification']['status'],status)
+                self.assertEqual(updated['clock_qualification']['physical_qualified'],status=='PASS')
+
+    def test_export_refuses_scope_mismatch_and_existing_outputs(self):
+        for kind in ('scope','exists','same-file','missing-argument'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);matrix=fixture(root);source=p1_manifest(root,'physical' if kind=='scope' else 'software-only')
+                target=source if kind=='same-file' else root/'qualified.json'
+                if kind=='exists':target.write_text('keep')
+                originals={p:p.read_bytes() for p in (source,target) if p.exists()}
+                args=['--p1-manifest',source]
+                if kind!='missing-argument':args+=['--manifest-out',target]
+                process=self.invoke(matrix,root/'qualification',*args)
+                self.assertEqual(process.returncode,2,process.stderr)
+                for p,data in originals.items():self.assertEqual(p.read_bytes(),data)
+                if kind in ('scope','missing-argument'):self.assertFalse(target.exists())
+
+    def test_manifest_output_cannot_replace_reports_or_change_sealed_matrix_outputs(self):
+        for name in ('qualification.json','results.csv','summary.txt','matrix/high/extra.json'):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);matrix=fixture(root);source=p1_manifest(root);out=root/'qualification'
+                process=self.invoke(matrix,out,'--p1-manifest',source,'--manifest-out',out/name)
+                self.assertEqual(process.returncode,2,process.stderr)
+                self.assertFalse((out/name).exists())
+
+    def test_contradictory_native_drop_counters_do_not_pass_a_complete_capture(self):
+        from tools.g2.protocol import StreamReader,StreamWriter
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root);folder=root/'high/source'
+            path=folder/'counters.jsonl';reader=StreamReader(path,'counters','high')
+            rows=list(reader);header=reader.header;reader._source.close();path.unlink()
+            writer=StreamWriter(path,'high',header['stream_id'],'counters',header['clock_id'])
+            for row in rows:
+                if row['scope']=='port' and row['phase']=='end':row['values']['q_drop']=1
+                writer.emit('counter',**{k:v for k,v in row.items() if k not in ('kind','run','stream_id','seq')})
+            writer.finish()
+            manifest_path=folder/'manifest.json';manifest=json.loads(manifest_path.read_text())
+            next(s for s in manifest['streams'] if s['role']=='counters')['file_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest))
+            out=root/'qualification';process=self.invoke(matrix,out)
+            self.assertEqual(process.returncode,2,process.stderr)
+            self.assertEqual(json.loads((out/'qualification.json').read_text())['status'],'INCONCLUSIVE')
 
 
 if __name__=='__main__':unittest.main()

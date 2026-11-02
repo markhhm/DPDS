@@ -3,7 +3,9 @@
 import argparse
 import csv
 from fractions import Fraction
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -31,9 +33,7 @@ def _rows(folder,run,scope):
     _require(report['stream_integrity'] and all(row['complete'] for row in report['stream_integrity']),
              'M5_STREAM_INCOMPLETE','an input stream is incomplete')
     # M5 measures clocks and bypass; the separate M6 observer-cost gate is unchanged.
-    unexpected=[reason for reason in report['reason_codes'] if not reason.startswith('observer_cost_')
-                and reason not in ('seqcheck_missing_mismatch','seqcheck_order_violation','seqcheck_delay_storage_drop',
-                                   'missing_sample_receiver','sample_missing_delivery')]
+    unexpected=[reason for reason in report['reason_codes'] if not reason.startswith('observer_cost_')]
     root=folder/'capture/bundle';manifest=strict_json((root/'manifest.json').read_bytes())
     calibration=Calibration(strict_json((root/manifest['calibration_path']).read_bytes()),scope,run)
     loads={}
@@ -96,9 +96,23 @@ def _rows(folder,run,scope):
     return rows
 
 
-def qualify(matrix_path,output):
+def qualify(matrix_path,output,*,p1_manifest=None,manifest_out=None):
     path=Path(matrix_path).resolve();destination=Path(output)
-    matrix=strict_json(path.read_bytes())
+    raw_matrix=path.read_bytes();matrix=strict_json(raw_matrix)
+    sources={str(path):hashlib.sha256(raw_matrix).hexdigest()};deployment=None
+    _require((p1_manifest is None)==(manifest_out is None),'M5_MANIFEST_ARGUMENTS',
+             '--p1-manifest and --manifest-out must be supplied together')
+    if p1_manifest is not None:
+        p1_source=Path(p1_manifest).resolve();target=Path(manifest_out)
+        raw=p1_source.read_bytes();deployment=strict_json(raw)
+        _require(deployment['schema']=='hng-p1-0-v1' and deployment['scope']==matrix['scope'],
+                 'M5_MANIFEST_SCOPE','P1-0 schema/scope differs from qualification')
+        _require(not target.exists() and not target.is_symlink(),'M5_OUTPUT_EXISTS','manifest output already exists')
+        report_root=destination.resolve();output_path=target.resolve()
+        _require(output_path!=report_root and not output_path.is_relative_to(report_root/'matrix') and
+                 output_path not in {report_root/name for name in ('qualification.json','results.csv','summary.txt')},
+                 'M5_OUTPUT_COLLISION','manifest output collides with qualification evidence')
+        sources[str(p1_source)]=hashlib.sha256(raw).hexdigest()
     _require(matrix.get('mode')=='pcapng','M5_PCAPNG_REQUIRED','M5 requires directional pcapng cells')
     for run in matrix['runs']:
         pair_path=path.parent/run['manifest'];pair=strict_json(pair_path.read_bytes())
@@ -111,8 +125,8 @@ def qualify(matrix_path,output):
         manifest=strict_json(manifest_path.read_bytes())
         _require(manifest['timing_mode']=='calibration' and manifest.get('verification',{}).get('mode')=='sampled',
                  'M5_CALIBRATION_REQUIRED','register sampled calibration cells')
-    destination.mkdir(parents=True,exist_ok=False)
-    scope=matrix['scope'];rows=[];sources={str(path):file_hash(path)}
+    destination.mkdir(parents=True,exist_ok=False,mode=0o700)
+    scope=matrix['scope'];rows=[]
     run_matrix(path,destination/'matrix')
     for run in matrix['runs']:
         folder=destination/'matrix'/run['id'];source=path.parent/run['manifest']
@@ -150,6 +164,13 @@ def qualify(matrix_path,output):
         clock_uncertainty_ns=bound,rows=rows,sources=sources,
         coverage='observed loads and capture windows; raw zero-reference OWD, no fitted correction',
         m6_report=str(destination/'matrix/summary.json'))
+    _require(file_hash(path)==sources[str(path)],'M5_SOURCE_CHANGED','matrix changed during qualification')
+    if deployment is not None:
+        _require(file_hash(p1_source)==sources[str(p1_source)],'M5_SOURCE_CHANGED','P1-0 manifest changed during qualification')
+        deployment.update(clock_qualification=result,
+            clock_uncertainty_ns=bound if result['physical_qualified'] else None)
+        with os.fdopen(os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+            json.dump(deployment,stream,allow_nan=False,indent=2);stream.write('\n')
     (destination/'qualification.json').write_text(json.dumps(result,allow_nan=False,indent=2)+'\n')
     columns=('run','direction','line','status','offered_bps','timing_samples','offset_ns','drift_ppb',
              'drift_span_ns','load_error_ns','max_abs_error_ns','clock_uncertainty_ns','missing','reason_codes')
@@ -163,8 +184,10 @@ def qualify(matrix_path,output):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('matrix');parser.add_argument('--out',required=True)
+    parser.add_argument('--p1-manifest',help='original private hng-p1-0-v1 manifest')
+    parser.add_argument('--manifest-out',help='new private manifest; existing files are refused')
     args=parser.parse_args()
-    try:result=qualify(args.matrix,args.out)
+    try:result=qualify(args.matrix,args.out,p1_manifest=args.p1_manifest,manifest_out=args.manifest_out)
     except (ValueError,KeyError,TypeError,OSError) as error:
         print(str(error),file=sys.stderr);return 2
     print(json.dumps(result,allow_nan=False))
