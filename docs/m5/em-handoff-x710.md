@@ -2,7 +2,7 @@
 
 # X710 operator handoff
 
-All deployment values come from the operator's private configuration. Keep that
+Deployment-specific values come from the operator's private configuration. Keep that
 configuration, inventories, captures and resulting logs outside this repository.
 Do not run any traffic command until the measurement owner authorizes its start.
 All three sections execute **on `DUT_HOST`, as `root`**, using the system manager
@@ -12,7 +12,8 @@ for `systemd-run`, never `--user`.
 | --- | --- |
 | `DUT_HOST`, `PRIVATE_ENV`, `DPDS_SRC` | Execution target, approved shell environment file and checked-out source directory |
 | `PORT0_BDF`, `PORT1_BDF`, `RX_MAC` | Two X710 functions and the receiver function's MAC; both functions already use `vfio-pci` |
-| `TESTPMD`, `HUGEDIR`, `OUT_DIR` | Absolute i40e-enabled testpmd executable, verified 1 GiB hugetlbfs mount and new private output directory |
+| `ARTIFACT_DIR` | Private location of the `dpdk-26.03-testpmd-static` bundle obtained from the approved shared artifact storage |
+| `TESTPMD`, `HUGEDIR`, `OUT_DIR` | `TESTPMD=/root/dpdk/dpdk-testpmd`; private initially unmounted empty hugetlbfs mountpoint and new output directory |
 | `DUT_NODE`, `NODE1_CORE_SET`, `CORES`, `MAIN_CORE` | Approved memory node, complete allowed CPU list, seven distinct allowed CPU IDs and one of those IDs for main/filler; comma-separated lists/ranges |
 | `TX_CORES`, `TX_MAIN_CORE`, `RX_CORES`, `RX_MAIN_CORE` | Two disjoint pairs of allowed CPU IDs and each pair's main CPU, for independent TX/RX instances |
 | `NODE1_MEMORY_MIB`, `PROBE_SOCKET_MEM`, `LOAD_SOCKET_MEM` | Approved memory budget and EAL MiB vectors: zero preallocation on every other node; two probe allocations together fit the budget, load vector registers the maximum concurrent allocation |
@@ -34,6 +35,12 @@ Do not use an unsafe IOMMU setting to work around it.
 
 **Execute on `DUT_HOST` as `root`; system manager only.** No driver binding,
 page reservation changes or traffic generation are part of the initial checker.
+Use the supplied generic static DPDK 26.03 executable; no DPDK installation on
+the target is required. Before the checker, the operator verifies and installs
+the bundle and mounts the existing 1 GiB page pool as shown below. The binary
+requires x86-64 with its generic CPU baseline and glibc >=2.38; its only dynamic
+dependencies are glibc components. Consult the bundle build record for scope
+and software-smoke limits, including the bounded no-huge mbuf fixture.
 Load the approved private configuration, create a new output directory and make
 `dpds.slice` a sibling of the normal system/user slices:
 
@@ -45,6 +52,32 @@ set +a
 cd "$DPDS_SRC"
 umask 077
 mkdir -- "$OUT_DIR"
+TESTPMD=/root/dpdk/dpdk-testpmd
+export TESTPMD
+(
+  cd "$ARTIFACT_DIR"
+  sha256sum --check SHA256SUMS
+  printf '%s  dpdk-testpmd\n' \
+    '1891b2a750df538cc67a1fa5a5d1c438127b0ebc4c39e079e9e8ced7299cc63f' | sha256sum --check -
+)
+install -d /root/dpdk
+install -m 0755 "$ARTIFACT_DIR/dpdk-testpmd" "$TESTPMD"
+printf '%s  %s\n' \
+  '1891b2a750df538cc67a1fa5a5d1c438127b0ebc4c39e079e9e8ced7299cc63f' "$TESTPMD" | sha256sum --check -
+
+# Create this run's mount only; never cover or replace another owner's mount.
+mkdir -p -- "$HUGEDIR"
+if mountpoint -q -- "$HUGEDIR"; then
+  echo 'Stop: choose an unmounted private mountpoint.' >&2
+  exit 1
+fi
+if [ -n "$(find "$HUGEDIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  echo 'Stop: mountpoint must be empty.' >&2
+  exit 1
+fi
+mount -t hugetlbfs -o pagesize=1G none "$HUGEDIR"
+printf '%s\n' "$HUGEDIR" > "$OUT_DIR/hugetlbfs-mounted.path"
+findmnt -T "$HUGEDIR" -o TARGET,FSTYPE,OPTIONS
 SLICE_CPUS=${NODE1_CORE_SET//,/ }
 RUN_CPUS=${CORES//,/ }
 TX_CPUS=${TX_CORES//,/ }
@@ -89,6 +122,7 @@ systemd-run --wait --unit="p1-x710-check-${RUN_ID}" --slice=dpds.slice \
   /bin/bash -euc '
     set -a; . "$1"; set +a
     cd "$DPDS_SRC"
+    export TESTPMD=/root/dpdk/dpdk-testpmd
     export DUT_PCI_PORT0="$PORT0_BDF" DUT_PCI_PORT1="$PORT1_BDF"
     export HUGEPAGE_MOUNT="$HUGEDIR" DPDK_TESTPMD="$TESTPMD"
     . examples/bringup-x710.env
@@ -96,6 +130,11 @@ systemd-run --wait --unit="p1-x710-check-${RUN_ID}" --slice=dpds.slice \
     DUT_PCI="$PORT1_BDF" scripts/bringup-check.sh --out "$OUT_DIR/port1-p1.json"
   ' _ "$PRIVATE_ENV"
 ```
+
+The mount must report hugetlbfs with 1 GiB pages. Mounting does not reserve
+new pages; the checker still requires the approved free page count on the
+registered node. Keep the mount receipt for cleanup. The bundle also contains
+the upstream `dpdk-telemetry.py`; its checksum is included in `SHA256SUMS`.
 
 Both checker invocations must exit zero and report environment PASS. That is
 not rate or clock qualification. Preserve failures and use new attempt paths.
@@ -322,11 +361,16 @@ also blocks completion. Only after release is confirmed:
 
 ```sh
 systemctl stop dpds.slice
+# Unmount only the mount created in section 1, after all handles are released.
+test "$(cat "$OUT_DIR/hugetlbfs-mounted.path")" = "$HUGEDIR"
+umount -- "$HUGEDIR"
 systemctl is-active dpds.slice
 ```
 
-An inactive result is expected; `is-active` then returns nonzero. Preserve
-logs and times. **Leave hugepage reservations/mounts unchanged and leave each
-port's driver binding exactly as it was handed over by the operator.** Do not
+An inactive result is expected; `is-active` then returns nonzero. A busy or
+failed unmount blocks completion; do not use lazy/forced unmount or alter any
+other mount. Preserve logs and times. **Leave the reserved hugepage counts unchanged; unmounting this run's
+hugetlbfs does not deallocate that reservation. Leave each port's driver binding
+exactly as it was handed over by the operator.** Do not
 undo the private host placement, alter another workload or claim A2/DPDS-off
 until the owner has confirmed the absence of this experiment's load.
