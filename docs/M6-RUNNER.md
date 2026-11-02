@@ -159,6 +159,57 @@ leave it null. Synthetic tests are explicitly `software-only` and never set
 `physical_qualified=true`. This clock/bypass result does not waive the separate
 M6 observer-cost or G2 gates; their original decisions remain in the M6 reports.
 
+### X710 DUT with an external generator and capture clock
+
+[examples/m5-qualify-x710.json](../examples/m5-qualify-x710.json) is a physical
+registration template for a two-port X710 using `i40e` through one switch VLAN.
+Both X710 ports belong to DPDS as DUT ports. Provide traffic generation and
+reception on an external machine; provide ingress and egress observation on
+external capture interfaces. The generator and capture roles may share that
+external machine, but neither role uses a spare DUT port. A testpmd self-send/
+self-receive bring-up check does not supply this DUT measurement topology.
+
+```text
+external generator -> switch -> DUT port 0 -> DPDS -> DUT port 1 -> switch -> external receiver
+                              before observation    receiver observation
+                                      \               /
+                              external capture machine
+                               one common capture clock
+```
+
+Register the actual observation feeds and packet path; a shared switch VLAN
+alone does not prove that traffic traverses the DUT. Exclude switch shortcuts,
+loops and duplicate mirror feeds. Reverse runs swap the DUT direction and
+observation-feed assignments, not the clock source. The template has low and
+target loads for each direction in separate capture pairs; the existing
+directional seqcheck restriction still applies.
+
+The `i40e` hardware timestamp path is for PTP packets, not general UDP probes
+(see [DPDK 26.03 i40e timesync implementation](https://github.com/DPDK/dpdk/blob/v26.03/drivers/net/intel/i40e/i40e_ethdev.c#L9888)).
+Timestamp the ordinary probe packets at the capture machine. Both capture
+interfaces must use the same qualified clock source, declared clock ID,
+identity mapping and device token across loads. Merely using the same host,
+or two independently synchronized clocks, does not establish that shared clock.
+Record the calibration bounds and capture-health evidence there; DUT, generator
+or software submit timestamps do not replace these external observations.
+
+Copy the template to `M5_MATRIX` and replace every `${...}` value with private
+registered values. `CAPTURE_ROOT` locates the four closed pair directories;
+use an absolute path or resolve it relative to the rendered matrix. The runner
+does not expand shell variables. `plan` records topology metadata; it does not
+configure traffic, interfaces, clocks or the switch. Each pair and its native
+manifest/configuration must independently contain the matching port/VLAN,
+clock mappings, zero-delay model and observed low/target traffic settings.
+Then run the M5 command above with the matching P1-0 manifest.
+
+This example uses one registered line on one VLAN. The reader still requires
+retained single-VLAN 802.1Q probes. If access ports produce untagged captures,
+resolve the capture/tagging arrangement before qualification; changing a VLAN
+number in metadata does not restore an absent wire tag. This template does not
+approve a second VLAN, a trunk configuration or simultaneous distinct cable/
+trace lines. Keep unresolved experiment-acceptance and resource/coexistence
+requirements in the deployment decision. No X710 hardware result is claimed.
+
 ## Hardware-day runbook
 
 Complete [BRING-UP](BRING-UP.md) first. Unresolved hardware decisions block this procedure.

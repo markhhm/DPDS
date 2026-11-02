@@ -1,0 +1,48 @@
+{
+  "schema": "hng-m6-matrix-v1",
+  "mode": "pcapng",
+  "scope": "physical",
+  "workers": 1,
+  "plan": {
+    "name": "M5-X710-zero-delay",
+    "purpose": "registration template; replace variables before use",
+    "dut": {
+      "host": "${DUT_HOST}",
+      "nic": "Intel X710",
+      "pmd": "i40e",
+      "ports": [
+        {"port_id": 0, "pci": "${DUT_PORT0_PCI}", "role": "DPDS DUT"},
+        {"port_id": 1, "pci": "${DUT_PORT1_PCI}", "role": "DPDS DUT"}
+      ]
+    },
+    "switch": {
+      "path": "${SWITCH_PATH}",
+      "vlan_id": "${VLAN_ID}",
+      "line": "${LINE_NAME}"
+    },
+    "generator": {
+      "host": "${GENERATOR_HOST}",
+      "tx_interface": "${GENERATOR_TX_IF}",
+      "rx_interface": "${GENERATOR_RX_IF}"
+    },
+    "capture": {
+      "host": "${CAPTURE_HOST}",
+      "before_interface": "${CAPTURE_BEFORE_IF}",
+      "receiver_interface": "${CAPTURE_RECEIVER_IF}",
+      "clock_source": "${CAPTURE_CLOCK_SOURCE}",
+      "clock_id": "${CAPTURE_CLOCK_ID}",
+      "mapping_id": "${CAPTURE_MAPPING_ID}",
+      "device_token": "${CAPTURE_CLOCK_DEVICE_TOKEN}",
+      "timestamp_point": "external_rx",
+      "profile": "single-8021q-ipv4-udp-probe"
+    },
+    "model": {"t_ns": 0, "delta_ns": 0, "p": "0", "trace": null},
+    "loads": {"low_bps": "${LOW_OFFERED_BPS}", "target_bps": "${TARGET_OFFERED_BPS}"}
+  },
+  "runs": [
+    {"id": "low-forward", "manifest": "${CAPTURE_ROOT}/low-forward/pair.json"},
+    {"id": "target-forward", "manifest": "${CAPTURE_ROOT}/target-forward/pair.json"},
+    {"id": "low-reverse", "manifest": "${CAPTURE_ROOT}/low-reverse/pair.json"},
+    {"id": "target-reverse", "manifest": "${CAPTURE_ROOT}/target-reverse/pair.json"}
+  ]
+}
