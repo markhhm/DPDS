@@ -251,7 +251,8 @@ def main():
         observed['pmd'] = ports[0].get('Driver name', '')
         observed['firmware'] = ports[0].get('Firmware-version', '')
         require(observed['firmware'] not in ('', 'not available', 'unknown'), 'NIC firmware unavailable')
-        require(observed['driver'] != 'mlx5_core' or observed['pmd'] == 'net_mlx5', 'mlx5 bifurcated device was not probed by net_mlx5')
+        require(observed['driver'] != 'mlx5_core' or observed['pmd'] in ('mlx5_pci', 'net_mlx5'),
+                'mlx5 bifurcated device was not probed by an mlx5 PCI PMD')
         manifest['ports'] = ports
         return f"{cfg['DUT_PCI']}: {len(ports)} port(s), {observed['pmd']}"
 

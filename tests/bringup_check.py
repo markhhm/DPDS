@@ -118,6 +118,50 @@ class BringupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(doc['versions']['observed']['driver'], 'mlx5_core')
 
+    def test_cx4_example_checks_both_mlx5_cards_at_gen3_x16(self):
+        profile = ROOT / 'examples/bringup-cx4.env'
+        self.assertTrue(profile.is_file(), 'CX-4 environment example is missing')
+        second = PCI.replace(':01:', ':02:')
+        self.bind('mlx5_core')
+        self.write('module/mlx5_core/version', '5.0')
+        self.write('bus/pci/devices/' + second + '/class', '0x020000')
+        self.write('bus/pci/devices/' + second + '/numa_node', '0')
+        (self.sys / 'bus/pci/devices' / second / 'driver').symlink_to(
+            self.sys / 'bus/pci/drivers/mlx5_core')
+        self.versions.update(driver='mlx5_core', driver_version='5.0', pmd='mlx5_pci')
+        self.lock.write_text(json.dumps(self.versions))
+        self.command('lspci', 'printf "LnkCap: Speed 8GT/s, Width x16\\nLnkSta: Speed 8GT/s, Width x16\\n"')
+        self.env.update(DUT_PCI_PORT0=PCI, DUT_PCI_PORT1=second,
+                        RDMA_CORE_VERSION='fixture-rdma', DOCA_VERSION='not-used')
+        command = '. "$1"; export DUT_PCI="$2"; exec sh "$3" --out "$4"'
+        for port, pci in enumerate((PCI, second)):
+            with self.subTest(port=port):
+                self.probe(pci=pci, pmd='mlx5_pci', allowed_pci=pci)
+                out = self.base / f'cx4-port{port}.json'
+                result = subprocess.run(['bash', '-eu', '-c', command, 'cx4-fixture',
+                                         str(profile), pci, str(ENTRY), str(out)], env=self.env,
+                                        text=True, capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                doc = json.loads(out.read_text())
+                self.assertEqual((doc['status'], doc['scope']), ('PASS', 'software-only'))
+                self.assertEqual(doc['ports'][0]['Device name'], pci)
+                self.assertEqual(doc['versions']['observed'], self.versions)
+                self.assertEqual(doc['pcie'], dict(negotiated_gts=8, negotiated_width=16))
+                self.assertIsNone(doc['clock_uncertainty_ns'])
+                self.assertFalse(doc['g2_qualified'])
+        # The second card cannot borrow the first card's negotiated link result.
+        self.command('lspci', 'echo "LnkCap: Speed 8GT/s, Width x16"; echo "LnkSta: Speed 8GT/s, Width x8"')
+        out = self.base / 'cx4-degraded.json'
+        result = subprocess.run(['bash', '-eu', '-c', command, 'cx4-fixture',
+                                 str(profile), second, str(ENTRY), str(out)], env=self.env,
+                                text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        doc = json.loads(out.read_text())
+        self.assertEqual(doc['status'], 'FAIL')
+        self.assertEqual(next(c['status'] for c in doc['checks']
+                              if c['check'] == 'PCIe negotiated'), 'FAIL')
+        self.assertFalse(any('Infos for port' in c.get('stdout', '') for c in doc['commands']))
+
     def test_x710_example_two_functions_node1_and_gigabyte_pages(self):
         profile = ROOT / 'examples/bringup-x710.env'
         self.assertTrue(profile.is_file(), 'X710 environment example is missing')

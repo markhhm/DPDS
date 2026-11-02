@@ -184,6 +184,15 @@ A PASS for i40e does not qualify a different PMD.
 Register switch/VLAN topology and external capture separately before traffic.
 The example does not select VLAN tags or resolve line classification.
 
+## CX-4 environment example
+
+Use [bringup-cx4.env](../examples/bringup-cx4.env) for two distinct ConnectX-4 cards.
+Keep the mlx5 bifurcated stack and `mlx5_core` binding. Do not bind these cards to vfio.
+Check each card's negotiated Gen3 x16 link, local CPUs, pages and exact version lock separately.
+Record the approved RDMA/DOCA versions in the private deployment inventory.
+Follow the [100G operator handoff](m7/em-handoff-cx4.md) for commands, external-clock qualification and restoration.
+Its hardware steps require owner authorization. A simulated sysfs PASS remains software-only.
+
 ## Bypass and clock checks
 
 1. Freeze the topology and frame profile. Start with the registered lower
