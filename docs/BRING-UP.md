@@ -17,7 +17,7 @@ Software PMD checks do not qualify a physical path.
    packet identities, timestamp points and observation adapter. Both modeled
    directions share the physical path's capacity. One port permits 2/3/4
    lcores in the current host. Five and seven lcores require two ports.
-   The [native exporter](../NATIVE-OBSERVER.md) supports software PMDs only.
+   Select the [native binary path](NATIVE-BINARY.md) for physical evidence.
    Resolve physical observation before traffic.
 
 3. **Switch clock schema:** select a versioned representation for the switch
@@ -48,37 +48,121 @@ Use unique run identifiers and output directories.
 
 ## Preflight
 
-1. Verify source revisions and the version lock. Build and run the normal
-   software checks as described in [Readme.md](../Readme.md).
+1. Build the host and do the normal software checks in [Readme.md](../Readme.md).
+   Confirm the private version combination before hardware use.
 
-2. Inspect the device and resources with the commands below.
-   Repeat applicable checks for the generator.
+2. Set the deployment variables above.
+   Also set `P1_0_MANIFEST` to a new private JSON path.
+   Put `lspci`, `findmnt`, `git`, `uname`, Python and `dpdk-testpmd` on `PATH`.
+   Set `DPDK_TESTPMD` if the testpmd executable has a different path.
 
-3. Compare negotiated PCIe rate/width, link mode, MTU and FEC with the manifest.
-   Stop on a degraded link or unknown NUMA placement.
-
-4. Confirm physical cores, free node-local hugepages and ordinary RAM against
-   the registered envelope. Include EAL, mempool and observer overhead.
-   Use the pool calculator's envelope, not mean occupancy.
+3. Run the checker during the allocated hardware session:
 
 ```sh
-test "$(git -C "$DPDS_SRC" rev-parse HEAD)" = "$HOST_REV"
-test "$(git -C "$DPDS_SRC/dpds-core" rev-parse HEAD)" = "$CORE_REV"
-lspci -D -vv -s "$DUT_PCI"
+cd "$DPDS_SRC"
+scripts/bringup-check.sh --out "$P1_0_MANIFEST"
+```
+
+The command prints a PASS/FAIL table and writes `hng-p1-0-v1` JSON.
+Exit status 0 means all environment checks passed. Exit status 1 means failure.
+
+An existing output file causes failure before any probe. Preserve each failed attempt.
+The checker creates the manifest with owner-only permissions (0600).
+Repeat the command with a new output path for each registered PCI function.
+
+The checker requires these environment variables:
+
+| Variables | Meaning |
+|---|---|
+| `DUT_PCI`, `DUT_NODE` | PCI domain:bus:device.function and expected NUMA node |
+| `EXPECTED_PCIE_GTS`, `EXPECTED_PCIE_WIDTH` | Exact negotiated PCIe rate and width |
+| `CORE_SET` | At least two allowed CPU IDs, as a list or ranges |
+| `HUGEPAGE_KB`, `HUGEPAGES_REQUIRED`, `HUGEPAGE_MOUNT` | Page size in KiB, minimum free NIC-local pages, hugetlbfs path |
+| `SOCKET_MEM` | EAL MiB vector by NUMA node, with positive NIC-local memory |
+| `VERSION_LOCK`, `CONFIG_FILE`, `RUN_ID` | Exact version lock, engine configuration and attempt ID |
+
+Set `HOST_REV` and `CORE_REV` for an exact source revision comparison.
+The manifest records actual revisions and dirty state in all cases.
+Register `LCORE_MAP` and owner roles separately with the topology.
+
+Use this JSON shape for `VERSION_LOCK`.
+Replace every placeholder with the approved exact observed value:
+
+```json
+{
+  "dpdk": "<runtime DPDK version>",
+  "pmd": "<DPDK port driver name>",
+  "firmware": "<NIC firmware version>",
+  "driver": "<vfio-pci or mlx5_core>",
+  "driver_version": "<module version or kernel:release>",
+  "kernel": "<uname -r>"
+}
+```
+
+The checker compares these six fields exactly. Missing or unknown values fail.
+It reads the loaded module version from sysfs.
+Without a module version, it records `kernel:` followed by the kernel release.
+Freeze RDMA, compiler, Rust, generator and collector versions separately in the private deployment record.
+
+Confirm adapter compatibility separately. Equality with a version lock does not prove compatibility.
+
+The checker reads negotiated `LnkSta` values from `lspci -D -vv`.
+It rejects absent devices, unsupported drivers and unknown NIC NUMA nodes.
+It records CPU NUMA nodes and cross-NUMA placement.
+It checks free pages on each requested memory node, including the `SOCKET_MEM` allocation, and the mount page size.
+
+After all prerequisites pass, testpmd probes only `DUT_PCI`.
+It uses `--in-memory`, the registered hugepage path and `SOCKET_MEM`.
+It requests port information, then quits.
+
+[Interactive mode and `--disable-device-start`](https://doc.dpdk.org/guides-26.03/testpmd_app_ug/run_app.html)
+prevent automatic port start and packet forwarding.
+The checker requires a port for the selected device and observed DPDK, PMD and firmware versions.
+Probe failure, missing tools and command timeouts produce FAIL.
+The checker does not bind devices, change page reservations or generate traffic.
+
+### P1-0 output and remaining checks
+
+The private manifest contains:
+
+- `scope`, environment `status`, per-check results, timestamps and raw command outputs.
+- `versions.observed` and `versions.locked`, source revisions, dirty state, configuration and version-lock SHA-256 hashes.
+- Engine `lines`, including C, Q, model seeds and the frame envelope.
+- `byte_accounting`: Q uses `max(pkt_len + 4, 64)` L2 bytes, including the in-service frame.
+  C uses another 20 wire bytes. Packet length excludes FCS. Service time rounds upward.
+- `numa`: NIC node, CPU nodes, cross-NUMA placement, requested MiB and observed hugepage counts and size.
+- `clock_uncertainty_ns: null`, `clock_qualification: null` and `g2_qualified: false`.
+
+Environment PASS does not qualify physical timing or throughput.
+Keep both clock fields null until `m5_qualify` supplies qualification evidence.
+That tool reads `--p1-manifest` and writes a new `--manifest-out` path.
+It preserves environment `status` and records the original manifest SHA-256 in `sources`.
+Its full result belongs in `clock_qualification`.
+
+Only a physical qualification PASS can supply top-level `clock_uncertainty_ns`.
+Software-only evidence keeps that field null.
+
+For a hardware-free check, run `python3 tests/bringup_check.py`.
+Its environment supplies a synthetic sysfs tree and command fixtures.
+The `BRINGUP_SYSFS_ROOT` override always marks a manifest `scope=software-only`.
+Do not use that override for physical evidence.
+
+Continue the manual link, MTU and FEC checks:
+
+```sh
 ethtool -i "$DUT_IF"
 ethtool "$DUT_IF"
 ethtool --show-fec "$DUT_IF"
-cat "/sys/bus/pci/devices/$DUT_PCI/numa_node"
 numactl --hardware
 lscpu -e=CPU,NODE,SOCKET,CORE,ONLINE
 grep -E 'MemAvailable|Huge' /proc/meminfo
-cat "/sys/devices/system/node/node$DUT_NODE/hugepages/hugepages-${HUGEPAGE_KB}kB/free_hugepages"
-findmnt --target "$HUGEPAGE_MOUNT" -o TARGET,FSTYPE,OPTIONS
 ```
 
+Confirm physical cores, ordinary RAM and the complete pool envelope separately.
+Include EAL, PMD, mempool and observer overhead.
+The probe alone does not prove the full emulator allocation or its queue ownership.
 Keep `--in-memory` in the registered EAL arguments.
-Do not substitute software timestamps for physical observations.
-Use the selected driver's device procedure for any bind, reset or firmware change.
+Use the selected driver's procedure for a bind, reset or firmware change.
 Do not change unrelated devices or memory reservations during preflight.
 
 ## Bypass and clock checks

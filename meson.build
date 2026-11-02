@@ -15,6 +15,8 @@ test('seqcheck', python, args: ['-m', 'unittest', '-v', 'tools.seqcheck.test_seq
   env: ['SEQCHECK_BINARY=' + seqcheck.full_path()],
   workdir: meson.project_source_root(), depends: seqcheck)
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
+test('bringup-check', python, args: [meson.project_source_root() / 'tests/bringup_check.py'],
+  workdir: meson.project_source_root(), timeout: 30)
 core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
