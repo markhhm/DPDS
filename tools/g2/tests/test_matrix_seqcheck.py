@@ -30,6 +30,19 @@ def swap_probe_identities(path):
 
 
 class MatrixSeqcheckTests(unittest.TestCase):
+    def test_native_pair_must_be_the_registered_capture_document(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_sample_fixture import make_case
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=make_case(root)
+            case['binary_manifest']['verification']['seqchecks']=[]
+            (root/'binary.json').write_text(json.dumps(case['binary_manifest']))
+            outer=json.loads((root/'pair.json').read_text());outer['end_ns']=1
+            (root/'outer.json').write_text(json.dumps(outer))
+            self.assertEqual(report_one(root/'outer.json',root/'out','demo','software-only','pcapng'),2)
+            report=json.loads((root/'out/report.json').read_text())
+            self.assertEqual(report['reason_codes'],['PCAPNG_PAIR_REGISTRATION'])
+
     def test_native_binary_pair_runs_without_packet_jsonl_and_resumes(self):
         from tools.g2.tests.binary_sample_fixture import make_case
         with tempfile.TemporaryDirectory() as temp:

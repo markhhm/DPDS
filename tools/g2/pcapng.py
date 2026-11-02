@@ -285,6 +285,10 @@ def prepare_pair(pair_path, output):
     manifest = strict_json(path.read_bytes())
     preflight(path)
     validate_capture_deployment(pair,manifest)
+    verification=manifest.get('verification',{})
+    if 'native_binary' in verification and pair_path.resolve() not in {
+            (path.parent/p).resolve() for p in verification['capture_pairs']}:
+        fail('PCAPNG_PAIR_REGISTRATION','selected capture pair is absent from native registration')
     if manifest['identity_profile']['kind'] != 'probe':
         raise ValueError('this adapter requires the registered UDP probe identity profile')
     clock = Calibration(strict_json((path.parent/manifest['calibration_path']).read_bytes()),
