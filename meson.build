@@ -144,3 +144,7 @@ g2_matrix_environment.prepend('PATH', meson.project_build_root())
 test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix',
   'tools.g2.tests.test_matrix_seqcheck'], env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
+test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],
+  env: g2_matrix_environment, depends: seqcheck,
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)

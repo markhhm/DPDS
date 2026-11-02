@@ -101,11 +101,71 @@ actual repeat and trace episode with its own run and evidence before reporting.
 Hardware clocks, calibration under load, trace provenance, complete matrix
 registration, physical execution, and acceptance remain separate work.
 
+## M5 zero-delay clock and bypass qualification
+
+Use `tools.g2.m5_qualify` on closed directional capture pairs before M6.
+It runs the existing M6 pcapng path and C seqcheck; it does not acquire traffic
+or access devices. First register the observation hardware, raw nanosecond
+clock maps, anchors and independent quantization/mapping bounds using the
+existing [calibration format](../tools/g2/calibration.py). Unknown clocks or
+uncertified capture health cannot pass. This does not add a switch clock kind.
+
+Register an ordinary `hng-m6-matrix-v1` matrix with `mode=pcapng`, the intended
+`scope`, and at least two distinct observed offered rates for each line and
+observation clock/device. Include the target rate. Each pair references its
+existing native manifest, source configuration, calibration and sealed native
+streams. Use sampled `timing_mode=calibration`, fixed `t_ns=0`, `delta_ns=0`,
+`p="0"`, and no trace. Preserve the v1 sampling header; register enough main
+samples (oversample low-rate cells if needed) to retain at least 368 paired
+samples per run/line over a nonzero interval. Keep the same clock IDs, device
+tokens, timestamp points and topology across loads. Do not change source files.
+
+```sh
+python3 -m tools.g2.m5_qualify "$M5_MATRIX" --out "$M5_REPORT_DIR" \
+  --p1-manifest "$P1_0_MANIFEST" --manifest-out "$P1_0_QUALIFIED"
+```
+
+`P1_0_MANIFEST` is the original `hng-p1-0-v1` output from bring-up preflight.
+Both manifest arguments are optional together for standalone analysis. All
+output paths must be new. Original sources and manifests are preserved.
+The tool writes `qualification.json`, `results.csv`, `summary.txt`, and the
+unchanged M6 reports/checker evidence under `matrix/`.
+
+The table reports measured mean wire offered rate, signed offset, drift in ppb
+and over the sample interval, between-load offset span, maximum absolute raw
+zero-reference error, the clock bound and full-capture missing identities.
+Offset/drift diagnostics use exact rational least squares; bounds round upward
+from exact fits, rather than the rounded display offsets. Their fitted values
+are **not subtracted** from the observed error. The conservative observed-sample bound
+is the maximum of absolute raw error, fitted drift span and between-load offset
+span, plus the registered external quantization/mapping allowance. Every bound
+must be **at most 10,000 ns**. A 50 us drift cannot be fitted away into PASS.
+No DUT residence or load tail is relabeled as a removable clock offset.
+
+Full, healthy seqcheck evidence must have zero missing, reordered, duplicate,
+unexpected or flag-mismatched identities. True bypass loss is FAIL even if too
+few timing pairs survive. Capture loss, unknown health, missing evidence or
+insufficient load/sample coverage is INCONCLUSIVE. Exit codes are 0 PASS,
+1 FAIL and 2 invalid/inconclusive input. Qualification covers only the recorded
+loads, main timing samples, clock path and intervals; it does not establish
+unsampled timing extremes, UTC accuracy, future drift, or separate fixed path
+residence from clock error. Bypass identity coverage remains full-packet.
+
+The exported P1-0 manifest retains its environment `status` and all other
+preflight fields, embeds the full result in `clock_qualification`, and binds
+the original manifest SHA-256 in its sources. Only physical-scope PASS fills
+top-level `clock_uncertainty_ns`; synthetic PASS and failed/unknown results
+leave it null. Synthetic tests are explicitly `software-only` and never set
+`physical_qualified=true`. This clock/bypass result does not waive the separate
+M6 observer-cost or G2 gates; their original decisions remain in the M6 reports.
+
 ## Hardware-day runbook
 
 Complete [BRING-UP](BRING-UP.md) first. Unresolved hardware decisions block this procedure.
 Export its private deployment variables, source revisions and calibration path.
 Also set `M6_MATRIX`, `REPORT_DIR`, `PILOT_MANIFEST`, `PILOT_MATRIX`, `PILOT_REPORT_DIR` and `RUN_MANIFEST`.
+Set `M5_MATRIX`, `M5_REPORT_DIR`, `P1_0_MANIFEST` and a new `P1_0_QUALIFIED` path
+for [M5 qualification](#m5-zero-delay-clock-and-bypass-qualification).
 
 The `*_COMMAND` variables contain the operator's deployment commands, not repository tools.
 Register their traffic, capture, drain, reset and restoration parameters first.
@@ -117,7 +177,7 @@ On failure, stop traffic, drain and restore the allocated resources per [Handoff
 
 | Step | Commands from `DPDS_SRC` | Expected output and stop condition |
 |---|---|---|
-| 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"` | Keep identities/counters and `CALIBRATION_FILE`. Require target delivery, zero non-model loss and physical pair uncertainty ≤10,000 ns. Otherwise stop here. |
+| 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.m5_qualify "$M5_MATRIX" --out "$M5_REPORT_DIR" --p1-manifest "$P1_0_MANIFEST" --manifest-out "$P1_0_QUALIFIED"` | Register zero-delay captures at low and target loads. Keep identities/counters and `CALIBRATION_FILE`. Require physical M5 PASS, zero bypass missing identities and uncertainty ≤10,000 ns; the exported P1-0 environment status must also be PASS. Otherwise stop here. |
 | 2. Observer cost pilot | `python3 -m tools.g2.validate "$PILOT_MANIFEST"`<br>`OFFERED_BPS=10000000000 sh -c "$PILOT_CAPTURE_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$PILOT_MATRIX" --out "$PILOT_REPORT_DIR"` | Register the pilot with required-cell `mask_bits=8`. Require preflight PASS before capture. Require zero observer drops, positive queue capacity, high-water below capacity and no `observer_cost` warnings or missing evidence. Record `OBSERVER_COST_REPORT`, `EVIDENCE_COMMIT` and `RUN_ID` per the [cost gate](BRING-UP.md#observer-cost-gate-before-m6). On failure, retain the previous plan and stop for review. |
 | 3. Register and capture M6 | `cp -n examples/m6-short.json "$M6_MATRIX"`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Edit the private matrix before traffic: `mode=pcapng`, `scope=physical`, every repeat/episode and its capture-pair path. Expand the three example entries. After step 2 passes, register fixed cells at 1/256 and 30 s exposure. Align fixed-cell plan metadata. Keep the v1 header, sample gates and trace plan. Require preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
 | 4. Release the testbed | `sh -c "$POST_BYPASS_COMMAND"`<br>`sh -c "$RESTORE_COMMAND"` | Require the post-run bypass check, drain and restoration records. On failure, record the reason and stop here. Preserve source directories for adapter symlinks. |
