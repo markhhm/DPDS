@@ -236,9 +236,8 @@ Observer-cost and final G2 decisions remain separate gates.
 [#10](https://github.com/markhhm/DPDS/pull/10) supplies per-direction RX/scheduler/TX ownership.
 [#30](https://github.com/markhhm/DPDS/pull/30) supplies binary capture.
 [#31](https://github.com/markhhm/DPDS/pull/31) supplies the explicit mlx5 physical capture gate.
-**Prerequisite:** the deployed host and pinned Core must include all three changes.
-At this document's introduction, #31 is on `hng/native-binary`, outside `hng/core`.
-Do not run the following command until the measurement owner confirms its integrated revision.
+**Source dependency satisfied:** [#49](https://github.com/markhhm/DPDS/pull/49) integrates all three changes into `hng/core` at `c1629e8`, with Core pin `f3d255d`.
+Deploy that integrated revision or a descendant. Confirm `HOST_REV` and `CORE_REV` before hardware use.
 Do not bypass the driver gate or use `--observe-software` on hardware.
 
 Stop testpmd before DPDS. Start external captures before the authorized generator.
@@ -249,7 +248,7 @@ Seven EAL lcores do not mean seven total OS threads.
 The consumer inherits main-thread affinity. Register and verify that placement with the owner.
 
 ```sh
-# DUT: only with integrated #31, approved resources and the common-clock capture active.
+# DUT: approved integrated revision and resources, with the common-clock capture active.
 systemd-run --unit="$DUT_UNIT" --slice="$DUT_SLICE" --property=LimitMEMLOCK=infinity \
   --property="AllowedCPUs=${LCORE_SET//,/ }" --property="CPUAffinity=${LCORE_SET//,/ }" \
   --property="AllowedMemoryNodes=$DUT_MEMORY_NODES" --property=NUMAPolicy=bind --property="NUMAMask=$DUT_MEMORY_NODES" \
