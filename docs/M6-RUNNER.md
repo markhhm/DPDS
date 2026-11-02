@@ -205,10 +205,82 @@ Then run the M5 command above with the matching P1-0 manifest.
 This example uses one registered line on one VLAN. The reader still requires
 retained single-VLAN 802.1Q probes. If access ports produce untagged captures,
 resolve the capture/tagging arrangement before qualification; changing a VLAN
-number in metadata does not restore an absent wire tag. This template does not
-approve a second VLAN, a trunk configuration or simultaneous distinct cable/
-trace lines. Keep unresolved experiment-acceptance and resource/coexistence
-requirements in the deployment decision. No X710 hardware result is claimed.
+number in metadata does not restore an absent wire tag. This M5 template tests
+one line at a time. The M6 deployment below registers two VLANs on a trunk.
+No X710 hardware result is claimed.
+
+## X710 M6: cable and LEO on separate VLANs
+
+[examples/m6-x710.json](../examples/m6-x710.json) preserves every condition,
+repeat, exposure and sampling setting of `m6-short.json`. It selects physical
+pcapng input and registers an X710 with `i40e`, DUT ports 0 and 1, and distinct
+`${VLAN_CABLE}` / `${VLAN_LEO}` trunk VLANs. Cable and LEO trace lines share
+the two DUT ports; each packet carries its line's single 802.1Q tag. The three
+run entries remain representatives; expand them to the complete registered
+matrix before measurement.
+
+Use the external topology described above for both VLANs: an external generator
+and receiver, plus ingress and receiver observation on an external capture
+machine. The two observations must use one qualified clock, including for
+reverse runs. The DUT's PTP timestamp capability does not timestamp these
+ordinary probes. Record private host, interface and clock identifiers as the
+template variables. Interface keys `"0"` and `"1"` identify the corresponding
+DUT port's external feed, not a capture-device port number.
+
+Copy the example to `M6_MATRIX`. Replace **all** `${...}` placeholders before
+running it. In particular, replace VLAN placeholders with JSON **integers**
+from 1 through 4094; a quoted numeric string is invalid. Resolve capture paths
+relative to that matrix, or use private absolute paths. The runner does not
+expand variables or configure the switch, interfaces, generator or clocks.
+
+Every native `hng-g2-manifest-v1` used by a physical run now requires an explicit
+top-level `deployment`. Copy the rendered `plan.deployment` from the matrix to
+each manifest without changing its fields:
+
+| Field | Required declaration and check |
+| --- | --- |
+| `nic` | `model`, `pmd`, distinct DUT `ports`; X710 requires `i40e` and two ports. |
+| `dut_host` | Private DUT identifier; generator and capture must be external to it. |
+| `vlans` | Family-to-VLAN mapping; cable and LEO values must differ. |
+| `generator` | External `host`, plus `interfaces` keyed by each DUT port. |
+| `capture` | External `host`, `interfaces`, `clock_id`, `mapping_id`, `clock_source`. |
+
+Each manifest `lines[]` entry also declares `family: "cable"` or `"leo"`.
+Its VLAN must equal that family's deployment VLAN and its validated engine
+configuration VLAN. A trace line must declare `leo`. A directional cell may
+contain one family while retaining the complete two-family deployment.
+Existing physical manifests must add this registration; omitted fields do not
+receive defaults. Unmarked software-only legacy fixtures remain supported.
+
+`capture.clock_source` must equal the calibration clock's `device_token`.
+The registered mapping must map that clock into the observation domain.
+Each capture pair must select exactly the declared clock and mapping. Merely
+renaming a pair to another calibrated clock is invalid. The matrix worker
+compares its expected deployment with the measured manifest before and after
+conversion; missing or changed deployment is INVALID. Resume checks also
+validate the retained report's deployment. All declarations remain in
+`report.json` and the matrix summary, with the existing source-hash receipts.
+Interface declarations record the operator's topology; they do not prove the
+physical cabling or the capture device's clock wiring.
+
+Software verification uses two synthetic 400-packet captures through the real
+pcapng converter, C seqcheck and sampled reporter: cable VLAN 100 and a LEO
+trace on VLAN 200, including its clamp prefix. Both cells retain all 400
+samples, 3 ns median absolute timing error, and PASS order/storage gates.
+The matrix remains **software-only, INCONCLUSIVE**, with
+`g2_qualified=false`, because synthetic captures do not supply observer-cost
+qualification. Reproduce this wiring test with:
+
+```sh
+python3 -m unittest tools.g2.tests.test_x710_matrix
+```
+
+Before the first physical M6 run, complete M5 using the external common clock
+and zero missing identities. Also complete the registered A/B′/A coexistence
+check: B′ runs the real DPDS engine with external traffic. A NIC bring-up
+self-loop alone does not satisfy this check. This preparation does not execute
+hardware or establish physical acceptance; an eventual NIC/PMD change requires
+clock and topology qualification again.
 
 ## Hardware-day runbook
 
@@ -230,7 +302,7 @@ On failure, stop traffic, drain and restore the allocated resources per [Handoff
 |---|---|---|
 | 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.m5_qualify "$M5_MATRIX" --out "$M5_REPORT_DIR" --p1-manifest "$P1_0_MANIFEST" --manifest-out "$P1_0_QUALIFIED"` | Register zero-delay captures at low and target loads. Keep identities/counters and `CALIBRATION_FILE`. Require physical M5 PASS, zero bypass missing identities and uncertainty ≤10,000 ns; the exported P1-0 environment status must also be PASS. Otherwise stop here. |
 | 2. Observer cost pilot | `python3 -m tools.g2.validate "$PILOT_MANIFEST"`<br>`OFFERED_BPS=10000000000 sh -c "$PILOT_CAPTURE_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$PILOT_MATRIX" --out "$PILOT_REPORT_DIR"` | Register the pilot with required-cell `mask_bits=8`. Require preflight PASS before capture. Require zero observer drops, positive queue capacity, high-water below capacity and no `observer_cost` warnings or missing evidence. Record `OBSERVER_COST_REPORT`, `EVIDENCE_COMMIT` and `RUN_ID` per the [cost gate](BRING-UP.md#observer-cost-gate-before-m6). On failure, retain the previous plan and stop for review. |
-| 3. Register and capture M6 | `cp -n examples/m6-short.json "$M6_MATRIX"`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Edit the private matrix before traffic: `mode=pcapng`, `scope=physical`, every repeat/episode and its capture-pair path. Expand the three example entries. After step 2 passes, register fixed cells at 1/256 and 30 s exposure. Align fixed-cell plan metadata. Keep the v1 header, sample gates and trace plan. Require preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
+| 3. Register and capture M6 | `cp -n examples/m6-x710.json "$M6_MATRIX"`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Bind the private deployment variables and copy `plan.deployment` to every native manifest; declare each line family. Register every repeat/episode and its capture-pair path; expand the three example entries. After step 2 passes, register fixed cells at 1/256 and 30 s exposure. Align fixed-cell plan metadata. Keep the v1 header, sample gates and trace plan. Require preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
 | 4. Release the testbed | `sh -c "$POST_BYPASS_COMMAND"`<br>`sh -c "$RESTORE_COMMAND"` | Require the post-run bypass check, drain and restoration records. On failure, record the reason and stop here. Preserve source directories for adapter symlinks. |
 | 5. Report offline | `prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" --out "$REPORT_DIR"` | Run after capture, away from the testbed. Expect per-run `report.json`, `results.csv`, `verdict.json` and final `summary.json`. On interruption, stop controller and worker, then repeat this exact command/directory. [Resume](#resume-an-interrupted-matrix) skips verified sealed reports and preserves partial attempts. It resumes reports, not capture. |
 | 6. Read the aggregate | `cat "$REPORT_DIR/summary.json"` | Read `status` and `measurement_status`. Require all registered run IDs, repeats and required rows. Step 5 reporter exits: 0 all PASS, 1 FAIL, 2 invalid/inconclusive evidence. The `cat` exit is not a verdict. Keep verdicts and stderr logs. If the summary is absent, stop here and resume step 5. |

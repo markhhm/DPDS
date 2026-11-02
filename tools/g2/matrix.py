@@ -16,12 +16,15 @@ from .bundle import build_bundle_report
 from .protocol import StreamError, shape
 from .reference import strict_json
 from .report import error_report, write_outputs
+from .registration import validate_deployment
 from .validate import load_registration
 
 
 EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}
 SEQCHECK = Path(__file__).resolve().parents[2] / "build" / "seqcheck"
-WORKER = "from tools.g2.matrix import report_one; import sys; sys.exit(report_one(*sys.argv[1:]))"
+WORKER = ("from tools.g2.matrix import report_one; import sys,json; "
+          "sys.exit(report_one(*sys.argv[1:6], "
+          "expected_deployment=json.loads(sys.argv[6]) if len(sys.argv)>6 else None))")
 
 
 def file_hash(path):
@@ -105,13 +108,23 @@ def read_verdict(path, run_id, scope, returncode):
     return verdict
 
 
-def completed_run(path, source, run_id, scope, mode):
+def check_deployment(manifest, expected):
+    if expected is not None and manifest.get("deployment") != expected:
+        raise StreamError("DEPLOYMENT_MISMATCH", "run deployment differs from matrix registration")
+    if manifest.get("scope") == "physical" or "deployment" in manifest:
+        validate_deployment(manifest.get("deployment"))
+
+
+def completed_run(path, source, run_id, scope, mode, expected_deployment=None):
     try:
         seal = strict_json((path / ".complete.json").read_bytes())
         if (seal["schema"] != "hng-m6-complete-v1" or seal["mode"] != mode
                 or seal["sources"] != source_hashes(source, mode)
                 or seal["outputs"] != output_hashes(path)):
             return None
+        report = strict_json((path / "report.json").read_bytes())
+        registration = report.get("registration", {})
+        check_deployment(dict(registration, scope=scope), expected_deployment)
         return read_verdict(path, run_id, scope, seal["exit"]), seal["exit"]
     except (ValueError, KeyError, TypeError, OSError):
         return None
@@ -200,25 +213,27 @@ def prepare_seqcheck(manifest_path, pair_path, cache):
     write_json(manifest_path, manifest)
 
 
-def report_one(manifest_path, output, run_id, scope, mode="software"):
+def report_one(manifest_path, output, run_id, scope, mode="software", expected_deployment=None):
     """Keep the reporter's large result in a fresh process, not the controller."""
     path, destination = Path(manifest_path), Path(output)
     destination.mkdir()
     manifest = {"run": run_id, "scope": scope}
     inputs = None
     try:
+        initial_inputs = source_hashes(Path(manifest_path), mode)
         manifest = strict_json(path.read_bytes())
         if mode == "pcapng":
             pair_path = path
             manifest = strict_json((path.parent / manifest["manifest"]).read_bytes())
         if not isinstance(manifest, dict) or manifest.get("run") != run_id or manifest.get("scope") != scope:
             raise StreamError("MATRIX_METADATA_MISMATCH", "run/scope differs from matrix registration")
-        initial_inputs = source_hashes(Path(manifest_path), mode)
+        check_deployment(manifest, expected_deployment)
         if mode == "pcapng":
             from .pcapng import prepare_pair
             path = prepare_pair(pair_path, destination / "capture")
             prepare_seqcheck(path, pair_path, destination.parent / ".seqchecks" / destination.name)
             manifest = strict_json(path.read_bytes())
+            check_deployment(manifest, expected_deployment)
         inputs = initial_inputs
         checked, config, traces = load_registration(path)
         sources = {row["stream_id"]: path.parent / row["path"] for row in manifest["streams"]}
@@ -264,6 +279,9 @@ def run_matrix(matrix_path, output):
         raise ValueError("unsupported matrix schema/scope")
     if not isinstance(matrix["plan"], dict) or not isinstance(matrix["runs"], list) or not matrix["runs"]:
         raise ValueError("matrix requires plan metadata and at least one registered run")
+    expected_deployment = matrix["plan"].get("deployment")
+    if "deployment" in matrix["plan"]:
+        validate_deployment(expected_deployment)
     workers = matrix.get("workers", 1)
     available_cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
     if type(workers) is not int or not 1 <= workers <= available_cpus:
@@ -303,14 +321,15 @@ def run_matrix(matrix_path, output):
         run_id = run["id"]
         source, target = (path.parent / run["manifest"]).resolve(), destination / run_id
         log_path = destination / (run_id + ".stderr.log")
-        cached = completed_run(target, source, run_id, matrix["scope"], mode)
+        cached = completed_run(target, source, run_id, matrix["scope"], mode, expected_deployment)
         if cached is not None:
             verdict, returncode = cached
         else:
             archive(destination, target, log_path)
             with log_path.open("w") as log:
                 process = subprocess.run([sys.executable, "-c", WORKER,
-                    str(source), str(target.resolve()), run_id, matrix["scope"], mode],
+                    str(source), str(target.resolve()), run_id, matrix["scope"], mode]
+                    + ([json.dumps(expected_deployment, allow_nan=False)] if expected_deployment is not None else []),
                     stdout=subprocess.DEVNULL, stderr=log)
             returncode = process.returncode
             try:

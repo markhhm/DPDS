@@ -1,0 +1,81 @@
+{
+  "schema": "hng-m6-matrix-v1",
+  "scope": "physical",
+  "plan": {
+    "name": "G-short",
+    "inventory": "three representative runs; expand registered captures before physical M6",
+    "main": {
+      "conditions": 72,
+      "repeats": 3
+    },
+    "boundary": {
+      "conditions": 288,
+      "repeats": 1
+    },
+    "trace": {
+      "conditions": 60,
+      "repeats": 2
+    },
+    "timing_mask_bits": 10,
+    "minimum_pairs": 368,
+    "planning_pairs_estimate": 431,
+    "fixed_exposure_seconds": 70,
+    "warmup_seconds": 2,
+    "drain_seconds": 1,
+    "reset_seconds": 5,
+    "trace_episode_seconds": 11,
+    "trace_episodes_typical": 10,
+    "trace_episodes_maximum": 20,
+    "deployment": {
+      "nic": {
+        "model": "X710",
+        "pmd": "i40e",
+        "ports": [
+          0,
+          1
+        ]
+      },
+      "dut_host": "${DUT_HOST}",
+      "vlans": {
+        "cable": "${VLAN_CABLE}",
+        "leo": "${VLAN_LEO}"
+      },
+      "generator": {
+        "host": "${GENERATOR_HOST}",
+        "interfaces": {
+          "0": "${GENERATOR_PORT0_IF}",
+          "1": "${GENERATOR_PORT1_IF}"
+        }
+      },
+      "capture": {
+        "host": "${CAPTURE_HOST}",
+        "interfaces": {
+          "0": "${CAPTURE_PORT0_IF}",
+          "1": "${CAPTURE_PORT1_IF}"
+        },
+        "clock_id": "${CAPTURE_CLOCK_ID}",
+        "mapping_id": "${CAPTURE_MAPPING_ID}",
+        "clock_source": "${CAPTURE_CLOCK_SOURCE}"
+      }
+    }
+  },
+  "runs": [
+    {
+      "id": "main-r0",
+      "family": "main",
+      "manifest": "${CAPTURE_ROOT}/main-r0/pair.json"
+    },
+    {
+      "id": "boundary-r0",
+      "family": "boundary",
+      "manifest": "${CAPTURE_ROOT}/boundary-r0/pair.json"
+    },
+    {
+      "id": "trace-r0",
+      "family": "trace",
+      "manifest": "${CAPTURE_ROOT}/trace-r0/pair.json"
+    }
+  ],
+  "mode": "pcapng",
+  "workers": 1
+}
