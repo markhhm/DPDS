@@ -106,7 +106,7 @@ def qualify(matrix_path,output):
         _,config,_=load_registration(manifest_path)
         for line in config['lines']:
             model=line['model']
-            _require(model['t_ns']==model['delta_ns']==0 and model['p']=='0' and line['trace'] is None,
+            _require(model['t_ns']==model['delta_ns']==0 and Fraction(model['p'])==0 and line['trace'] is None,
                      'M5_ZERO_DELAY_REQUIRED','M5 requires t=delta=p=0 without trace')
         manifest=strict_json(manifest_path.read_bytes())
         _require(manifest['timing_mode']=='calibration' and manifest.get('verification',{}).get('mode')=='sampled',
