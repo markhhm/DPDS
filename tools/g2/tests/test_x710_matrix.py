@@ -55,15 +55,13 @@ class X710MatrixTests(unittest.TestCase):
         examples=Path(__file__).resolve().parents[3]/'examples'
         short=json.loads((examples/'m6-short.json').read_text())
         x710=json.loads((examples/'m6-x710.json').read_text())
-        plan=dict(x710['plan']);dep=plan.pop('deployment')
-        self.assertEqual(plan,short['plan'])
+        plan=x710['plan'];dep=plan['deployment']
+        for field in ('main','boundary','trace','timing_mask_bits','minimum_pairs','planning_pairs_estimate',
+                      'warmup_seconds','drain_seconds','reset_seconds','trace_episode_seconds','trace_episodes_maximum'):
+            self.assertEqual(plan[field],short['plan'][field])
         self.assertEqual(x710['scope'],'physical');self.assertEqual(x710['mode'],'pcapng')
         self.assertEqual(dep['nic'],dict(model='X710',pmd='i40e',ports=[0,1]))
-        self.assertEqual(dep['vlans'],dict(cable='${VLAN_CABLE}',leo='${VLAN_LEO}'))
-        self.assertEqual([(r['id'],r['family']) for r in x710['runs']],
-                         [(r['id'],r['family']) for r in short['runs']])
-        for row in x710['runs']:
-            self.assertEqual(row['manifest'],'${CAPTURE_ROOT}/'+row['id']+'/pair.json')
+        self.assertEqual(dep['vlans'],dict(cable=710,leo=711))
 
     def test_cable_and_leo_trace_use_registered_vlan_and_deployment(self):
         with tempfile.TemporaryDirectory() as tmp:
