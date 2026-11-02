@@ -315,7 +315,12 @@ def prepare_pair(pair_path, output):
             len(pair[role]['interfaces'])!=1 for role in ('before','receiver')):
         fail('SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED',
              'sampled pcapng requires one direction per pair; use directional runs or normalized streams with directional seqchecks')
-    for check in manifest.get('verification',{}).get('seqchecks',[]):
+    for check in verification.get('seqchecks',[]):
+        if 'native_binary' in verification:
+            ports=(next(iter(pair['before']['interfaces'].values())),
+                   next(iter(pair['receiver']['interfaces'].values())))
+            if (check['ingress_port'],check['egress_port'])!=ports:
+                continue
         if ((path.parent/check['ingress_path']).resolve()!=before.resolve() or
                 (path.parent/check['receiver_path']).resolve()!=receiver.resolve()):
             raise ValueError('seqcheck input captures differ from the converted capture pair')

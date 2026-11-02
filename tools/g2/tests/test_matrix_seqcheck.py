@@ -72,6 +72,63 @@ class MatrixSeqcheckTests(unittest.TestCase):
                 else:self.assertEqual((root/'out/demo/.complete.json').stat().st_mtime_ns,seal)
             self.assertEqual((root/'binary.json').read_bytes(),source)
 
+    def test_shared_bidirectional_native_generates_both_checks_and_resumes(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_split_fixture import make_case
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=make_case(root)
+            self.assertEqual(report_one(root/'binary.json',root/'reference','demo','software-only'),0)
+            case['binary_manifest']['verification']['seqchecks']=[]
+            (root/'binary.json').write_text(json.dumps(case['binary_manifest']))
+            source=(root/'binary.json').read_bytes()
+            matrix=root/'matrix.json'
+            for direction in ('forward','reverse'):
+                matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1',scope='software-only',mode='pcapng',
+                    plan={},runs=[dict(id='demo',manifest=f'pair-{direction}.json')])))
+                output=root/f'out-{direction}'
+                saved=None
+                for attempt in range(2):
+                    result=subprocess.run([sys.executable,'-m','tools.g2.matrix',str(matrix),'--out',str(output)],
+                        capture_output=True,text=True,timeout=30)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    registration=json.loads((output/'demo/capture/bundle/manifest.json').read_text())
+                    checks=registration['verification']['seqchecks']
+                    self.assertEqual({(c['ingress_port'],c['egress_port']) for c in checks},{(0,1),(1,0)})
+                    for check in checks:
+                        doc=json.loads((output/'demo/capture/bundle'/check['path']).read_text())
+                        self.assertEqual(doc['totals']['ingress'],400)
+                        self.assertEqual(doc['totals']['missing'],0)
+                        self.assertTrue(doc['complete'])
+                    for name in ('verdict.json','results.csv','summary.txt'):
+                        self.assertEqual((output/'demo'/name).read_bytes(),(root/'reference'/name).read_bytes(),name)
+                    seal=(output/'demo/.complete.json').stat().st_mtime_ns
+                    if attempt==0:saved=seal
+                    else:self.assertEqual(seal,saved)
+            self.assertEqual((root/'binary.json').read_bytes(),source)
+
+    def test_shared_native_reuses_supplied_directional_evidence(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_split_fixture import make_case
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);make_case(root)
+            with patch('tools.g2.matrix.subprocess.run',side_effect=AssertionError('valid checker evidence reran')):
+                self.assertEqual(report_one(root/'pair-forward.json',root/'out','demo','software-only','pcapng'),0)
+            report=json.loads((root/'out/report.json').read_text())
+            self.assertEqual(report['input_packets'],{'0':400,'1':400})
+
+    def test_shared_native_validates_health_of_the_other_direction(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.binary_split_fixture import make_case
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);case=make_case(root)
+            case['binary_manifest']['verification']['seqchecks']=[]
+            (root/'binary.json').write_text(json.dumps(case['binary_manifest']))
+            pcapng(root/'reverse/receiver.pcapng',[1],drop=1)
+            self.assertEqual(report_one(root/'pair-forward.json',root/'out','demo','software-only','pcapng'),2)
+            report=json.loads((root/'out/report.json').read_text())
+            self.assertEqual(report['measurement_status'],'INCONCLUSIVE')
+            self.assertIn('PCAPNG_CAPTURE_DROP',report['reason_codes'])
+
     def fixture(self, root, cases=('reordered', 'dropped', 'normal')):
         runs = []
         for run in cases:

@@ -159,11 +159,12 @@ def prepare_seqcheck(manifest_path, pair_path, cache):
         except (ValueError, KeyError, TypeError, OSError):
             return False
 
-    if (len(verification["seqchecks"]) > 1 or any(
-            tuple(row[key] for key in ("ingress_port", "egress_port")) != ports
-            for row in verification["seqchecks"])):
-        raise StreamError("SEQCHECK_DIRECTION", "one matching seqcheck per directional run is required", "INCONCLUSIVE")
-    registration = next((row for row in verification["seqchecks"] if valid(row)), None)
+    matching = [row for row in verification["seqchecks"]
+                if (row["ingress_port"], row["egress_port"]) == ports]
+    others = [row for row in verification["seqchecks"] if row not in matching]
+    if len(matching) > 1 or (others and "native_binary" not in verification):
+        raise StreamError("SEQCHECK_DIRECTION", "one matching seqcheck per direction is required", "INCONCLUSIVE")
+    registration = next((row for row in matching if valid(row)), None)
     result = cache / f"{ports[0]}-{ports[1]}.json"
     receipt = cache / f"{ports[0]}-{ports[1]}.registration.json"
     if registration is None:
@@ -209,7 +210,7 @@ def prepare_seqcheck(manifest_path, pair_path, cache):
         raise StreamError("SEQCHECK_SOURCE_CHANGED", "checker result changed while copying", "INCONCLUSIVE")
     # Keep manifest paths short even when the matrix lives under a long absolute prefix.
     links = ["source/" + os.path.relpath(capture, (root / "source").resolve()) for capture in captures]
-    verification["seqchecks"] = [dict(registration, path=local.name,
+    verification["seqchecks"] = others + [dict(registration, path=local.name,
         ingress_path=links[0], receiver_path=links[1])]
     write_json(manifest_path, manifest)
 
@@ -232,7 +233,12 @@ def report_one(manifest_path, output, run_id, scope, mode="software", expected_d
         if mode == "pcapng":
             from .pcapng import prepare_pair
             path = prepare_pair(pair_path, destination / "capture")
-            prepare_seqcheck(path, pair_path, destination.parent / ".seqchecks" / destination.name)
+            manifest = strict_json(path.read_bytes())
+            verification = manifest.get("verification", {})
+            pairs = ([path.parent / entry for entry in verification["capture_pairs"]]
+                     if "native_binary" in verification else [pair_path])
+            for entry in pairs:
+                prepare_seqcheck(path, entry, destination.parent / ".seqchecks" / destination.name)
             manifest = strict_json(path.read_bytes())
             check_deployment(manifest, expected_deployment)
         inputs = initial_inputs
