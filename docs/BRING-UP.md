@@ -165,6 +165,25 @@ Keep `--in-memory` in the registered EAL arguments.
 Use the selected driver's procedure for a bind, reset or firmware change.
 Do not change unrelated devices or memory reservations during preflight.
 
+## X710 environment example
+
+Use [bringup-x710.env](../examples/bringup-x710.env) for the X710 VFIO path.
+Set its private deployment inputs before you source it.
+The version lock must specify `pmd=net_i40e` and `driver=vfio-pci`.
+The example selects node1 CPUs, node1 memory and 1 GiB hugepages.
+It leaves node0 memory at zero. Register actual CPU IDs and resource quantities privately.
+
+```sh
+. examples/bringup-x710.env
+DUT_PCI="$DUT_PCI_PORT0" scripts/bringup-check.sh --out "$OUT_DIR/p1-0-port0.json"
+DUT_PCI="$DUT_PCI_PORT1" scripts/bringup-check.sh --out "$OUT_DIR/p1-0-port1.json"
+```
+
+Each invocation checks one function. Preserve both manifests.
+A PASS for i40e does not qualify a different PMD.
+Register switch/VLAN topology and external capture separately before traffic.
+The example does not select VLAN tags or resolve line classification.
+
 ## Bypass and clock checks
 
 1. Freeze the topology and frame profile. Start with the registered lower
