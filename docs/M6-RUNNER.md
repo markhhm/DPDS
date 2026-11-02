@@ -486,11 +486,14 @@ A combined multi-interface bidirectional pair is INCONCLUSIVE with
 `SEQCHECK_DIRECTIONAL_CAPTURE_REQUIRED`: the checker has no interface filter,
 so its combined totals cannot be assigned to a single native port counter.
 Use separate directional acquisitions/configurations as independent matrix runs.
-For simultaneous bidirectional acquisition, supply sealed normalized streams
-through native (`mode=software`) input with one registered seqcheck result and
-capture pair per direction. That input mode can cover both registered ports;
-it does not change the manifest's physical/software scope. Do not copy a
-combined result into two directional registrations or split captures without
+For simultaneous bidirectional acquisition, a native binary manifest may register
+one directional capture pair per port in `verification.capture_pairs`. Point the
+pcapng run at either registered pair: the runner generates or reuses a separate
+C seqcheck result for **every** registered pair and retains them all. The sampled
+reporter validates the whole native acquisition and both directions, regardless
+of which pair was the entry point. Explicit registrations also remain supported
+through `mode=software`. Neither mode changes physical/software scope. Do not copy
+a combined result into two directional registrations or split captures without
 retaining health and identity coverage evidence.
 
 The two verification layers are:
