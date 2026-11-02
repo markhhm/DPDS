@@ -43,6 +43,8 @@ class BringupTests(unittest.TestCase):
         self.lock.write_text(json.dumps(self.versions))
         self.output = self.base / 'p1-0.json'
         self.env = {**os.environ, 'PATH': str(self.bin) + ':' + os.environ['PATH'],
+                    'DPDK_TESTPMD': str(self.bin / 'dpdk-testpmd'),
+                    'HOST_REV': '', 'CORE_REV': '',
                     'BRINGUP_SYSFS_ROOT': str(self.sys), 'VERSION_LOCK': str(self.lock),
                     'CONFIG_FILE': str(ROOT / 'config.json'), 'DUT_PCI': PCI,
                     'DUT_NODE': '0', 'EXPECTED_PCIE_GTS': '8', 'EXPECTED_PCIE_WIDTH': '8',
