@@ -13,6 +13,7 @@ from .matrix import run_matrix, EXIT
 from .probe import HEADER, decode_probe
 from .protocol import StreamError, StreamReader, StreamWriter, shape, identifier
 from .reference import strict_json, uint
+from .registration import validate_capture_deployment
 from .validate import preflight
 
 
@@ -283,6 +284,7 @@ def prepare_pair(pair_path, output):
     path = (pair_path.parent/pair['manifest']).resolve()
     manifest = strict_json(path.read_bytes())
     preflight(path)
+    validate_capture_deployment(pair,manifest)
     if manifest['identity_profile']['kind'] != 'probe':
         raise ValueError('this adapter requires the registered UDP probe identity profile')
     clock = Calibration(strict_json((path.parent/manifest['calibration_path']).read_bytes()),
