@@ -12,6 +12,39 @@ from tools.g2.protocol import StreamReader, StreamError
 
 
 class NativeBoundary(unittest.TestCase):
+    def test_physical_v2_preserves_scope_and_nic_counter_provenance(self):
+        rows = self.fixture_v2()
+        rows[0].update(capture_scope='physical', identity_policy=0)
+        for row in rows[1:-1]:
+            for item in row['items']:
+                item[16] = 1
+        resources = [dict(rows[1], kind=7, producer=4, items=[], port=port,
+                          resources=[phase,64,64,1,phase,0,0,0,0,0])
+                     for phase in (0,1) for port in (7,13)]
+        rows = [rows[0], *resources[:2], *rows[1:-1], *resources[2:], rows[-1]]
+        counts = [0]*7
+        for order, row in enumerate(rows[1:-1]):
+            counts[row['producer']] += 1
+            row.update(order=order, producer_seq=counts[row['producer']])
+        rows[-1]['producers'][4].update(attempted=4, emitted=4, high_water=4)
+        result, streams = self.normalize_v2(rows)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['scope'], 'physical')
+        self.assertFalse(result['g2_qualified'])
+        nic = [descriptor for row in streams[2] if row['kind'] == 'counter'
+               for key, descriptor in row['descriptors'].items() if key.startswith('nic_')]
+        self.assertTrue(nic)
+        self.assertTrue(all(row['source'] == 'physical-pmd' for row in nic))
+        self.assertTrue(all(row['semantics'] == 'overlapping_diagnostic' for row in nic))
+        for header in (dict(rows[0], capture_scope='software-only'),
+                       dict(rows[0], identity_policy=1)):
+            result, _ = self.normalize_v2([header, *rows[1:]])
+            self.assertFalse(result['complete'])
+        legacy = [json.loads(row) for row in self.fixture().splitlines()]
+        legacy[0]['capture_scope'] = 'physical'
+        result, _ = self.normalize('\n'.join(map(json.dumps, legacy))+'\n')
+        self.assertFalse(result['complete'])
+
     def test_v2_terminal_accepts_the_correct_stage_for_both_owners(self):
         for owner in (0,1):
             for reason in range(9):
