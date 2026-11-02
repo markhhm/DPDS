@@ -71,6 +71,7 @@ set -euo pipefail
 set -a
 . "$PRIVATE_ENV"
 set +a
+DPDS_BIN=/root/dpdk/dpds
 cd "$DPDS_SRC"
 umask 077
 mkdir -- "$OUT_DIR"
@@ -153,6 +154,8 @@ Repeat this three-section procedure with a new attempt for the other VLAN.
 
 For software CLI verification on `VALIDATION_HOST`, as `VALIDATION_USER`, use
 seven allowed CPUs and two PCAP PMDs instead of PCI allowlist arguments.
+Set `DPDS_BIN` to a development build with PCAP support for this software check.
+The deployment bundle contains i40e, null and ring PMDs.
 Retain `--in-memory --telemetry`, the explicit prefix and DPDS `-c/-o` arguments.
 Use `--no-pci --no-huge -m 256` and two `--vdev=net_pcap...` ports.
 
