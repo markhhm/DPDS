@@ -47,7 +47,7 @@ static struct {
     int fd;
     unsigned capacity, probe_port;
     enum observer_identity_policy policy;
-    bool enabled, started, complete, write_failed, per_direction, binary;
+    bool enabled, started, complete, write_failed, per_direction, binary, physical;
     _Alignas(RTE_CACHE_LINE_SIZE) struct observer_binary_writer writer;
     _Alignas(RTE_CACHE_LINE_SIZE) uint64_t intended[HNG_MAX_LINES];
 } capture;
@@ -117,6 +117,12 @@ bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_
 
 bool observer_open_binary(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
 { return open_capture(fd, policy, probe_port, capacity, per_direction, true, false); }
+
+bool observer_open_binary_physical(int fd, unsigned probe_port, unsigned capacity, bool per_direction)
+{
+    if (!open_capture(fd, OBS_ID_STAGE1, probe_port, capacity, per_direction, true, false)) return false;
+    capture.physical = true; return true;
+}
 
 bool observer_open_binary_discard(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction)
 { return open_capture(fd, policy, probe_port, capacity, per_direction, true, true); }
@@ -221,7 +227,8 @@ static void *consumer(void *unused)
         capture.policy, capture.probe_port, capture.capacity, sizeof(struct observer_record),
         capture.per_direction ? "per-direction" : "shared", capture.ports[0]);
     if (capture.port_count == 2) n += snprintf(header + n, sizeof(header) - n, ",%u", capture.ports[1]);
-    n += snprintf(header + n, sizeof(header) - n, "]}\n");
+    n += snprintf(header + n, sizeof(header) - n, capture.physical ?
+        "],\"capture_scope\":\"physical\"}\n" : "]}\n");
     if (capture.binary) {
         if (!observer_binary_text(&capture.writer, 1, header, (size_t)n)) binary_failure();
     } else output(header, (size_t)n);

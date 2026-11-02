@@ -135,6 +135,19 @@ class NativeProjectionTests(unittest.TestCase):
                 self.assertEqual(projection.port_state[0], dict(next_seq=2, arrival=200, frontier=250, ended=True))
                 self.assertTrue(all(int(v) == -1 or int(v) >= 1 for block in ordinals for values in block.values() for v in values))
 
+    def test_physical_counter_provenance_equals_legacy_adapter(self):
+        cfg,reg,header,events=fixture(reverse=True)
+        header['capture_scope']='physical'
+        text=io.StringIO();decode(io.BytesIO(encode(header,copy.deepcopy(events))),text)
+        outputs=[io.StringIO() for _ in range(3)]
+        result=NativeAdapter(io.StringIO(text.getvalue()),*outputs,run=reg['run'],lines=cfg['lines']).process()
+        self.assertTrue(result['complete']);self.assertEqual(result['scope'],'physical')
+        expected=[json.loads(row) for row in outputs[2].getvalue().splitlines()][1:-1]
+        _,_,counters,_=self.project(cfg,reg,header,events,3)
+        nic=[desc for row in counters for name,desc in row.get('descriptors',{}).items() if name.startswith('nic_')]
+        self.assertTrue(nic);self.assertTrue(all(desc['source']=='physical-pmd' for desc in nic))
+        self.assertEqual(counters,expected)
+
     def reject(self, change, reverse=False, chunk=3):
         cfg, reg, header, events = fixture(reverse)
         change(header, events)
