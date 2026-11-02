@@ -150,3 +150,10 @@ test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix',
 test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],
   env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+physical_fixture = executable('observer-physical-fixture',
+  ['dpds.c', 'core/receive.c', 'core/combined.c', 'tests/observer_physical_pmd.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
+  link_args: ['-Wl,--wrap=rte_eth_dev_info_get', '-Wl,--wrap=rte_dev_bus', '-Wl,--wrap=rte_bus_name'],
+  override_options: ['b_lto=false'], build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('observer-physical', python, args: [meson.project_source_root() / 'tests/observer_physical.py', dpds_exe, physical_fixture],
+  timeout: 30, is_parallel: false)

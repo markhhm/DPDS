@@ -58,8 +58,10 @@ struct observer_storage_health observer_storage_health(void);
 struct rte_mbuf;
 /* Setup/teardown run on the control thread; fd must be a pipe or socket. */
 bool observer_open(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
-/* Binary capture accepts an empty regular file; the consumer owns all writes. */
+/* Binary capture accepts an empty regular file; the backend owns all writes. */
 bool observer_open_binary(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
+/* Physical mode uses Stage 1 identity; the caller must validate every device. */
+bool observer_open_binary_physical(int fd, unsigned probe_port, unsigned capacity, bool per_direction);
 /* Software rate check only: /dev/null is not an evidence capture. */
 bool observer_open_binary_discard(int fd, enum observer_identity_policy policy, unsigned probe_port, unsigned capacity, bool per_direction);
 bool observer_start(void);
