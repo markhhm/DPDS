@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Synthetic captures exercise the public M5 CLI and P1-0 export contract."""
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -83,6 +84,9 @@ class M5QualifyTests(unittest.TestCase):
                 self.assertEqual(row['drift_span_ns'],0)
                 self.assertEqual(row['missing'],0)
             self.assertTrue((out/'results.csv').is_file())
+            with (out/'results.csv').open() as stream:table=list(csv.DictReader(stream))
+            self.assertEqual(len(table),2)
+            self.assertTrue(all(row['clock_uncertainty_ns']=='500' and row['missing']=='0' for row in table))
             self.assertIn('software-only',(out/'summary.txt').read_text())
             for path,data in sources.items():self.assertEqual(path.read_bytes(),data,path)
 
@@ -247,6 +251,32 @@ class M5QualifyTests(unittest.TestCase):
             out=root/'qualification';process=self.invoke(matrix,out)
             self.assertEqual(process.returncode,2,process.stderr)
             self.assertEqual(json.loads((out/'qualification.json').read_text())['status'],'INCONCLUSIVE')
+
+    def test_load_bound_uses_exact_fits_instead_of_rounded_display_offsets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root)
+            for name,spacing,sign in (('low',10000,-1),('high',1000,1)):
+                before=[100000+i*spacing for i in range(400)]
+                receiver=[time+sign*(5000+(i%3==0)) for i,time in enumerate(before)]
+                pcapng(root/name/'before.pcapng',before);pcapng(root/name/'receiver.pcapng',receiver)
+                path=root/name/'source/calibration.json';cal=json.loads(path.read_text())
+                cal['pairs'][0]['uncertainty_ns']=10000;path.write_text(json.dumps(cal))
+            out=root/'qualification';process=self.invoke(matrix,out)
+            self.assertEqual(process.returncode,1,process.stderr)
+            report=json.loads((out/'qualification.json').read_text())
+            self.assertEqual(report['clock_uncertainty_ns'],10001)
+            self.assertTrue(all(row['load_error_ns']==10001 for row in report['rows']))
+
+    def test_external_quantization_and_mapping_bounds_are_not_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root)
+            for name in ('low','high'):
+                path=root/name/'source/calibration.json';cal=json.loads(path.read_text())
+                cal['pairs'][0].update(quantization_bound_ns=5001,mapping_bound_ns=5000,uncertainty_ns=10001)
+                path.write_text(json.dumps(cal))
+            out=root/'qualification';process=self.invoke(matrix,out)
+            self.assertEqual(process.returncode,1,process.stderr)
+            self.assertEqual(json.loads((out/'qualification.json').read_text())['clock_uncertainty_ns'],10501)
 
 
 if __name__=='__main__':unittest.main()

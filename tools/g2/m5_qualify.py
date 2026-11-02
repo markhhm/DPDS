@@ -88,6 +88,7 @@ def _rows(folder,run,scope):
         drift=_ceil(abs(slope)*(state['last']-state['first']))
         row=dict(run=run,direction=port,line=line,timing_samples=n,
             offered_bps=round(Fraction(load['bits']*10**9,span)),offset_ns=round(offset),
+            offset_fraction_ns=dict(numerator=offset.numerator,denominator=offset.denominator),
             drift_ppb=float(slope*10**9),drift_span_ns=drift,max_abs_error_ns=state['max_abs'],
             external_bound_ns=state['extra'],clock_uncertainty_ns=max(state['max_abs'],drift)+state['extra'],
             missing=totals['missing'],seqcheck_anomalies=anomalies,clock_path=state['clock_path'],
@@ -147,7 +148,8 @@ def qualify(matrix_path,output,*,p1_manifest=None,manifest_out=None):
             key=(row['direction'],row['line'],json.dumps(row['clock_path'],sort_keys=True))
             groups.setdefault(key,[]).append(row)
     for group in groups.values():
-        load_error=max(row['offset_ns'] for row in group)-min(row['offset_ns'] for row in group)
+        offsets=[Fraction(row['offset_fraction_ns']['numerator'],row['offset_fraction_ns']['denominator']) for row in group]
+        load_error=_ceil(max(offsets)-min(offsets))
         covered=len({row['offered_bps'] for row in group})>=2
         for row in group:
             row['load_error_ns']=load_error
@@ -162,7 +164,7 @@ def qualify(matrix_path,output,*,p1_manifest=None,manifest_out=None):
     result=dict(schema='hng-m5-qualification-v1',scope=scope,status=status,
         physical_qualified=scope=='physical' and status=='PASS',threshold_ns=LIMIT_NS,
         clock_uncertainty_ns=bound,rows=rows,sources=sources,
-        coverage='observed loads and capture windows; raw zero-reference OWD, no fitted correction',
+        coverage='registered main timing samples; full identities via seqcheck; observed loads/windows only; no fitted correction',
         m6_report=str(destination/'matrix/summary.json'))
     _require(file_hash(path)==sources[str(path)],'M5_SOURCE_CHANGED','matrix changed during qualification')
     if deployment is not None:
