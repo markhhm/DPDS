@@ -69,12 +69,12 @@ class BringupTests(unittest.TestCase):
         path.write_text('#!/bin/sh\n' + body + '\n')
         path.chmod(0o755)
 
-    def probe(self, pci=PCI, pmd='net_ixgbe', firmware='1.2.3'):
+    def probe(self, pci=PCI, pmd='net_ixgbe', firmware='1.2.3', allowed_pci=PCI):
         # Wrong allowlist/start flags must not pass just because fixture text matches.
         text = f'DPDK 26.03.0\n********************* Infos for port 0 *********************\nDevice name: {pci}\nDriver name: {pmd}\nFirmware-version: {firmware}\nConnect to socket: 0\n'
         self.command('dpdk-testpmd',
                      'case " $* " in *" --in-memory "*) ;; *) exit 31;; esac\n'
-                     'case " $* " in *" -a ' + PCI + ' "*) ;; *) exit 32;; esac\n'
+                     'case " $* " in *" -a ' + allowed_pci + ' "*) ;; *) exit 32;; esac\n'
                      'case " $* " in *" --disable-device-start "*) ;; *) exit 33;; esac\n'
                      'case " $* " in *" --no-huge "*|*" --no-pci "*|*" --vdev"*) exit 34;; esac\n'
                      'read -r line\n[ "$line" = "show port info all" ] || exit 35\n'
@@ -117,6 +117,49 @@ class BringupTests(unittest.TestCase):
         result, doc = self.run_check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(doc['versions']['observed']['driver'], 'mlx5_core')
+
+    def test_x710_example_two_functions_node1_and_gigabyte_pages(self):
+        profile = ROOT / 'examples/bringup-x710.env'
+        self.assertTrue(profile.is_file(), 'X710 environment example is missing')
+        second = '0000:01:00.1'
+        for pci in (PCI, second):
+            self.write('bus/pci/devices/' + pci + '/class', '0x020000')
+            self.write('bus/pci/devices/' + pci + '/numa_node', '1')
+        (self.sys / 'bus/pci/devices' / second / 'driver').symlink_to(
+            self.sys / 'bus/pci/drivers/vfio-pci')
+        for cpu in self.cpus:
+            path = self.sys / f'devices/system/cpu/cpu{cpu}'
+            (path / 'node0').rename(path / 'node1')
+        pages = 'devices/system/node/node1/hugepages/hugepages-1048576kB/'
+        self.write(pages + 'nr_hugepages', '4')
+        self.write(pages + 'free_hugepages', '4')
+        self.command('findmnt', 'echo \'{"filesystems":[{"target":"/pages","fstype":"hugetlbfs","options":"rw,pagesize=1G"}]}\'')
+        self.versions.update(pmd='net_i40e')
+        self.lock.write_text(json.dumps(self.versions))
+        self.env.update(DUT_PCI_PORT0=PCI, DUT_PCI_PORT1=second, DUT_NODE='1',
+                        NODE1_CORE_SET=','.join(map(str, self.cpus)),
+                        NODE1_MEMORY_MIB='2048', HUGEPAGES_REQUIRED='2')
+        for port, pci in enumerate((PCI, second)):
+            with self.subTest(port=port):
+                self.probe(pci=pci, pmd='net_i40e', allowed_pci=pci)
+                out = self.base / f'p1-port{port}.json'
+                command = f'. "$1"; export DUT_PCI="$DUT_PCI_PORT{port}"; exec sh "$2" --out "$3"'
+                result = subprocess.run(['sh', '-eu', '-c', command, 'x710-fixture',
+                                         str(profile), str(ENTRY), str(out)], env=self.env,
+                                        text=True, capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                doc = json.loads(out.read_text())
+                self.assertEqual((doc['status'], doc['scope']), ('PASS', 'software-only'))
+                self.assertEqual(doc['versions']['observed']['pmd'], 'net_i40e')
+                self.assertEqual(doc['versions']['observed']['driver'], 'vfio-pci')
+                self.assertEqual(doc['ports'][0]['Device name'], pci)
+                self.assertEqual(doc['numa']['nic_node'], 1)
+                self.assertEqual(set(doc['numa']['cpu_nodes'].values()), {1})
+                self.assertEqual(doc['numa']['socket_mem_mib'], [0, 2048])
+                self.assertEqual(doc['numa']['hugepages']['size_kb'], 1048576)
+                self.assertEqual(doc['numa']['hugepages']['nodes'],
+                                 {'1': {'total': 4, 'free': 4, 'required': 2}})
+                self.assertIsNone(doc['clock_uncertainty_ns'])
 
     def test_missing_device_fails_without_probing(self):
         self.env['DUT_PCI'] = '0000:ff:00.0'
