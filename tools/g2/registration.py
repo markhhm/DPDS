@@ -5,7 +5,7 @@ import math
 import re
 
 from .online import Retention
-from .protocol import ROLES, boolean, digest, identifier, shape, handoff_actors
+from .protocol import ROLES, StreamError, boolean, digest, identifier, shape, handoff_actors
 from .reference import uint
 
 
@@ -22,6 +22,49 @@ def _labels(value, name):
     if len(set(values)) != len(values):
         raise ValueError(f"duplicate {name}")
     return values
+
+
+def validate_deployment(value):
+    """Require explicit operator declarations; never infer physical topology."""
+    if not isinstance(value,dict):raise ValueError('explicit deployment is required')
+    shape(value,('nic','dut_host','vlans','generator','capture'))
+    def text(item,name):
+        identifier(item,name)
+        if item!=item.strip() or not item.strip() or '${' in item:
+            raise ValueError(f'unresolved deployment {name}')
+    shape(value['nic'],('model','pmd','ports'))
+    for name in ('model','pmd'):text(value['nic'][name],'NIC '+name)
+    ports=_array(value['nic']['ports'],'DUT ports')
+    for port in ports:uint(port,'DUT port',65535)
+    if not ports or len(set(ports))!=len(ports):raise ValueError('deployment DUT ports must be distinct')
+    if value['nic']['model']=='X710' and (value['nic']['pmd']!='i40e' or len(ports)!=2):
+        raise ValueError('X710 requires i40e and two DUT ports')
+    text(value['dut_host'],'DUT host')
+    vlans=value['vlans']
+    if not isinstance(vlans,dict) or not vlans or set(vlans)-{'cable','leo'}:
+        raise ValueError('deployment VLAN families must be cable/leo')
+    if value['nic']['model']=='X710' and set(vlans)!={'cable','leo'}:
+        raise ValueError('X710 requires cable and leo trunk VLANs')
+    for vlan in vlans.values():
+        if not uint(vlan,'deployment VLAN',4094):raise ValueError('deployment VLAN must be tagged')
+    if len(set(vlans.values()))!=len(vlans):raise ValueError('deployment line families require distinct VLANs')
+    for role in ('generator','capture'):
+        row=value[role]
+        shape(row,('host','interfaces') if role=='generator' else
+              ('host','interfaces','clock_id','mapping_id','clock_source'))
+        text(row['host'],role+' host')
+        if row['host']==value['dut_host']:raise ValueError('generator/capture must be external to the DUT')
+        if not isinstance(row['interfaces'],dict) or set(row['interfaces'])!={str(port) for port in ports}:
+            raise ValueError('deployment interfaces must cover every DUT port')
+        for interface in row['interfaces'].values():text(interface,role+' interface')
+    for name in ('clock_id','mapping_id','clock_source'):text(value['capture'][name],name)
+
+
+def validate_capture_deployment(selector,manifest):
+    """Bind a capture pair or retained observation to its declared clock."""
+    deployment=manifest.get('deployment')
+    if deployment is not None and any(selector[name]!=deployment['capture'][name] for name in ('clock_id','mapping_id')):
+        raise StreamError('DEPLOYMENT_CAPTURE_MISMATCH','observed clock differs from deployment')
 
 
 @lru_cache(maxsize=11)
@@ -59,9 +102,11 @@ def _validate(manifest, config):
     shape(manifest, ("schema", "run", "condition_id", "scope", "producer_versions",
         "stage1_source_commit", "stage1_source_review", "config", "traces", "ports", "lines",
         "timing_mode", "sampling", "clocks", "windows", "required_cells", "streams", "capacity",
-        "identity_profile", "offloads", "calibration_path", "retention"), ("verification",))
+        "identity_profile", "offloads", "calibration_path", "retention"), ("verification","deployment"))
     if manifest["schema"] != "hng-g2-manifest-v1" or manifest["scope"] not in {"software-only", "physical"}:
         raise ValueError("unsupported manifest schema/scope")
+    deployment=manifest.get('deployment')
+    if manifest['scope']=='physical' or 'deployment' in manifest:validate_deployment(deployment)
     for key in ("run", "condition_id", "stage1_source_review"):
         identifier(manifest[key], key)
     if manifest["timing_mode"] not in {"stress", "calibration"}:
@@ -111,7 +156,7 @@ def _validate(manifest, config):
     expected = {line["name"]: line for line in config["lines"]}
     registered = {}
     for line in _array(manifest["lines"], "lines"):
-        shape(line, ("name", "ingress_port", "egress_port", "vlan_id", "apps"))
+        shape(line, ("name", "ingress_port", "egress_port", "vlan_id", "apps"),('family',))
         name = identifier(line["name"], "line")
         for key in ("ingress_port", "egress_port", "vlan_id"):
             uint(line[key], key, 4094 if key == "vlan_id" else 65535)
@@ -120,6 +165,15 @@ def _validate(manifest, config):
             raise ValueError("line/VLAN registration disagrees with config")
         if (line["ingress_port"], line["egress_port"]) not in pairs:
             raise ValueError("line has no registered port mapping")
+        if deployment is not None:
+            family=line.get('family')
+            if family not in deployment['vlans'] or line['vlan_id']!=deployment['vlans'][family]:
+                raise ValueError('line family/VLAN differs from deployment')
+            if expected[name]['trace'] is not None and family!='leo':
+                raise ValueError('trace line requires explicit leo family')
+            if not {line['ingress_port'],line['egress_port']}<=set(deployment['nic']['ports']):
+                raise ValueError('line ports differ from deployment')
+        elif 'family' in line:raise ValueError('line family requires deployment')
         _labels(line["apps"], "app labels")
         registered[name] = line
     if set(registered) != set(expected) or pairs != {

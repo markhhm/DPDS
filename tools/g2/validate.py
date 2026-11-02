@@ -29,6 +29,14 @@ def load_registration(path):
     calibration_path = path.parent / manifest["calibration_path"]
     raw_calibration = calibration_path.read_bytes()
     calibration = Calibration(strict_json(raw_calibration), manifest["scope"], manifest["run"])
+    if 'deployment' in manifest:
+        capture=manifest['deployment']['capture']
+        clock=calibration.clocks.get(capture['clock_id'])
+        mapping=calibration.mappings.get(capture['mapping_id'])
+        if (clock is None or clock['device_token']!=capture['clock_source'] or mapping is None
+                or mapping['raw_clock_id']!=capture['clock_id'] or any(
+                    target!=mapping['target_clock_id'] for target in manifest['clocks']['observation'].values())):
+            raise StreamError('DEPLOYMENT_CLOCK_MISMATCH','capture source/mapping differs from deployment')
     if {manifest["clocks"]["engine"], *manifest["clocks"]["observation"].values()} - set(calibration.clocks):
         raise StreamError("CALIBRATION_CLOCK_MISSING", "registered clock is absent from calibration", "INCONCLUSIVE")
     for trace in manifest["traces"]:

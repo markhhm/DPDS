@@ -40,11 +40,12 @@ def fixture(root, *, drift_ns=0, errors=(500,500), count=400):
 
 def physical_metadata(matrix):
     """Exercise physical schema logic using synthetic bytes, never hardware evidence."""
+    from tools.g2.tests.test_deployment import register
     root=matrix.parent;doc=json.loads(matrix.read_text());doc['scope']='physical'
     matrix.write_text(json.dumps(doc))
     for run in doc['runs']:
         folder=root/run['id']/'source'
-        path=folder/'manifest.json';reg=json.loads(path.read_text());reg['scope']='physical'
+        path=folder/'manifest.json';reg=json.loads(path.read_text());reg['scope']='physical';register(reg)
         path.write_text(json.dumps(reg))
         path=folder/'calibration.json';cal=json.loads(path.read_text())
         for clock in cal['clocks']:

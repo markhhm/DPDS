@@ -15,6 +15,7 @@ from .pcapng import coverage_window
 from .pcapng_arrays import CaptureArrays
 from .protocol import StreamError, shape
 from .reference import strict_json, uint
+from .registration import validate_capture_deployment
 
 
 def _require(condition,code,message):
@@ -167,6 +168,7 @@ class NativeInput:
             _require(pair['schema']=='hng-pcapng-pair-v1' and uint(pair['end_ns'],'end')>uint(pair['start_ns'],'start'),
                      'PCAPNG_PAIR','invalid capture pair schema/window')
             uint(pair['uncertainty_ns'],'uncertainty')
+            validate_capture_deployment(pair,manifest)
             mapping=clock.mappings[pair['mapping_id']]
             _require(mapping['raw_clock_id']==pair['clock_id'] and clock.clocks[pair['clock_id']]['unit']=='ns'
                 and mapping['scale_num']==mapping['scale_den'] and mapping['raw_origin']==mapping['target_origin_ns']

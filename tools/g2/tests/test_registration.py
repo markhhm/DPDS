@@ -168,6 +168,8 @@ class RegistrationTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assert_invalid(changed)
         registration["scope"] = "physical"
+        from tools.g2.tests.test_deployment import register
+        register(registration)
         registration["retention"].update(mode="full", debug_windows=[])
         registration["windows"][0]["end_ns"] = 2_000_000_001
         self.assert_invalid(registration)

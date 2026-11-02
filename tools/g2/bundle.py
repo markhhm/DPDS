@@ -11,7 +11,7 @@ from .live_custody import LiveCustody, key
 from .online import OnlineCells, ReceiveOrder
 from .protocol import StreamError, StreamReader
 from .reference import Reference, canonical
-from .registration import validate_registration
+from .registration import validate_capture_deployment, validate_registration
 from .serializer import Serialization
 from .witnesses import Witnesses
 
@@ -107,6 +107,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
     def delivered(observation):
         if observation["timestamp"] is not None:
             try:
+                validate_capture_deployment(observation["timestamp"], manifest)
                 clock.map_timestamp(observation["timestamp"], observation["receive_ns"],
                                     ("receiver", observation["egress_port"]))
             except StreamError as exc:
@@ -242,6 +243,7 @@ def build_bundle_report(config, traces, manifest, sources, calibration, retentio
                             state["before"] = ready
                             if ready["timestamp"] is not None:
                                 try:
+                                    validate_capture_deployment(ready["timestamp"], manifest)
                                     clock.map_timestamp(ready["timestamp"], ready["ingress_ts_ns"],
                                                         ("before", ready["ingress_port"]))
                                 except StreamError as exc:

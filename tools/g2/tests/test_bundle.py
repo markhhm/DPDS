@@ -26,11 +26,16 @@ except ImportError:
 
 
 def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
-            length=60, flow_id="f", selected_late=None, trace=None):
+            length=60, flow_id="f", selected_late=None, trace=None, line_name=None, vlan_id=100):
     cfg, reg, cal = config(), manifest(), document()
     reg["run"] = cal["run"] = run
     # Extra lines share the first line's ingress and egress port and differ by VLAN.
     names, vlans = ["cable", "leo"][:lines], {"cable": 100, "leo": 200}
+    if lines==1:
+        names=[line_name or 'cable'];vlans={names[0]:vlan_id}
+        cfg['lines'][0].update(name=names[0],vlan_id=vlan_id)
+        reg['lines'][0].update(name=names[0],vlan_id=vlan_id)
+        reg['required_cells'][0]['line']=names[0]
     for name in names[1:]:
         cfg["lines"].append(dict(copy.deepcopy(cfg["lines"][0]), name=name, vlan_id=vlans[name]))
         reg["lines"].append(dict(reg["lines"][0], name=name, vlan_id=vlans[name]))
@@ -45,8 +50,8 @@ def fixture(root, count=400, mutate=None, mode="stream", lines=1, run="demo",
         (root/'trace.json').write_bytes(raw_trace)
         cfg['lines'][0]['trace'] = dict(path='trace.json', sha256=hashlib.sha256(raw_trace).hexdigest())
         cfg['lines'][0]['model']['t_ns'] = 0
-        reg['traces'] = [dict(line='cable', **cfg['lines'][0]['trace'], provenance='synthetic')]
-        traces['cable'] = trace
+        reg['traces'] = [dict(line=names[0], **cfg['lines'][0]['trace'], provenance='synthetic')]
+        traces[names[0]] = trace
     reg["sampling"]["oversample_apps"] = []
     for cell in reg["required_cells"]:
         cell.update(mask_bits=0, planned_survivors=count//lines)

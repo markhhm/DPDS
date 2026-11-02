@@ -17,15 +17,15 @@ from tools.g2.tests.test_bundle import fixture
 FLOW = 'c0000201:c6336402:1111:9000'
 
 
-def frame(sequence, ip_options=0):
+def frame(sequence, ip_options=0, vlan_id=100):
     payload = encode_probe(sequence, False)[:100-ip_options]
     ip = bytes([0x40+(20+ip_options)//4])+bytes.fromhex('0000800000000040110000c0000201c6336402')+bytes(ip_options)
     udp = struct.pack('!HHHH', 1111, 9000, 8+len(payload), 0)
-    return bytes.fromhex('ffffffffffff020000000001810000640800') + ip + udp + payload
+    return bytes.fromhex('ffffffffffff0200000000018100')+struct.pack('!H',vlan_id)+bytes.fromhex('0800')+ip+udp+payload
 
 
 def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution=9,
-           start=0, end=10**9, offset=0, snaplen=65535, caplen=None, wirelen=None, ip_options=0):
+           start=0, end=10**9, offset=0, snaplen=65535, caplen=None, wirelen=None, ip_options=0, vlan_id=100):
     def block(kind, body):
         size = len(body)+12
         return struct.pack(endian+'II', kind, size)+body+struct.pack(endian+'I', size)
@@ -37,7 +37,7 @@ def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution
     data += block(1, struct.pack(endian+'HHI', 1, 0, snaplen)+options([
         (9, bytes([resolution])),(14,struct.pack(endian+'q',offset))]))
     for seq, time in enumerate(times):
-        packet = frame(seq, ip_options)
+        packet = frame(seq, ip_options, vlan_id)
         original_length = len(packet) if wirelen is None else wirelen
         packet = packet[:caplen]
         body = struct.pack(endian+'IIIII', 0, time>>32, time & 0xffffffff, len(packet), original_length)
@@ -51,9 +51,10 @@ def pcapng(path, times, *, endian='<', drop=0, os_drop=0, epb_drop=0, resolution
     path.write_bytes(data)
 
 
-def setup(root, endian='<', run='demo'):
+def setup(root, endian='<', run='demo', *, trace=None, line_name=None, vlan_id=100):
     source=root/'source'; source.mkdir()
-    _, registration, sources, calibration=fixture(source, length=146, flow_id=FLOW, selected_late=0,run=run)
+    _, registration, sources, calibration=fixture(source, length=146, flow_id=FLOW, selected_late=0,run=run,
+                                                trace=trace,line_name=line_name,vlan_id=vlan_id)
     calibration['clocks'].append(dict(clock_id='capture',kind='fake',unit='ns',width_bits=64,
                                      device_token='synthetic-capture',mode='synthetic'))
     calibration['mappings']=[dict(mapping_id='ns',raw_clock_id='capture',target_clock_id='obs',
@@ -63,8 +64,8 @@ def setup(root, endian='<', run='demo'):
     calibration['pairs'][0].update(ingress_clock_id='capture',egress_clock_id='capture',offset_ns=0)
     (source/'calibration.json').write_text(json.dumps(calibration))
     expected=[row for row in StreamReader(sources['expected'],role='expected') if row['kind']=='expected']
-    pcapng(root/'before.pcapng',[row['arrival_ns'] for row in expected],endian=endian)
-    pcapng(root/'receiver.pcapng',[row['release_ns']+3 for row in expected],endian=endian)
+    pcapng(root/'before.pcapng',[row['arrival_ns'] for row in expected],endian=endian,vlan_id=vlan_id)
+    pcapng(root/'receiver.pcapng',[row['release_ns']+3 for row in expected],endian=endian,vlan_id=vlan_id)
     pair=dict(schema='hng-pcapng-pair-v1',manifest='source/manifest.json',clock_id='capture',mapping_id='ns',
         uncertainty_ns=0,start_ns=0,end_ns=10**9,
         before=dict(path='before.pcapng',interfaces={'0':0}),
