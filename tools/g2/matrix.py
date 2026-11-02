@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Evaluate registered M6 runs with the existing G2 reporter."""
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -268,7 +269,8 @@ def report_one(manifest_path, output, run_id, scope, mode="software", expected_d
     return EXIT[result["status"]]
 
 
-def run_matrix(matrix_path, output):
+def read_matrix(matrix_path):
+    """Check registration schema, IDs and resolved paths; never open captures."""
     path = Path(matrix_path)
     matrix = strict_json(path.read_bytes())
     shape(matrix, ("schema", "scope", "plan", "runs"), ("mode", "workers"))
@@ -295,6 +297,8 @@ def run_matrix(matrix_path, output):
             raise ValueError("run ID must be a safe directory name")
         if not isinstance(run["manifest"], str) or not run["manifest"]:
             raise ValueError("run manifest must be a path")
+        if "${" in run["manifest"] or "\x00" in run["manifest"]:
+            raise ValueError("run manifest path must be bound and contain no NUL")
         manifest = (path.parent / run["manifest"]).resolve()
         if run["id"] in ids or manifest in manifests:
             raise ValueError("duplicate run ID or manifest evidence")
@@ -303,6 +307,14 @@ def run_matrix(matrix_path, output):
             raise ValueError("run ID collides with a generated output name")
         names.update(generated)
         ids.add(run["id"]); manifests.add(manifest)
+    return matrix
+
+
+def run_matrix(matrix_path, output):
+    path = Path(matrix_path)
+    matrix = read_matrix(path)
+    mode, workers = matrix.get("mode", "software"), matrix.get("workers", 1)
+    expected_deployment = matrix["plan"].get("deployment")
     destination = Path(output)
     # shortcut: one writer per output directory; add locking if concurrent resumes are required.
     destination.mkdir(parents=True, exist_ok=True)
@@ -358,10 +370,20 @@ def run_matrix(matrix_path, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("matrix")
-    parser.add_argument("--out", required=True, help="new or resumable output directory")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--out", help="new or resumable output directory")
+    action.add_argument("--preflight", action="store_true", help="check registration only; do not read captures or report")
     args = parser.parse_args()
     try:
-        result = run_matrix(args.matrix, args.out)
+        if args.preflight:
+            matrix = read_matrix(args.matrix)
+            result = dict(schema="hng-m6-preflight-v1", scope="registration-only", status="PASS",
+                registered_scope=matrix["scope"], g2_qualified=False,
+                run_count=len(matrix["runs"]), path_count=len(matrix["runs"]),
+                families=dict(Counter(run.get("family", "unclassified") for run in matrix["runs"])),
+                unavailable=["capture_files", "native_manifests", "hardware_qualification"])
+        else:
+            result = run_matrix(args.matrix, args.out)
     except (ValueError, KeyError, TypeError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2

@@ -212,12 +212,14 @@ No X710 hardware result is claimed.
 ## X710 M6: cable and LEO on separate VLANs
 
 [examples/m6-x710.json](../examples/m6-x710.json) preserves every condition,
-repeat, exposure and sampling setting of `m6-short.json`. It selects physical
+sampling rule and approved repeat policy of G-short. It expands the inventory
+below and selects physical
 pcapng input and registers an X710 with `i40e`, DUT ports 0 and 1, and distinct
-`${VLAN_CABLE}` / `${VLAN_LEO}` trunk VLANs. Cable and LEO trace lines share
+710 (cable) / 711 (LEO) trunk VLANs. Cable and LEO lines share
 the two DUT ports; each packet carries its line's single 802.1Q tag. The three
-run entries remain representatives; expand them to the complete registered
-matrix before measurement.
+entries in `m6-short.json` remain representatives; `m6-x710.json` contains the
+complete expanded registration. Synthetic two-point LEO boundary conditions
+use VLAN 711 even when they do not load a trace profile.
 
 Use the external topology described above for both VLANs: an external generator
 and receiver, plus ingress and receiver observation on an external capture
@@ -228,8 +230,8 @@ template variables. Interface keys `"0"` and `"1"` identify the corresponding
 DUT port's external feed, not a capture-device port number.
 
 Copy the example to `M6_MATRIX`. Replace **all** `${...}` placeholders before
-running it. In particular, replace VLAN placeholders with JSON **integers**
-from 1 through 4094; a quoted numeric string is invalid. Resolve capture paths
+running it. The two registered VLANs are already JSON **integers**; do not
+replace them with quoted numeric strings. Resolve capture paths
 relative to that matrix, or use private absolute paths. The runner does not
 expand variables or configure the switch, interfaces, generator or clocks.
 
@@ -283,6 +285,75 @@ self-loop alone does not satisfy this check. This preparation does not execute
 hardware or establish physical acceptance; an eventual NIC/PMD change requires
 clock and topology qualification again.
 
+### Complete G-short inventory and acquisition budget
+
+The 72 main and 288 boundary conditions include the 60 trace conditions;
+the trace count is **not** an additional 60. Main is M-CA/M-CB fixed cable
+(36 conditions) plus M-LA/M-LB single-LEO trace (36). Boundary is E0/E1/E2/E3,
+E-mid and E-CB fixed (264) plus E-pair cable/LEO trace (24).
+Fixed main repeats three times, fixed boundary once, and every trace condition
+uses the existing two repeats and registered episode counts from
+[m6-trace-conditions.json](../examples/m6-trace-conditions.json). The source
+registration hash, four window hashes and per-direction profile selections are
+retained. Natural profiles remain external; no trace conversion is run here.
+
+Each both-directions acquisition yields two separate directional capture-pair
+registrations, as required by the current reader and seqcheck. Their
+`extensions.m6.acquisition_id` is shared; their IDs and pair paths are distinct.
+Capture both directions concurrently, with common start/stop, rather than
+turning this condition into two isolated runs. Register one native manifest
+whose `run` equals each directional run ID. Paired cable/LEO traffic remains
+two VLANs in that direction's capture pair. This file registers future evidence;
+it does not acquire or split captures.
+
+| Inventory | Conditions | Acquisitions | Directional reporter inputs | Acquisition time estimate |
+| --- | ---: | ---: | ---: | ---: |
+| Fixed main | 36 | 108 | 144 | 1 h 08 min 24 s |
+| Fixed boundary | 264 | 264 | 352 | 3 h 27 min 30 s |
+| Trace, including all registered episodes | 60 | 1,008 | 1,464 | 4 h 45 min 36 s |
+| Total | 360 | 1,380 | 1,960 | 9 h 21 min 30 s |
+
+Fixed observation uses the G rule, with surviving rate `min(C,R)` per line:
+`max(30, ceil(431*1024*8*1542/(surviving_bps*p_late)))` seconds.
+Empty ordinary/late strata at p=0 or p=1 use main. Of the 300 fixed conditions,
+222 observe for 30 s and 78 for 61 s (the p=.01 cells at 9G); each acquisition
+adds 2 s warmup, 1 s drain and 5 s reset. This applies the 30–70 s rule directly,
+without the conditional 1/256 shortening. Both directions count once in elapsed
+time. Trace episodes retain 2+9+1+5=17 s; repetitions/episodes never pool gates.
+
+Adding the planning reserve of 4 h for setup, recalibration and reruns gives
+**13 h 21 min 30 s**. A conservative alternative with every fixed acquisition
+at 70 s gives 12 h 49 min 12 s before reserve, or **16 h 49 min 12 s** with it.
+These are estimates, not measured runtimes. Offline reporting, capture disk
+throughput, equipment availability and hardware prerequisites are not included.
+Measured sample counts and unchanged reporter gates remain authoritative.
+
+Regenerate the committed inventory without reading profiles or captures:
+
+```sh
+python3 -m tools.g2.expand_m6_x710 --out examples/m6-x710.json
+```
+
+After binding private deployment, capture-root and trace-profile-root variables,
+run a registration-only check with the **same reader** used by reporting:
+
+```sh
+python3 -m tools.g2.matrix "$M6_MATRIX" --preflight
+```
+
+It validates matrix schema, deployment structure, all 1,960 safe unique IDs and
+resolved pair paths. It neither writes output nor opens capture/native manifest
+files nor starts reporter workers. Future evidence paths may be absent.
+The result explicitly says `scope=registration-only`, `g2_qualified=false`,
+and lists capture files, native manifests and hardware qualification as
+unavailable. Unbound deployment values or capture paths are rejected.
+The full-inventory tests bind synthetic identifiers and preflight all future
+paths, without capture acquisition:
+
+```sh
+python3 -m unittest tools.g2.tests.test_m6_x710_full
+```
+
 ## Hardware-day runbook
 
 Complete [BRING-UP](BRING-UP.md) first. Unresolved hardware decisions block this procedure.
@@ -303,7 +374,7 @@ On failure, stop traffic, drain and restore the allocated resources per [Handoff
 |---|---|---|
 | 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.m5_qualify "$M5_MATRIX" --out "$M5_REPORT_DIR" --p1-manifest "$P1_0_MANIFEST" --manifest-out "$P1_0_QUALIFIED"` | Register zero-delay captures at low and target loads. Keep identities/counters and `CALIBRATION_FILE`. Require physical M5 PASS, zero bypass missing identities and uncertainty ≤10,000 ns; the exported P1-0 environment status must also be PASS. Otherwise stop here. |
 | 2. Observer cost pilot | `python3 -m tools.g2.validate "$PILOT_MANIFEST"`<br>`OFFERED_BPS=10000000000 sh -c "$PILOT_CAPTURE_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$PILOT_MATRIX" --out "$PILOT_REPORT_DIR"` | Register the pilot with required-cell `mask_bits=8`. Require preflight PASS before capture. Require zero observer drops, positive queue capacity, high-water below capacity and no `observer_cost` warnings or missing evidence. Record `OBSERVER_COST_REPORT`, `EVIDENCE_COMMIT` and `RUN_ID` per the [cost gate](BRING-UP.md#observer-cost-gate-before-m6). On failure, retain the previous plan and stop for review. |
-| 3. Register and capture M6 | `cp -n examples/m6-x710.json "$M6_MATRIX"`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Bind the private deployment variables and copy `plan.deployment` to every native manifest; declare each line family. Register every repeat/episode and its capture-pair path; expand the three example entries. After step 2 passes, register fixed cells at 1/256 and 30 s exposure. Align fixed-cell plan metadata. Keep the v1 header, sample gates and trace plan. Require preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
+| 3. Register and capture M6 | `cp -n examples/m6-x710.json "$M6_MATRIX"`<br>`python3 -m tools.g2.matrix "$M6_MATRIX" --preflight`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Bind private variables, register the expanded repeat/episode pair paths and copy `plan.deployment` to every native manifest; declare each line family. Preserve simultaneous-direction acquisition groups. After step 2 passes, register fixed cells at 1/256 and 30 s exposure and recalculate the budget. Keep the v1 header, sample gates and trace plan. Require registration-only PASS and preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
 | 4. Release the testbed | `sh -c "$POST_BYPASS_COMMAND"`<br>`sh -c "$RESTORE_COMMAND"` | Require the post-run bypass check, drain and restoration records. On failure, record the reason and stop here. Preserve source directories for adapter symlinks. |
 | 5. Report offline | `prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" --out "$REPORT_DIR"` | Run after capture, away from the testbed. Expect per-run `report.json`, `results.csv`, `verdict.json` and final `summary.json`. On interruption, stop controller and worker, then repeat this exact command/directory. [Resume](#resume-an-interrupted-matrix) skips verified sealed reports and preserves partial attempts. It resumes reports, not capture. |
 | 6. Read the aggregate | `cat "$REPORT_DIR/summary.json"` | Read `status` and `measurement_status`. Require all registered run IDs, repeats and required rows. Step 5 reporter exits: 0 all PASS, 1 FAIL, 2 invalid/inconclusive evidence. The `cat` exit is not a verdict. Keep verdicts and stderr logs. If the summary is absent, stop here and resume step 5. |
