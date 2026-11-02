@@ -28,12 +28,12 @@ def _ceil(value):return -(-value.numerator//value.denominator)
 def _rows(folder,run,scope):
     report=strict_json((folder/'report.json').read_bytes())
     _require(report.get('verification_mode')=='sampled','M5_REPORT_INCOMPLETE','sampled capture report is unavailable')
-    _require(all(row['complete'] for row in report['stream_integrity']),
+    _require(report['stream_integrity'] and all(row['complete'] for row in report['stream_integrity']),
              'M5_STREAM_INCOMPLETE','an input stream is incomplete')
     # M5 measures clocks and bypass; the separate M6 observer-cost gate is unchanged.
     unexpected=[reason for reason in report['reason_codes'] if not reason.startswith('observer_cost_')
-                and not reason.startswith('seqcheck_') and reason not in ('missing_sample_receiver','sample_missing_delivery')]
-    _require(not unexpected,'M5_REPORT_INCOMPLETE','M6 input checks failed: '+','.join(unexpected))
+                and reason not in ('seqcheck_missing_mismatch','seqcheck_order_violation','seqcheck_delay_storage_drop',
+                                   'missing_sample_receiver','sample_missing_delivery')]
     root=folder/'capture/bundle';manifest=strict_json((root/'manifest.json').read_bytes())
     calibration=Calibration(strict_json((root/manifest['calibration_path']).read_bytes()),scope,run)
     loads={}
@@ -57,7 +57,8 @@ def _rows(folder,run,scope):
             pair=calibration.pair(before,receiver)
             key=(str(expected['ingress_port']),expected['line'])
             state=states.setdefault(key,dict(n=0,first=before['ingress_ts_ns'],last=0,
-                sx=0,sy=0,sxx=0,sxy=0,max_abs=0,extra=0))
+                sx=0,sy=0,sxx=0,sxy=0,max_abs=0,extra=0,
+                clock_path=calibration.clocks[before['timestamp']['clock_id']]))
             x=before['ingress_ts_ns']-state['first'];y=pair['raw_owd_ns']
             state['n']+=1;state['last']=max(state['last'],before['ingress_ts_ns'])
             state['sx']+=x;state['sy']+=y;state['sxx']+=x*x;state['sxy']+=x*y
@@ -65,15 +66,23 @@ def _rows(folder,run,scope):
             bound=calibration.pairs[pair['pair_id']]
             state['extra']=max(state['extra'],bound['quantization_bound_ns']+bound['mapping_bound_ns'])
     rows=[]
-    for port,line in {(str(row['ingress_port']),row['name']) for row in manifest['lines']}:
+    for port,line in sorted({(str(row['ingress_port']),row['name']) for row in manifest['lines']}):
         check=report['seqcheck'][port];totals=check['totals']
-        _require(totals is not None and all(source['health']['complete'] and source['health']['capture_drops']==0
+        _require(totals is not None and check['order']['status'] in ('PASS','FAIL') and
+                 all(source['health']['complete'] and source['health']['capture_drops']==0
                  for source in check['inputs'].values()),'M5_CAPTURE_INCOMPLETE','full capture comparison is incomplete')
         load=loads.get((port,line),{});state=states.get((port,line),{})
         n=state.get('n',0);span=load.get('last',0)-load.get('first',0)
         denominator=n*state.get('sxx',0)-state.get('sx',0)**2
-        _require(n>=MIN_SAMPLES and denominator>0 and span>0,'M5_TIMING_COVERAGE',
-                 'each line needs 368 paired samples and a nonzero time span')
+        anomalies=sum(totals[k] for k in ('ordinary_reorder','missing','duplicate_ingress',
+            'duplicate_receiver','unexpected','flag_mismatch'))
+        if unexpected or n<MIN_SAMPLES or denominator<=0 or span<=0:
+            reasons=['M5_REPORT_INCOMPLETE' if unexpected else 'M5_TIMING_COVERAGE']
+            if anomalies:reasons.append('M5_BYPASS_ANOMALY')
+            rows.append(dict(run=run,direction=port,line=line,timing_samples=n,missing=totals['missing'],
+                seqcheck_anomalies=anomalies,status='FAIL' if anomalies else 'INCONCLUSIVE',
+                reason_codes=reasons,clock_uncertainty_ns=None))
+            continue
         slope=Fraction(n*state['sxy']-state['sx']*state['sy'],denominator)
         offset=Fraction(state['sy'],n)-slope*Fraction(state['sx'],n)
         drift=_ceil(abs(slope)*(state['last']-state['first']))
@@ -81,8 +90,7 @@ def _rows(folder,run,scope):
             offered_bps=round(Fraction(load['bits']*10**9,span)),offset_ns=round(offset),
             drift_ppb=float(slope*10**9),drift_span_ns=drift,max_abs_error_ns=state['max_abs'],
             external_bound_ns=state['extra'],clock_uncertainty_ns=max(state['max_abs'],drift)+state['extra'],
-            missing=totals['missing'],seqcheck_anomalies=sum(totals[k] for k in
-                ('ordinary_reorder','missing','duplicate_ingress','duplicate_receiver','unexpected','flag_mismatch')),
+            missing=totals['missing'],seqcheck_anomalies=anomalies,clock_path=state['clock_path'],
             first_ns=state['first'],last_ns=state['last'])
         rows.append(row)
     return rows
@@ -121,7 +129,9 @@ def qualify(matrix_path,output):
                              reason=str(error),clock_uncertainty_ns=None))
     groups={}
     for row in rows:
-        if 'direction' in row:groups.setdefault((row['direction'],row['line']),[]).append(row)
+        if row['clock_uncertainty_ns'] is not None:
+            key=(row['direction'],row['line'],json.dumps(row['clock_path'],sort_keys=True))
+            groups.setdefault(key,[]).append(row)
     for group in groups.values():
         load_error=max(row['offset_ns'] for row in group)-min(row['offset_ns'] for row in group)
         covered=len({row['offered_bps'] for row in group})>=2

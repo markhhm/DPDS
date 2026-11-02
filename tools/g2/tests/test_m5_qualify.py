@@ -73,5 +73,29 @@ class M5QualifyTests(unittest.TestCase):
             self.assertTrue(all(row['drift_span_ns']>=49999 for row in report['rows']))
             self.assertFalse(report['physical_qualified'])
 
+    def test_real_bypass_loss_fails_even_when_too_few_timing_pairs_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root)
+            pcapng(root/'high/receiver.pcapng',[100+i*1000+500 for i in range(360)])
+            out=root/'qualification';process=self.invoke(matrix,out)
+            self.assertEqual(process.returncode,1,process.stderr)
+            report=json.loads((out/'qualification.json').read_text())
+            self.assertEqual(report['status'],'FAIL')
+            high=next(row for row in report['rows'] if row['run']=='high')
+            self.assertEqual(high['missing'],40)
+            self.assertIn('M5_BYPASS_ANOMALY',high['reason_codes'])
+
+    def test_loads_on_different_observation_devices_do_not_qualify_either_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root)
+            path=root/'high/source/calibration.json';cal=json.loads(path.read_text())
+            next(clock for clock in cal['clocks'] if clock['clock_id']=='capture')['device_token']='other-synthetic-observer'
+            path.write_text(json.dumps(cal))
+            out=root/'qualification';process=self.invoke(matrix,out)
+            self.assertEqual(process.returncode,2,process.stderr)
+            report=json.loads((out/'qualification.json').read_text())
+            self.assertEqual(report['status'],'INCONCLUSIVE')
+            self.assertTrue(all('M5_LOAD_COVERAGE' in row['reason_codes'] for row in report['rows']))
+
 
 if __name__=='__main__':unittest.main()
