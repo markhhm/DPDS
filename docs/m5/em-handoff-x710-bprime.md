@@ -20,7 +20,7 @@ Actual host names, accounts, addresses, device IDs and paths belong in private i
 | `VLAN_CABLE`, `VLAN_LEO`, `ACTIVE_VLAN` | Approved trunk tags, distinct and retained. Select one tag per run |
 | `DUT_NODE`, `NODE1_CORE_SET`, `CORES`, `MAIN_CORE` | Approved node1 ID, allowed CPUs, seven distinct node1 CPU IDs and their main CPU |
 | `HUGEDIR`, `LOAD_SOCKET_MEM`, `STOP_TIMEOUT_S`, `DRAIN_WAIT_S` | Verified 1 GiB hugetlbfs, EAL MiB vector with zero on other nodes, registered stop/drain bounds |
-| `DPDK_RUNTIME_ROOT`, `TELEMETRY_CLIENT` | Private runtime directory and installed `dpdk-telemetry.py` |
+| `DEPLOY_BUNDLE`, `DPDK_RUNTIME_ROOT`, `TELEMETRY_CLIENT` | Local deployment bundle, private runtime directory and installed `dpdk-telemetry.py` |
 | `TREX_CONSOLE`, `GEN_SERVER`, `GEN_WORKDIR`, `GEN_PORTS`, `GEN_STL_PROFILE` | Approved STL console/server, working directory, two reserved generator ports and prepared mixed-frame profile |
 | `GEN_CONSOLE_UNIT` | Unique system-manager unit for the generator console |
 
@@ -55,6 +55,18 @@ conditions. C=9G is the highest stress C below the 10G offer. `p=1` keeps every
 accepted packet through the full 462 ms delay. The X mix also exercises small
 packets. A non-stress L0 envelope can be larger, but its offer is only 9G.
 This is fixed-delay pollution evidence on each tag, not a trace-fidelity result.
+
+Before the window, set `DEPLOY_BUNDLE` to the approved local copy of the same
+deployment bundle as the static testpmd.
+It provides the upstream `dpdk-telemetry.py` client and a `dpds/` subdirectory
+with `dpds`, `BUILD.md` and `SHA256SUMS`. Verify the parent and `dpds/` checksum
+manifests separately. Install `dpds/dpds` as `/root/dpdk/dpds` and set
+`TELEMETRY_CLIENT` to the supplied client. Neither tool needs a DPDK installation
+on the DUT; the client uses Python 3's standard library.
+
+The DPDS binary is built natively on Debian 13 / glibc 2.41, with
+`-Dplatform=generic` and static DPDK, Core and NUMA libraries. Only glibc remains
+dynamic. Retain its build record and checksum with the run artifacts.
 
 Prepare the approved private `CONFIG_FILE` with this mapping and capacity.
 Retain its SHA-256 and the expanded registration. Size both ingress pools and
@@ -186,6 +198,28 @@ For live port statistics, read the running DPDS process's
 its unique file prefix. `/ethdev/stats,0` and `,1` expose cumulative NIC packets,
 bytes, errors, missed packets and RX allocation failures. Confirm the socket
 belongs to the recorded `MainPID`, and that `/ethdev/list` is `[0,1]`.
+
+`--in-memory` does not disable telemetry. This procedure sets
+`RUNTIME_DIRECTORY=$DPDK_RUNTIME_ROOT` for both DPDS and its monitor, so the
+socket is `$DPDK_RUNTIME_ROOT/dpdk/$FILE_PREFIX/dpdk_telemetry.v2`.
+Check that exact socket and use the same environment and prefix for the client:
+
+```sh
+# DUT_HOST / root / system manager. The DPDS process must already be running.
+TELEMETRY_SOCKET="$DPDK_RUNTIME_ROOT/dpdk/$FILE_PREFIX/dpdk_telemetry.v2"
+test -S "$TELEMETRY_SOCKET"
+RUNTIME_DIRECTORY="$DPDK_RUNTIME_ROOT" python3 "$TELEMETRY_CLIENT" -f "$FILE_PREFIX"
+# At the client prompt: /ethdev/list, /ethdev/stats,0, /ethdev/stats,1, then quit.
+# Enter each command on its own line.
+```
+
+Without `RUNTIME_DIRECTORY`, root defaults to `/var/run/dpdk/$FILE_PREFIX/`;
+other users use `${XDG_RUNTIME_DIR:-/tmp}/dpdk/$FILE_PREFIX/`.
+Do not use those defaults to locate this procedure's explicitly selected socket.
+
+The deployment binary passed separate null and ring software smokes with
+`--in-memory --telemetry`: both ports' `/ethdev/stats` were readable, followed
+by clean shutdown/drain. These were zero-packet checks, not physical qualification.
 
 Use a short runtime path and prefix. The complete Linux socket path must fit within 107 bytes.
 Missing commands, unsupported counters, resets or missing coverage do not pass.
