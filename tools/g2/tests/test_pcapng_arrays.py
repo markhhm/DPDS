@@ -69,13 +69,31 @@ class CaptureArraysTests(unittest.TestCase):
         from tools.g2.pcapng_arrays import _epb_run
         for endian in ('<','>'):
             for fault in ('metadata','length','trailer'):
-                with self.subTest(endian=endian,fault=fault):
-                    blocks=bytearray(b''.join(struct.pack(endian+'IIIII',6,20,0,0,20) for _ in range(5)))
-                    position=3*20+dict(metadata=0,length=4,trailer=16)[fault]
-                    struct.pack_into(endian+'I',blocks,position,dict(metadata=5,length=24,trailer=16)[fault])
-                    data=np.frombuffer(blocks,dtype=np.uint8)
-                    self.assertEqual(_epb_run(data,0,20,endian,5),3)
-                    self.assertEqual(_epb_run(data,0,20,endian,2),2)
+                for prefix in (0,3,17,127):
+                    with self.subTest(endian=endian,fault=fault,prefix=prefix):
+                        blocks=bytearray(struct.pack(endian+'IIIII',6,20,0,0,20)*256)
+                        position=prefix*20+dict(metadata=0,length=4,trailer=16)[fault]
+                        struct.pack_into(endian+'I',blocks,position,dict(metadata=5,length=24,trailer=16)[fault])
+                        data=np.frombuffer(blocks,dtype=np.uint8)
+                        self.assertEqual(_epb_run(data,0,20,endian,256),prefix)
+                        self.assertEqual(_epb_run(data,0,20,endian,2),min(2,prefix))
+
+    def test_epb_scan_work_depends_on_matching_prefix_not_unrelated_tail(self):
+        from tools.g2.pcapng_arrays import _epb_run
+        flatnonzero=np.flatnonzero
+        for endian in ('<','>'):
+            for prefix in (3,97):
+                with self.subTest(endian=endian,prefix=prefix):
+                    blocks=bytearray(struct.pack(endian+'IIIII',6,20,0,0,20)*32768)
+                    struct.pack_into(endian+'I',blocks,prefix*20,5)
+                    examined=[]
+                    def inspect(mask):
+                        examined.append(mask.size)
+                        return flatnonzero(mask)
+                    with patch('tools.g2.pcapng_arrays.np.flatnonzero',side_effect=inspect):
+                        self.assertEqual(_epb_run(np.frombuffer(blocks,dtype=np.uint8),0,20,endian,32768),prefix)
+                    # A short mixed-size prefix must not repeatedly scan the large remaining buffer.
+                    self.assertLessEqual(sum(examined),8*(prefix+1))
 
     def test_variable_blocks_and_embedded_metadata_match_streaming_reader(self):
         for endian in ('<','>'):

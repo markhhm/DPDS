@@ -43,10 +43,26 @@ def _words(data, positions, dtype):
 
 def _epb_run(data, cursor, size, order, limit):
     count = min((len(data)-cursor)//size,limit)
-    headers = np.ndarray((count,2),dtype=order+'u4',buffer=data,offset=cursor,strides=(size,4))
-    trailers = np.ndarray((count,),dtype=order+'u4',buffer=data,offset=cursor+size-4,strides=(size,))
-    mismatches = np.flatnonzero((headers[:,0] != 6) | (headers[:,1] != size) | (trailers != size))
-    return int(mismatches[0]) if len(mismatches) else count
+    # Mixed snap lengths usually break after one or two blocks. Inspect that
+    # prefix directly, then grow vector scans with the matching run rather than
+    # rescanning the entire remaining chunk for every short run.
+    checked = min(count,4)
+    for index in range(checked):
+        position = cursor+index*size
+        if (struct.unpack_from(order+'II',data,position) != (6,size)
+                or struct.unpack_from(order+'I',data,position+size-4)[0] != size):
+            return index
+    width = 32
+    while checked < count:
+        length = min(width,count-checked)
+        position = cursor+checked*size
+        headers = np.ndarray((length,2),dtype=order+'u4',buffer=data,offset=position,strides=(size,4))
+        trailers = np.ndarray((length,),dtype=order+'u4',buffer=data,offset=position+size-4,strides=(size,))
+        mismatches = np.flatnonzero((headers[:,0] != 6) | (headers[:,1] != size) | (trailers != size))
+        if len(mismatches): return checked+int(mismatches[0])
+        checked += length
+        width *= 2
+    return count
 
 
 class CaptureArrays:
