@@ -241,7 +241,7 @@ each manifest without changing its fields:
 | --- | --- |
 | `nic` | `model`, `pmd`, distinct DUT `ports`; X710 requires `i40e` and two ports. |
 | `dut_host` | Private DUT identifier; generator and capture must be external to it. |
-| `vlans` | Family-to-VLAN mapping; cable and LEO values must differ. |
+| `vlans` | Family-to-VLAN mapping; X710 requires both cable and LEO with distinct values, including in single-family runs. |
 | `generator` | External `host`, plus `interfaces` keyed by each DUT port. |
 | `capture` | External `host`, `interfaces`, `clock_id`, `mapping_id`, `clock_source`. |
 
@@ -254,7 +254,8 @@ receive defaults. Unmarked software-only legacy fixtures remain supported.
 
 `capture.clock_source` must equal the calibration clock's `device_token`.
 The registered mapping must map that clock into the observation domain.
-Each capture pair must select exactly the declared clock and mapping. Merely
+Each capture pair and each retained normalized observation must select exactly
+the declared clock and mapping. Merely
 renaming a pair to another calibrated clock is invalid. The matrix worker
 compares its expected deployment with the measured manifest before and after
 conversion; missing or changed deployment is INVALID. Resume checks also

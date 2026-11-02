@@ -43,6 +43,8 @@ def validate_deployment(value):
     vlans=value['vlans']
     if not isinstance(vlans,dict) or not vlans or set(vlans)-{'cable','leo'}:
         raise ValueError('deployment VLAN families must be cable/leo')
+    if value['nic']['model']=='X710' and set(vlans)!={'cable','leo'}:
+        raise ValueError('X710 requires cable and leo trunk VLANs')
     for vlan in vlans.values():
         if not uint(vlan,'deployment VLAN',4094):raise ValueError('deployment VLAN must be tagged')
     if len(set(vlans.values()))!=len(vlans):raise ValueError('deployment line families require distinct VLANs')
@@ -58,10 +60,11 @@ def validate_deployment(value):
     for name in ('clock_id','mapping_id','clock_source'):text(value['capture'][name],name)
 
 
-def validate_capture_deployment(pair,manifest):
+def validate_capture_deployment(selector,manifest):
+    """Bind a capture pair or retained observation to its declared clock."""
     deployment=manifest.get('deployment')
-    if deployment is not None and any(pair[name]!=deployment['capture'][name] for name in ('clock_id','mapping_id')):
-        raise StreamError('DEPLOYMENT_CAPTURE_MISMATCH','capture pair clock differs from deployment')
+    if deployment is not None and any(selector[name]!=deployment['capture'][name] for name in ('clock_id','mapping_id')):
+        raise StreamError('DEPLOYMENT_CAPTURE_MISMATCH','observed clock differs from deployment')
 
 
 @lru_cache(maxsize=11)

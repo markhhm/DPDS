@@ -11,7 +11,7 @@ from .counters import normalize_counters
 from .online import OnlineCells, sample
 from .protocol import StreamError, StreamReader
 from .reference import canonical
-from .registration import validate_registration
+from .registration import validate_capture_deployment, validate_registration
 from .sampled_reference import SampledReference
 from .seqcheck import load_checks
 
@@ -123,6 +123,8 @@ def build_sampled_report(config,traces,manifest,sources,calibration,retention_di
             token=(observation[portkey],observation[ordinal])
             if token in seen:issue('sample_observation_ordinal_duplicate')
             seen.add(token)
+            if observation['timestamp'] is not None:
+                validate_capture_deployment(observation['timestamp'],manifest)
             try:clock.map_timestamp(observation['timestamp'],observation[timekey],order_key=(role,observation[portkey]))
             except StreamError as error:issue(error.code)
     timings['sample_pair_scan_s']=time.perf_counter()-mark

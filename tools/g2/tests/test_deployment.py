@@ -26,6 +26,28 @@ def register(registration,family='cable'):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_normalized_observations_must_use_the_declared_common_clock(self):
+        from tools.g2.matrix import report_one
+        from tools.g2.tests.test_bundle import fixture
+        from tools.g2.tests.test_sampled_bundle import checker
+        from tools.g2.validate import preflight
+        for sampled,clock,mapping in ((False,'before','b'),(True,'before','b'),
+                                      (False,'after','a'),(True,'after','a')):
+            with self.subTest(sampled=sampled,clock=clock),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                _,reg,_,_=fixture(root,flow_id='0a000001:0a000002:1:9000')
+                register(reg)
+                reg['deployment']['capture'].update(clock_id=clock,mapping_id=mapping,clock_source='fake-'+clock)
+                if sampled:checker(root,reg,400)
+                (root/'manifest.json').write_text(json.dumps(reg))
+                self.assertEqual(preflight(root/'manifest.json')['status'],'PASS')
+                code=report_one(root/'manifest.json',root/'out','demo','software-only',
+                                expected_deployment=reg['deployment'])
+                self.assertEqual(code,2)
+                report=json.loads((root/'out/report.json').read_text())
+                self.assertIn('DEPLOYMENT_CAPTURE_MISMATCH',report['reason_codes'])
+                self.assertEqual(report['measurement_status'],'INVALID')
+
     def test_physical_registration_requires_explicit_deployment(self):
         reg=manifest();reg['scope']='physical'
         with self.assertRaisesRegex(ValueError,'deployment'):
@@ -34,9 +56,14 @@ class DeploymentTests(unittest.TestCase):
     def test_explicit_software_deployment_uses_the_same_validation(self):
         validate_registration(register(manifest()),config())
 
+    def test_generic_nic_can_still_register_one_vlan_family(self):
+        reg=register(manifest());reg['deployment']['nic'].update(model='generic',pmd='generic')
+        del reg['deployment']['vlans']['leo']
+        validate_registration(reg,config())
+
     def test_required_deployment_fields_are_never_defaulted(self):
         paths=[('nic',),('dut_host',),('vlans',),('generator',),('capture',),
-               ('nic','model'),('nic','pmd'),('nic','ports'),('vlans','cable'),
+               ('nic','model'),('nic','pmd'),('nic','ports'),('vlans','cable'),('vlans','leo'),
                ('generator','host'),('generator','interfaces'),('capture','host'),
                ('capture','interfaces'),('capture','clock_source'),('capture','clock_id'),('capture','mapping_id')]
         for path in paths:
