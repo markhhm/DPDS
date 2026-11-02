@@ -27,6 +27,18 @@ def _require(condition,code,message):
 def _ceil(value):return -(-value.numerator//value.denominator)
 
 
+def _zero_delay(path):
+    _,config,_=load_registration(path)
+    for line in config['lines']:
+        model=line['model']
+        _require(model['t_ns']==model['delta_ns']==0 and Fraction(model['p'])==0 and line['trace'] is None,
+                 'M5_ZERO_DELAY_REQUIRED','M5 requires t=delta=p=0 without trace')
+    manifest=strict_json(Path(path).read_bytes())
+    _require(manifest['timing_mode']=='calibration' and manifest.get('verification',{}).get('mode')=='sampled',
+             'M5_CALIBRATION_REQUIRED','register sampled calibration cells')
+    return manifest
+
+
 def _rows(folder,run,scope):
     report=strict_json((folder/'report.json').read_bytes())
     _require(report.get('verification_mode')=='sampled','M5_REPORT_INCOMPLETE','sampled capture report is unavailable')
@@ -34,7 +46,7 @@ def _rows(folder,run,scope):
              'M5_STREAM_INCOMPLETE','an input stream is incomplete')
     # M5 measures clocks and bypass; the separate M6 observer-cost gate is unchanged.
     unexpected=[reason for reason in report['reason_codes'] if not reason.startswith('observer_cost_')]
-    root=folder/'capture/bundle';manifest=strict_json((root/'manifest.json').read_bytes())
+    root=folder/'capture/bundle';manifest=_zero_delay(root/'manifest.json')
     calibration=Calibration(strict_json((root/manifest['calibration_path']).read_bytes()),scope,run)
     loads={}
     for stream in manifest['streams']:
@@ -117,15 +129,7 @@ def qualify(matrix_path,output,*,p1_manifest=None,manifest_out=None):
     _require(matrix.get('mode')=='pcapng','M5_PCAPNG_REQUIRED','M5 requires directional pcapng cells')
     for run in matrix['runs']:
         pair_path=path.parent/run['manifest'];pair=strict_json(pair_path.read_bytes())
-        manifest_path=pair_path.parent/pair['manifest']
-        _,config,_=load_registration(manifest_path)
-        for line in config['lines']:
-            model=line['model']
-            _require(model['t_ns']==model['delta_ns']==0 and Fraction(model['p'])==0 and line['trace'] is None,
-                     'M5_ZERO_DELAY_REQUIRED','M5 requires t=delta=p=0 without trace')
-        manifest=strict_json(manifest_path.read_bytes())
-        _require(manifest['timing_mode']=='calibration' and manifest.get('verification',{}).get('mode')=='sampled',
-                 'M5_CALIBRATION_REQUIRED','register sampled calibration cells')
+        _zero_delay(pair_path.parent/pair['manifest'])
     destination.mkdir(parents=True,exist_ok=False,mode=0o700)
     scope=matrix['scope'];rows=[]
     run_matrix(path,destination/'matrix')

@@ -3,7 +3,9 @@
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,9 +63,9 @@ def p1_manifest(root,scope='software-only'):
 
 
 class M5QualifyTests(unittest.TestCase):
-    def invoke(self,matrix,out,*args):
+    def invoke(self,matrix,out,*args,env=None):
         return subprocess.run([sys.executable,'-m','tools.g2.m5_qualify',str(matrix),
-            '--out',str(out),*map(str,args)],capture_output=True,text=True,timeout=45)
+            '--out',str(out),*map(str,args)],capture_output=True,text=True,timeout=45,env=env)
 
     def test_clean_zero_delay_cells_pass_without_claiming_physical_qualification(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -277,6 +279,32 @@ class M5QualifyTests(unittest.TestCase):
             out=root/'qualification';process=self.invoke(matrix,out)
             self.assertEqual(process.returncode,1,process.stderr)
             self.assertEqual(json.loads((out/'qualification.json').read_text())['clock_uncertainty_ns'],10501)
+
+    def test_zero_delay_is_checked_on_the_measured_config_not_only_before_the_matrix(self):
+        from tools.g2.matrix import SEQCHECK
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);matrix=fixture(root);binary=root/'bin';binary.mkdir()
+            proxy=binary/'seqcheck'
+            # The first real checker call changes a later cell before its source snapshot.
+            proxy.write_text('#!'+sys.executable+'\n'+'''import hashlib,json,os,sys
+from pathlib import Path
+root=Path(os.environ['M5_TEST_ROOT'])
+config=root/'high/source/engine.json';doc=json.loads(config.read_text())
+doc['lines'][0]['model']['t_ns']=1;config.write_text(json.dumps(doc))
+path=root/'high/source/manifest.json';manifest=json.loads(path.read_text())
+manifest['config']['sha256']=hashlib.sha256(config.read_bytes()).hexdigest()
+path.write_text(json.dumps(manifest))
+os.execv(os.environ['M5_REAL_SEQCHECK'],[os.environ['M5_REAL_SEQCHECK'],*sys.argv[1:]])
+''')
+            proxy.chmod(0o755)
+            env=dict(os.environ,PATH=str(binary)+os.pathsep+os.environ['PATH'],M5_TEST_ROOT=str(root),
+                     M5_REAL_SEQCHECK=str(Path(shutil.which('seqcheck') or SEQCHECK).resolve()))
+            out=root/'qualification';process=self.invoke(matrix,out,env=env)
+            self.assertEqual(process.returncode,2,process.stderr)
+            report=json.loads((out/'qualification.json').read_text())
+            high=next(row for row in report['rows'] if row['run']=='high')
+            self.assertEqual(high['reason_codes'],['M5_ZERO_DELAY_REQUIRED'])
+            self.assertEqual(report['status'],'INCONCLUSIVE')
 
 
 if __name__=='__main__':unittest.main()
