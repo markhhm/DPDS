@@ -62,6 +62,7 @@ class NativeProjection:
             self._adapter = NativeAdapter(io.StringIO(), io.StringIO(), io.StringIO(), self._counter_output,
                 run=manifest['run'], lines=self.lines, clock_id=manifest['clocks']['engine'], producer_commit=producer_commit)
             self._adapter.header, self._adapter.producers = self.header, 7
+            self._adapter.scope = self.header.get('capture_scope', 'software-only')
             self._adapter.provenance_key = 'native_observer_v2'
             self._adapter.counts, self._adapter.seen = [0]*7, [0]*7
             self.resources = self._adapter.resources
