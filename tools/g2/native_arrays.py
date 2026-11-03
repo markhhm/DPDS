@@ -211,8 +211,9 @@ class NativeArrays:
     and snapshot arrays are local to that batch. Arrays retain native unsigned
     widths, including exact uint64 values above 2**53.
     """
-    def __init__(self, path, chunk_records=65536):
+    def __init__(self, path, chunk_records=65536, *, keep_wire=False):
         self.path = Path(path)
+        self.keep_wire = keep_wire
         self.header = self.health = self.integrity = None
         self.counts, self.seen = [0]*7, [0]*7
         self.chunk_records, self._started, self._order = chunk_records, False, 0
@@ -241,7 +242,10 @@ class NativeArrays:
     def _batch(self, buffers, starts, ends):
         # Eight-byte gathers may cross fields; take() still enforces each entry end.
         data = np.concatenate(buffers+[np.zeros(7, dtype=np.uint8)])
+        wire_starts = starts.copy() if self.keep_wire else None
         batch = _decode(data, starts, ends)
+        if self.keep_wire:
+            batch['wire'] = dict(data=data, starts=wire_starts, ends=ends)
         events = batch['events']
         if np.any(events['order'] != np.arange(self._order, self._order+len(events), dtype=np.uint64)):
             raise ValueError('invalid native binary event order')
