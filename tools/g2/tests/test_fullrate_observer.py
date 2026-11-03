@@ -17,8 +17,14 @@ def checksum(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def stress_registration(root):
+    path=root/'binary.json';registration=json.loads(path.read_text())
+    registration['timing_mode']='stress';path.write_text(json.dumps(registration))
+
+
 def source_case(root, **options):
     make_case(root, **options)
+    stress_registration(root)
     clock = root / 'clock-bound.json'
     clock.write_text(json.dumps(dict(schema='hng-native-clock-bound-v1', run='demo',
         start_ns=0, end_ns=END + 1, pair_error_ns=0)))
@@ -84,7 +90,7 @@ class FullrateObserverTests(unittest.TestCase):
                 self.assertEqual(result['sampled_reference']['sample_checked'],count)
                 self.assertEqual(result['observer_cost']['status'],'PASS')
                 self.assertEqual(result['seqcheck']['0']['storage']['status'],'PASS')
-                self.assertEqual(result['rows'][0]['timing']['main']['absolute_error']['max_ns'],1234 if not options.get('stress') and not options.get('trace') else 0)
+                self.assertEqual(result['rows'][0]['timing']['main']['absolute_error']['max_ns'],0)
                 self.assertTrue((root/'out/samples.jsonl').is_file())
                 if options.get('trace') and not options.get('outage_action'):
                     self.assertGreater(result['rows'][0]['counts']['clamped'],0)
@@ -163,7 +169,7 @@ class FullrateObserverTests(unittest.TestCase):
         from tools.g2.tests.binary_split_fixture import make_case as split_case
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source=source_case(root/'single',count=500)
-            split_case(root/'both',count=500);both=root/'both'
+            split_case(root/'both',count=500);both=root/'both';stress_registration(both)
             (both/'clock-bound.json').write_bytes((root/'single/clock-bound.json').read_bytes())
             source['receiver']['path']='forward/receiver.pcapng'
             save_source(both,source)
@@ -208,6 +214,42 @@ class FullrateObserverTests(unittest.TestCase):
                     self.assertEqual(result['rows'][0]['timing']['main']['absolute_error']['max_ns'],50)
                     sample=json.loads((root/'out/samples.jsonl').read_text().splitlines()[0])
                     self.assertEqual(sample['submit_after_ns']-sample['submit_before_ns'],100)
+
+    def test_empty_required_window_is_inconclusive_even_with_healthy_full_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=source_case(root,count=500)
+            registration=json.loads((root/'binary.json').read_text())
+            registration['windows'][0].update(start_ns=END+1,end_ns=END+1000)
+            (root/'binary.json').write_text(json.dumps(registration));save_source(root,source)
+            result=self.run_case(root)
+            self.assertEqual(result['status'],'INCONCLUSIVE',result)
+            self.assertIn('native_required_cell_empty',result['reason_codes'])
+
+    def test_calibration_registration_cannot_skip_exact_fixed_q_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=source_case(root,count=500,stress=True)
+            registration=json.loads((root/'binary.json').read_text());registration['timing_mode']='calibration'
+            (root/'binary.json').write_text(json.dumps(registration));save_source(root,source)
+            result=self.run_case(root)
+            self.assertEqual(result['status'],'INCONCLUSIVE',result)
+            self.assertIn('fullrate_requires_stress_reference',result['reason_codes'])
+
+    def test_real_reverse_rx_queue_zero_can_dispatch_to_owner_queue_one(self):
+        from tools.g2.tests.binary_split_fixture import make_case as split_case
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=source_case(root/'single',count=500)
+            both=root/'both';split_case(both,count=500);stress_registration(both)
+            (both/'clock-bound.json').write_bytes((root/'single/clock-bound.json').read_bytes())
+            source['receiver'].update(path='reverse/receiver.pcapng',ingress_port=1)
+            def change(rows):
+                for row in rows:
+                    if row['kind'] in (0,1):
+                        for item in row['items']:
+                            if item[11]==1:item[15]=0
+                return rows
+            rewrite_native(both,change);save_source(both,source)
+            result=self.run_case(both)
+            self.assertEqual(result['status'],'PASS',result)
 
     def test_source_hash_mismatch_and_existing_output_are_rejected(self):
         from tools.g2.fullrate_observer import run

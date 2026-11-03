@@ -109,7 +109,7 @@ def _native(path,expected_hash,registration,config,traces,port,output):
             if state is None:raise ValueError('selected host evidence lacks native RX identity')
             event=events[int(item['event_index'])];kind=int(event['kind'])
             for name in item.dtype.names:
-                if name not in ('event_index','handoff_seq','gate_ns') and item[name]!=state['raw'][name]:
+                if name not in ('event_index','handoff_seq','handoff_queue','gate_ns') and item[name]!=state['raw'][name]:
                     raise ValueError('selected host metadata differs from native RX')
             field='offer' if kind==1 else 'terminal' if kind==2 else 'submit'
             if state[field] is not None:raise ValueError('duplicate selected host decision or accepted sample')
@@ -135,10 +135,9 @@ def _clock(root,entry,registration,projection):
     return clock['pair_error_ns']
 
 
-def _judge(selected,cells,config,bound):
+def _judge(selected,cells,bound):
     reasons=set();accepted=0;max_bracket=0
     drop=dict(q_drop='q_drop',trace_loss='trace_loss_drop',trace_outage='trace_outage_drop')
-    lines={line['name']:line for line in config['lines']}
     for state in selected.values():
         expected=state['expected'];offer,terminal,submit=(state[field] for field in ('offer','terminal','submit'))
         if offer is None:
@@ -160,10 +159,7 @@ def _judge(selected,cells,config,bound):
         if bound is None:
             cells.violation(expected,'native_clock_bound_missing','INCONCLUSIVE');continue
         midpoint=(before+after)//2;uncertainty=(after-before+1)//2+bound
-        line=lines[expected['line']]
         target=expected['release_ns']-expected['arrival_ns']
-        if cells.manifest['timing_mode']=='calibration' and line['trace'] is None:
-            target=line['model']['t_ns']+expected['late']*line['model']['delta_ns']
         cells.delivery(expected,midpoint-expected['arrival_ns'],uncertainty,target)
     if bound is None:reasons.add('native_clock_bound_missing')
     return reasons,accepted,max_bracket
@@ -178,6 +174,8 @@ def _build(source_path,output,checker):
     config_raw=config_path.read_bytes()
     if hashlib.sha256(config_raw).hexdigest()!=registration['config']['sha256']:raise ValueError('engine config hash mismatch')
     config,traces=load_config(config_path,contents=config_raw);validate_registration(registration,config)
+    if registration['timing_mode']!='stress':
+        raise StreamError('fullrate_requires_stress_reference','full-rate C requires the exact all-arrival stress reference','INCONCLUSIVE')
     # Reference validates source profiles; no external clock qualification is
     # inferred from the old G2 calibration_path or capture-pair registration.
     reference=SampledReference(config,registration['run'],traces,registration['timing_mode'])
@@ -190,7 +188,7 @@ def _build(source_path,output,checker):
     receiver=_source(root,{key:source['receiver'][key] for key in ('path','sha256')})
     selected,cells,summary,counters,inputs,reader,projection=_native(native,source['native']['sha256'],registration,config,traces,port,output)
     bound=_clock(root,source['clock_bound'],registration,projection)
-    reasons,accepted,max_bracket=_judge(selected,cells,config,bound)
+    reasons,accepted,max_bracket=_judge(selected,cells,bound)
     proxy=output/'native-ingress-identities.pcapng';check_path=output/'seqcheck.json'
     with check_path.open('xb') as stream:
         process=subprocess.run([str(checker),'--ingress',str(proxy),'--receiver',str(receiver),'--details','8'],
@@ -216,6 +214,9 @@ def _build(source_path,output,checker):
             row['gates'].update(order=dict(status='NOT_CHECKED'),storage=dict(status='NOT_CHECKED'))
         for name in ('late_extra',*(key for key in row['timing'] if key.startswith('app_extra:'))):
             row['timing'][name]['status']='not_checked'
+        if row['required'] and row['counts']['ingress']==0:
+            row['measurement_status']='INCONCLUSIVE'
+            row['reason_codes'].append('native_required_cell_empty')
         states=[row['measurement_status'],*(gate['status'] for gate in row['gates'].values())]
         row['status']=row['measurement_status']='FAIL' if 'FAIL' in states else 'INCONCLUSIVE' if 'INCONCLUSIVE' in states else 'PASS'
     reasons.update(checks[str(port)]['reason_codes'])

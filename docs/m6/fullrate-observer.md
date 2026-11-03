@@ -116,7 +116,10 @@ The separate CLI reuses NativeArrays, NativeProjection, SampledReference,
 OnlineCells and the existing C seqcheck. It does not change normal M6 reporting.
 Use the existing G2 manifest as checked **model/sampling registration metadata**:
 its configuration, traces, windows, masks, required cells, capacities and native
-actor bindings must describe C. Set the main required-cell masks to 8 (1/256)
+actor bindings must describe C. Set `timing_mode="stress"`: C always executes
+the exact all-arrival Q recurrence, including fixed lines. Calibration-mode
+registrations are rejected. A required cell with no selected offers remains
+INCONCLUSIVE; an empty timing population cannot stand in for evidence. Set the main required-cell masks to 8 (1/256)
 and provision the sample capacity for the entire exposure. Streams, external
 capture-pair and calibration-path metadata are not opened by this CLI; do not
 create fake captures, fake calibration files or expanded packet JSONL for it.
