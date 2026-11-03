@@ -5,6 +5,7 @@ import json
 import os
 import resource
 import signal
+import sys
 from pathlib import Path
 import struct
 import subprocess
@@ -90,6 +91,8 @@ class SeqcheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn(b'JSON output write failed',result.stderr)
 
+    @unittest.skipIf(sys.platform == 'darwin',
+                     'not executed: APFS does not accept invalid UTF-8 filenames on macOS')
     def test_filename_bytes_cannot_break_json_and_utf8_is_preserved(self):
         self.assertTrue(BINARY.is_file())
         with tempfile.TemporaryDirectory() as temp:
