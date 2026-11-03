@@ -4,6 +4,7 @@
 import io
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -34,13 +35,15 @@ def main(host, fixture):
             (host, physical+['--observe-software'], {}, 'mutually exclusive'),
             (host, ['--observe-fd', '999999', '--observe-physical', '--observe-identity', 'stage1'], {}, 'requires binary capture and stage1'),
             (host, physical+['--observe-identity', 'software-l2'], {}, 'requires binary capture and stage1'),
-            (host, physical, {}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_MIXED':'1'}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_BUS':'virtual'}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_DRIVER':'net_vmxnet3'}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_DRIVER':'net_virtio'}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_DRIVER':'mlx5_auxiliary'}, 'requires supported mlx5 PCI/auxiliary devices'),
-            (fixture, physical, {'HNG_TEST_DRIVER':'unknown'}, 'requires supported mlx5 PCI/auxiliary devices'),
+            (host, physical, {}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_MIXED':'1'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_BUS':'virtual'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_DRIVER':'net_vmxnet3'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_DRIVER':'net_virtio'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_DRIVER':'mlx5_auxiliary'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_BUS':'auxiliary','HNG_TEST_DRIVER':'net_i40e'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_DRIVER':'net_i40e_vf'}, 'requires supported physical driver/bus pairs'),
+            (fixture, physical, {'HNG_TEST_DRIVER':'unknown'}, 'requires supported physical driver/bus pairs'),
             (fixture, ['--observe-binary', str(capture), '--observe-software', '--observe-identity', 'stage1'], {}, 'supports only pcap/ring/null'),
         ]
         for executable, args, extra, reason in cases:
@@ -49,14 +52,18 @@ def main(host, fixture):
             output = result.stdout+result.stderr
             assert result.returncode != 0 and reason in output, output[-8000:]
             assert not capture.exists(), output[-8000:]
-        for bus in ('pci', 'auxiliary'):
+        for bus,driver in (('pci','mlx5_pci'),('auxiliary','mlx5_auxiliary'),('pci','net_i40e')):
             process = subprocess.Popen([fixture, *eal, *physical], stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, env=dict(os.environ, HNG_TEST_BUS=bus))
+                stderr=subprocess.STDOUT, env=dict(os.environ, HNG_TEST_BUS=bus,HNG_TEST_DRIVER=driver))
             try:
-                prefix = wait_for_output(process, b'layout=2-lcore')
+                prefix = wait_for_output(process, b'layout=2-lcore').encode()
                 process.send_signal(signal.SIGINT)
                 output, _ = process.communicate(timeout=10)
                 assert process.returncode == 0, (prefix+output)[-8000:]
+                io_health=re.search(rb'observer_io high_water=(\d+) capacity=(\d+) pending=(\d+)',prefix+output)
+                assert io_health is not None, (prefix+output)[-8000:]
+                peak,capacity,pending=map(int,io_health.groups())
+                assert 0<=peak<capacity and pending==0,io_health.group()
             finally:
                 if process.poll() is None:
                     process.kill(); process.wait()

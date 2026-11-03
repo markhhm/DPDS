@@ -68,7 +68,7 @@ produce a final health seal.
 
 Physical capture uses `--observe-physical --observe-identity stage1`, with
 `--observe-binary`. It is mutually exclusive with `--observe-software`. Every
-selected device must use `mlx5_pci` on PCI or `mlx5_auxiliary` on the auxiliary bus; software and mixed
+selected device must use `mlx5_pci` or `net_i40e` on PCI, or `mlx5_auxiliary` on the auxiliary bus; software and mixed
 port sets are rejected. Its v2 header includes `capture_scope="physical"` and the
 adapter labels NIC sources `physical-pmd`. Legacy software headers remain
 unchanged. This enables capture and normalization only; calibrated external
