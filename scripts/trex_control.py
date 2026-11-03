@@ -9,6 +9,12 @@ import sys
 import time
 
 
+REQUIRED_XSTATS = ('tx_unicast_packets','rx_unicast_packets','rx_missed_errors',
+    'rx_errors','rx_mbuf_allocation_errors') + tuple(
+        f'{direction}_size_{size}_packets' for direction in ('tx','rx')
+        for size in ('64','65_to_127','128_to_255','256_to_511','512_to_1023','1024_to_1522'))
+
+
 class Parser(argparse.ArgumentParser):
     def error(self,message):raise ValueError(message)
 
@@ -23,9 +29,41 @@ def snapshot(client,ports,result):
     return counts
 
 
+def nic_snapshot(client,ports,clock):
+    rows=[]
+    for port in ports:
+        stats=client.ports[port].get_xstats()
+        update=stats.update_sync
+        def checked_update(rpc):
+            rc=update(rpc)
+            if rc is not None and not rc:
+                raise RuntimeError(f'port {port}: NIC xstats refresh failed')
+            return rc
+        start=clock()
+        # v3.08 get_xstats() ignores failed refresh return codes and can return stale data.
+        stats.update_sync=checked_update
+        try:
+            counters=client.get_xstats(port_id=port)
+        finally:
+            stats.update_sync=update
+        end=clock()
+        if not isinstance(counters,dict) or not set(REQUIRED_XSTATS)<=counters.keys():
+            raise ValueError(f'port {port}: required NIC xstats are unavailable')
+        if any(not isinstance(name,str) or type(value) is not int or not 0<=value<2**64
+               for name,value in counters.items()):
+            raise ValueError(f'port {port}: NIC xstats must be named uint64 counters')
+        rows.append(dict(port=port,monotonic_start_s=start,monotonic_end_s=end,
+                         counters=counters.copy()))
+    return rows
+
+
 def control(args,client,load_profile,result,clock,sleep):
     connected=False
     try:
+        if not callable(getattr(client,'_on_connect_clear_stats',None)):
+            raise ValueError('matching TRex v3.08 connection stats hook required')
+        # v3.08 connect() resets port baselines through this hook; its caller checks truthiness.
+        client._on_connect_clear_stats=lambda:True
         client.connect();connected=True
         client.acquire(ports=args.ports,force=False)
         if args.command=='start':
@@ -35,10 +73,12 @@ def control(args,client,load_profile,result,clock,sleep):
             if not all(streams):raise ValueError('profile must provide streams for each selected direction')
             client.remove_all_streams(ports=args.ports)
             for port,stream in zip(args.ports,streams):client.add_streams(stream,ports=[port])
+            result['xstats']['before_start']=nic_snapshot(client,args.ports,clock)
             try:
                 client.start(ports=args.ports,mult='1',force=False,duration=-1,total=False)
                 snapshot(client,args.ports,result)
                 if not all(result['tx_active']):raise ValueError('all selected ports must have active traffic after start')
+                result['xstats']['after_start']=nic_snapshot(client,args.ports,clock)
             except Exception:
                 client.stop(ports=args.ports)
                 raise
@@ -56,9 +96,11 @@ def control(args,client,load_profile,result,clock,sleep):
                 if clock()>=deadline:raise TimeoutError('timeout waiting for selected TX counters to settle')
                 if result['stable_samples']>=2:break
                 previous=counts;sleep(min(args.poll_interval,max(0,deadline-clock())))
+            result['xstats']['after_stop']=nic_snapshot(client,args.ports,clock)
             result['status']='STOPPED'
         else:
             snapshot(client,args.ports,result)
+            result['xstats']['status']=nic_snapshot(client,args.ports,clock)
             result['status']='RUNNING' if any(result['tx_active']) else 'IDLE'
     finally:
         if connected:
@@ -71,8 +113,9 @@ def control(args,client,load_profile,result,clock,sleep):
 
 
 def main(argv=None,api=None,clock=time.monotonic,sleep=time.sleep):
-    result=dict(schema='hng-trex-control-v1',command=None,status='ERROR',server=None,
-        ports=[],profile=None,opackets=None,tx_active=None,stable_samples=0,error=None)
+    result=dict(schema='hng-trex-control-v2',command=None,status='ERROR',server=None,
+        ports=[],profile=None,opackets=None,tx_active=None,stable_samples=0,error=None,
+        xstats=dict(before_start=None,after_start=None,after_stop=None,status=None))
     try:
         parser=Parser(description=__doc__)
         parser.add_argument('command',choices=('start','stop','status'))

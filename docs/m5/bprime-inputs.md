@@ -311,34 +311,111 @@ They release their ports and disconnect with `stop_traffic=False`.
 Thus a successful short-lived start/status leaves traffic active.
 No command requests a hardware counter reset or force-acquires another session's ports.
 
+The matching [v3.08 source revision](https://github.com/cisco-system-traffic-generator/trex-core/blob/27e0153b5ff833c51d48f1625ace979a2868d8a0/VERSION)
+explains the earlier software-counter discontinuity:
+[`connect()` calls `_on_connect_clear_stats()`](https://github.com/cisco-system-traffic-generator/trex-core/blob/27e0153b5ff833c51d48f1625ace979a2868d8a0/scripts/automation/trex_control_plane/interactive/trex/common/trex_client.py#L425-L484),
+and the [STL hook calls `clear_stats(clear_xstats=False)`](https://github.com/cisco-system-traffic-generator/trex-core/blob/27e0153b5ff833c51d48f1625ace979a2868d8a0/scripts/automation/trex_control_plane/interactive/trex/stl/trex_stl_client.py#L209-L214).
+This changes the client's port-counter reference values, not the hardware counters.
+The control tool suppresses that connection hook for every command. A missing hook returns ERROR.
+The [start API](https://github.com/cisco-system-traffic-generator/trex-core/blob/27e0153b5ff833c51d48f1625ace979a2868d8a0/scripts/automation/trex_control_plane/interactive/trex/stl/trex_stl_client.py#L837-L850)
+clears only the flow/latency Python cache. The stop API removes profile RX filters without clearing port counters.
+Use this verified SDK behavior; a different SDK requires source verification before use.
+
 Every operation writes exactly one JSON line to stdout. Diagnostics go to stderr.
 `--help` prints usage text and is outside this operation reply contract.
 The fixed fields are:
 
 ```json
-{"schema":"hng-trex-control-v1","command":"stop","status":"STOPPED","server":"${GEN_SERVER}","ports":[0,1],"profile":"${GEN_STL_PROFILE}","opackets":[123,456],"tx_active":[false,false],"stable_samples":2,"error":null}
+{
+  "schema":"hng-trex-control-v2","command":"stop","status":"STOPPED",
+  "server":"${GEN_SERVER}","ports":[0],"profile":"${GEN_STL_PROFILE}",
+  "opackets":[123],"tx_active":[false],"stable_samples":2,"error":null,
+  "xstats":{
+    "before_start":null,"after_start":null,"status":null,
+    "after_stop":[{
+      "port":0,"monotonic_start_s":1234.50,"monotonic_end_s":1234.51,
+      "counters":{
+        "tx_unicast_packets":123,"rx_unicast_packets":120,
+        "tx_multicast_packets":0,"rx_multicast_packets":1,
+        "tx_broadcast_packets":0,"rx_broadcast_packets":0,
+        "rx_missed_errors":0,"rx_errors":0,"rx_mbuf_allocation_errors":0,
+        "tx_size_64_packets":41,"tx_size_65_to_127_packets":0,
+        "tx_size_128_to_255_packets":0,"tx_size_256_to_511_packets":0,
+        "tx_size_512_to_1023_packets":41,"tx_size_1024_to_1522_packets":41,
+        "rx_size_64_packets":40,"rx_size_65_to_127_packets":0,
+        "rx_size_128_to_255_packets":0,"rx_size_256_to_511_packets":0,
+        "rx_size_512_to_1023_packets":40,"rx_size_1024_to_1522_packets":40
+      }
+    }]
+  }
+}
 ```
 
-The numeric ports/counters above illustrate the schema, not deployment values.
+The one-port reply above illustrates the schema, not deployment values or a conservation verdict.
+The emitted reply occupies one line; it is expanded here for readability.
 `ports`, `opackets` and `tx_active` use argv order.
 `command` is start/stop/status. Allowed `status` values: RUNNING, IDLE, STOPPED, ERROR.
 
-The SDK counts `opackets` from each connection's baseline.
-Compare counters only within one invocation, never across start/status/stop commands.
+`opackets` retains the server's cumulative software count with no new connection baseline.
+It proves TX settling within `stop`; use NIC unicast deltas for three-way conservation.
+Do not compare old v1 software counters across invocations or combine v1 and v2 baselines.
+
+### NIC xstats snapshots
+
+All v2 replies contain the four fixed `xstats` stage fields:
+
+| Stage | Successful command and boundary |
+| --- | --- |
+| `before_start` | start: after streams load, immediately before the start RPC |
+| `after_start` | start: after the start RPC and verification that all selected ports transmit |
+| `after_stop` | stop: after the stop RPC and the final two unchanged TX intervals |
+| `status` | status: after its fresh software-counter/activity read |
+
+Each applicable stage is an array in argv port order, with one entry per selected port.
+Each entry has exactly `port`, `monotonic_start_s`, `monotonic_end_s` and `counters`.
+The two times bracket that port's synchronous `client.get_xstats(port_id)` call.
+They are seconds from the control host's monotonic clock, not wall time or a physical common clock.
+Port reads are sequential, not atomic across ports or with software-counter reads.
+Retain these time bounds when evaluating boundary skew or in-flight traffic.
+
+`counters` preserves every name/value returned by the NIC API, including available
+`tx/rx_multicast_packets`, `tx/rx_broadcast_packets`, size bins and device-specific counters.
+No name translation, class aggregation or subtraction is applied.
+Required names are `tx_unicast_packets`, `rx_unicast_packets`, `rx_missed_errors`,
+`rx_errors`, `rx_mbuf_allocation_errors`, and both `tx_size_`/`rx_size_` families with
+suffixes `64_packets`, `65_to_127_packets`, `128_to_255_packets`, `256_to_511_packets`,
+`512_to_1023_packets` and `1024_to_1522_packets`.
+Larger-size bins are retained when available. Missing required names return ERROR.
+Every returned counter must be an integer from 0 through 18446744073709551615; booleans are invalid.
+An unavailable counter is not zero. A NIC with different names needs a separately verified mapping.
+The v3.08 NIC API can return cached values when its refresh reports failure without raising.
+The tool checks that refresh result during `get_xstats()` and returns ERROR instead of publishing stale evidence.
+
+For one attempt, subtract start's `xstats.before_start` from stop's `xstats.after_stop`,
+matching ports and exact counter names. Keep server/NIC identity and one unchanged counter epoch.
+Server restarts, counter resets/decreases, missing evidence or mismatched ports block conservation PASS.
+Preserve later status snapshots through DUT drain: `after_stop` is a TX boundary, not proof that RX has drained.
+Reconcile generator TX unicast to DUT RX, and DUT TX to generator/receiver RX unicast at aligned boundaries.
+List broadcast/multicast separately; never add them to the probe denominator.
+Unrelated unicast and boundary residuals require separate accounting; matching totals do not prove packet identity or order.
 
 Unknown snapshots use null. Unparsed arguments can leave command/server/profile null and ports empty.
+Inapplicable stages remain null. A failed stage remains null; earlier complete stages can remain populated in an ERROR reply.
+The stage array is published only after every selected port's snapshot passes validation.
 
 Errors return exit 2 and a non-null error string. Success returns exit 0.
+An invalid before-start snapshot prevents TX start. A failed after-start snapshot triggers TX-stop cleanup.
 
 `status` reports RUNNING if either port is active. IDLE alone is not TX-stop proof.
 
-`stop` first stops both TX streams. It then reads fresh per-connection `opackets`
+`stop` first stops both TX streams. It then reads fresh cumulative `opackets`
 for both ports and requires two consecutive unchanged intervals, with both ports inactive.
 This needs at least three snapshots. The default interval is 0.25 s and settle timeout is 5 s.
 
 Any increase restarts the unchanged count. Counter reset, missing/bad counters,
 RPC failure, ownership failure or timeout returns ERROR, never STOPPED.
 The settle timeout starts after the stop RPC. Connection/RPC calls retain the SDK's own timeouts.
+The final NIC snapshot is read after settling and retains its own SDK RPC timeout.
 
 Accept "TX stopped" only with exit 0, matching server/ports/profile, STOPPED,
 two false `tx_active` values, `stable_samples=2`, and error=null.
@@ -548,7 +625,8 @@ For this candidate, pass exactly one approved generator port:
 ```
 
 These are interface examples for review, not an instruction to start this candidate.
-The existing JSON schema remains unchanged. `ports`, `opackets` and `tx_active` have one element in argv order.
+Use the v2 schema above. `ports`, `opackets` and `tx_active` have one element in argv order.
+Each applicable NIC snapshot stage also has one entry for that selected port.
 Start must return RUNNING with one true TX flag. Stop must return STOPPED with one false TX flag and `stable_samples=2`.
 The two-port form keeps its existing direction-0/direction-1 behavior and two-element vectors.
 
