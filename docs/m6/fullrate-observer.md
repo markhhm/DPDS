@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Short full-rate observer supplement (C)
 
 C supplements the quarter-rate, independently timed M6 matrix. It does not
