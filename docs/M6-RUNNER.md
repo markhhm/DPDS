@@ -812,3 +812,10 @@ The prefix alone cannot prove a missing-delivery storage drop without drain evid
 Complete counter, drain and custody gates remain unverified.
 Every short result uses `schema=hng-g2-prefix-report-v1` and declares `scope=diagnostic-prefix`, `diagnostic_only=true` and `g2_qualified=false`.
 A short PASS describes the stated diagnostic checks. It does not qualify M6 or reconstruct the complete run.
+
+## Short full-rate supplement
+
+Use the [C full-rate observer plan](m6/fullrate-observer.md) for the selected
+10G conditions, single-egress mirror, native software-time bounds and paired
+observer ON/OFF checks. Its separate supplemental report cannot qualify
+independent OWD or replace the externally timed quarter-rate matrix.

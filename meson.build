@@ -162,7 +162,7 @@ test('g2-prefix-validation', python, args: ['-m','unittest','tools.g2.tests.test
   env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
-test('g2-fullrate-observer', python, args: ['-m','unittest','tools.g2.tests.test_fullrate_observer'],
+test('g2-fullrate-observer', python, args: ['-m','unittest','tools.g2.tests.test_fullrate_observer','tools.g2.tests.test_fullrate_plan'],
   depends: seqcheck, workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
 test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],

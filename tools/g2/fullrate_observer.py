@@ -219,7 +219,9 @@ def _build(source_path,output,checker):
         states=[row['measurement_status'],*(gate['status'] for gate in row['gates'].values())]
         row['status']=row['measurement_status']='FAIL' if 'FAIL' in states else 'INCONCLUSIVE' if 'INCONCLUSIVE' in states else 'PASS'
     reasons.update(checks[str(port)]['reason_codes'])
-    rows=result['rows'];states=[row['status'] for row in rows if row['required']]
+    rows=result['rows']
+    reasons.update(code for row in rows for code in row['reason_codes'])
+    states=[row['status'] for row in rows if row['required']]
     status='FAIL' if 'FAIL' in states else 'INCONCLUSIVE' if reasons or 'INCONCLUSIVE' in states or not states else 'PASS'
     with (output/'samples.jsonl').open('x') as stream:
         for state in selected.values():
@@ -235,7 +237,7 @@ def _build(source_path,output,checker):
         timing_bound=dict(pair_error_ns=bound,max_submit_bracket_ns=max_bracket,accepted_sample_packets=accepted,
             wire_owd_error_bound_ns=None),sampled_reference=summary,observer_cost=cost,counters=counters,
         input_packets=dict(inputs),seqcheck=checks,registration=registration,sources=source,
-        native_integrity=reader.integrity)
+        native_integrity=reader.integrity,observer_cost_scope='native SPSC queues; separate I/O-pool and ON/OFF gates required')
 
 
 def run(source,output,*,seqcheck=None):

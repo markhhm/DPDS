@@ -68,9 +68,11 @@ class FullrateObserverTests(unittest.TestCase):
         return run(root/'fullrate.json',root/'out',seqcheck=ROOT/'build/seqcheck')
 
     def test_fixed_stress_and_trace_reuse_sampled_model_without_external_timing(self):
-        for options in ({},dict(stress=True,q_bytes=32768),dict(trace=True)):
+        for options in ({},dict(stress=True,q_bytes=32768),dict(trace=True),
+                        dict(trace=True,outage_action='hold'),dict(trace=True,outage_action='drop')):
             with self.subTest(options=options),tempfile.TemporaryDirectory() as tmp:
-                root=Path(tmp);source_case(root,count=500,**options)
+                root=Path(tmp);count=1200 if options.get('outage_action') else 500
+                source_case(root,count=count,**options)
                 result=self.run_case(root)
                 self.assertEqual(result['status'],'PASS',result)
                 self.assertEqual(result['schema'],'hng-fullrate-observer-report-v1')
@@ -79,13 +81,17 @@ class FullrateObserverTests(unittest.TestCase):
                 self.assertEqual(result['coverage']['external_egress_ports'],[1])
                 self.assertEqual(result['coverage']['ingress_reference'],'native-rx; not an independent capture')
                 self.assertIsNone(result['timing_bound']['wire_owd_error_bound_ns'])
-                self.assertEqual(result['sampled_reference']['sample_checked'],500)
+                self.assertEqual(result['sampled_reference']['sample_checked'],count)
                 self.assertEqual(result['observer_cost']['status'],'PASS')
                 self.assertEqual(result['seqcheck']['0']['storage']['status'],'PASS')
                 self.assertEqual(result['rows'][0]['timing']['main']['absolute_error']['max_ns'],1234 if not options.get('stress') and not options.get('trace') else 0)
                 self.assertTrue((root/'out/samples.jsonl').is_file())
-                if options.get('trace'):
+                if options.get('trace') and not options.get('outage_action'):
                     self.assertGreater(result['rows'][0]['counts']['clamped'],0)
+                if options.get('outage_action')=='hold':
+                    self.assertGreater(result['rows'][0]['counts']['modeled_outage_hold_ns'],0)
+                if options.get('outage_action')=='drop':
+                    self.assertGreater(result['rows'][0]['counts']['trace_outage'],0)
                 if options.get('stress'):
                     self.assertGreater(result['rows'][0]['counts']['q_drop'],0)
 

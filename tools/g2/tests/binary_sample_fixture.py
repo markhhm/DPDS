@@ -62,7 +62,7 @@ def _pcapng(path, packets):
         output.write(block(5, struct.pack('<III', 0, END >> 32, END & 0xffffffff) + options))
 
 
-def make_case(root, count=400, stress=False, trace=False, mask_bits=0, *, seqcheck_binary=None,q_bytes=8*1024*1024):
+def make_case(root, count=400, stress=False, trace=False, mask_bits=0, *, seqcheck_binary=None,q_bytes=8*1024*1024,outage_action=None):
     """Return parsed documents and stream-ID paths for matching reporter inputs.
 
     All evidence is synthetic software evidence. Native observer endpoints come
@@ -98,6 +98,12 @@ def make_case(root, count=400, stress=False, trace=False, mask_bits=0, *, seqche
         profile = dict(end_ns=END, loss_seed=1, outage_action='hold', terminal='error', terminal_horizon_ns=None,
                        rows=[dict(at_ns=0, t_ns=65_000_000, loss='0', outage=False),
                              dict(at_ns=step, t_ns=40_000_000, loss='0', outage=False)])
+        if outage_action is not None:
+            assert outage_action in ('hold','drop')
+            profile['outage_action']=outage_action
+            profile['rows']=[dict(at_ns=0,t_ns=65_000_000,loss='0',outage=False),
+                dict(at_ns=65_000_000+step,t_ns=65_000_000,loss='0',outage=True),
+                dict(at_ns=65_000_000+2*step,t_ns=65_000_000,loss='0',outage=False)]
         _json(root / 'trace-source.json', profile)
         normalized = dict(schema='hng-trace-v1', source_id='trace-source.json', direction='forward',
                           units='ns_owd', conversion='synthetic nanoseconds',
