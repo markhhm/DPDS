@@ -144,10 +144,35 @@ def write_matrix(path,matrix):
     Path(path).write_text(raw+'\n')
 
 
+def engine_config(condition_id,active_vlan):
+    """Expand one fixed, single-line condition to both registered port directions."""
+    if type(active_vlan) is not int or not 1<=active_vlan<=4094:raise ValueError('active VLAN must be 1..4094')
+    matrix=build_matrix();plan=matrix['plan']
+    condition=next((c for c in plan['conditions'] if c['id']==condition_id),None)
+    if condition is None or condition['input_kind']!='fixed' or len(condition['lines'])!=1:
+        raise ValueError('engine expansion requires a registered fixed single-line condition')
+    source=condition['lines'][0];sizes=plan['traffic'][condition['traffic']]['q_bytes']
+    low,high=min(sizes),max(sizes);burst=16
+    numerator=source['c_bps']*(source['t_ns']+source['delta_ns']);denominator=8000000000*(low+20)
+    slots=source['q_bytes']//low+burst+(numerator+denominator-1)//denominator
+    model={key:source[key] for key in ('c_bps','q_bytes','t_ns','delta_ns','p','seed')}
+    model.update(storage_capacity_packets=slots,storage_capacity_bytes=slots*(high-4))
+    return dict(schema='hng-v1',lines=[dict(name=f'fixed-d{port}',ingress_port=port,egress_port=1-port,
+        vlan_id=active_vlan,model=model.copy(),envelope=dict(min_q_bytes=low,max_q_bytes=high,
+        burst_bound_packets=burst),trace=None) for port in DIRECTIONS[condition['direction_mode']]])
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',required=True)
-    args=parser.parse_args();write_matrix(args.out,build_matrix())
+    parser.add_argument('--condition',help='expand a fixed single-line condition into an engine config')
+    parser.add_argument('--active-vlan',type=int,help='one approved VLAN for the engine config')
+    args=parser.parse_args()
+    if (args.condition is None)!=(args.active_vlan is None):parser.error('--condition and --active-vlan must be used together')
+    try:result=build_matrix() if args.condition is None else engine_config(args.condition,args.active_vlan)
+    except ValueError as error:parser.error(str(error))
+    if args.condition is None:write_matrix(args.out,result)
+    else:Path(args.out).write_text(json.dumps(result,allow_nan=False,indent=2)+'\n')
 
 
 if __name__=='__main__':main()

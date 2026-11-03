@@ -17,6 +17,8 @@ test('seqcheck', python, args: ['-m', 'unittest', '-v', 'tools.seqcheck.test_seq
 test('eal-affinity', python, args: [meson.project_source_root() / 'tests/eal_args_test.py'])
 test('bringup-check', python, args: [meson.project_source_root() / 'tests/bringup_check.py'],
   workdir: meson.project_source_root(), timeout: 30)
+test('trex-control', python, args: [meson.project_source_root() / 'tests/trex_control_test.py'],
+  workdir: meson.project_source_root(), timeout: 30)
 core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
@@ -144,7 +146,7 @@ g2_matrix_environment.prepend('PATH', meson.project_build_root())
 test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix',
   'tools.g2.tests.test_matrix_seqcheck','tools.g2.tests.test_deployment',
   'tools.g2.tests.test_x710_matrix','tools.g2.tests.test_matrix_preflight',
-  'tools.g2.tests.test_m6_x710_full','tools.g2.tests.test_judge_shards'], env: g2_matrix_environment, depends: seqcheck,
+  'tools.g2.tests.test_m6_x710_full','tools.g2.tests.test_judge_shards','tools.g2.tests.test_bprime_inputs'], env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
 test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],

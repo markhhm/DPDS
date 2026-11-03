@@ -7,6 +7,8 @@ B-prime runs the real `dpds` engine. The [testpmd B phase](em-handoff-x710.md)
 qualifies a different workload and does not replace this confirmation.
 The measurement owner controls A1, B-prime and A2 times and the final decision.
 Keep the load active for the whole authorized B-prime window. Do not use an automatic duration or restart.
+Use the [registered inputs](bprime-inputs.md) for source/config hashes, node1 memory,
+non-interactive control, warm-up/drain bounds and telemetry paths.
 
 All operational commands use **`root`, through the system manager**, never `--user`.
 Each command block identifies `DUT_HOST` or `GEN_HOST`. Execute it locally on that host.
@@ -21,8 +23,8 @@ Actual host names, accounts, addresses, device IDs and paths belong in private i
 | `DUT_NODE`, `NODE1_CORE_SET`, `CORES`, `MAIN_CORE` | Approved node1 ID, allowed CPUs, seven distinct node1 CPU IDs and their main CPU |
 | `HUGEDIR`, `LOAD_SOCKET_MEM`, `STOP_TIMEOUT_S`, `DRAIN_WAIT_S` | Verified 1 GiB hugetlbfs, EAL MiB vector with zero on other nodes, registered stop/drain bounds |
 | `DEPLOY_BUNDLE`, `DPDK_RUNTIME_ROOT`, `TELEMETRY_CLIENT` | Local deployment bundle, private runtime directory and installed `dpdk-telemetry.py` |
-| `TREX_CONSOLE`, `GEN_SERVER`, `GEN_WORKDIR`, `GEN_PORTS`, `GEN_STL_PROFILE` | Approved STL console/server, working directory, two reserved generator ports and prepared mixed-frame profile |
-| `GEN_CONSOLE_UNIT` | Unique system-manager unit for the generator console |
+| `GEN_PYTHON`, `GEN_CONTROL`, `GEN_SERVER`, `GEN_WORKDIR`, `GEN_PORTS`, `GEN_STL_PROFILE` | Approved STL API interpreter/control tool, server, working directory, two reserved ports and prepared mixed-frame profile |
+| `GEN_CONTROL_UNIT` | Unique system-manager unit prefix for this attempt's control commands |
 
 Preconditions: complete environment bring-up, authorized device handover and
 an approved top-level `dpds.slice`. Both X710 ports belong to DPDS, not to a
@@ -70,9 +72,9 @@ dynamic. Retain its build record and checksum with the run artifacts.
 
 Prepare the approved private `CONFIG_FILE` with this mapping and capacity.
 Retain its SHA-256 and the expanded registration. Size both ingress pools and
-core metadata for node1. The pool calculator gives about 33.8 GiB total for
-this envelope before additional EAL/driver reserves. Both pools occupy the same
-registered node here. Its printed `both_nodes` label does not change placement.
+core metadata for node1. The [registered memory calculation](bprime-inputs.md#2-expanded-config_file-and-node-memory)
+gives `LOAD_SOCKET_MEM=0,33792` plus ordinary Core memory and explicit reserves.
+Both pools occupy the same registered node. The calculator's `both_nodes` label does not change placement.
 
 Stop if the approved hugepage/RAM budget cannot contain the full envelope.
 Do not lower C, delay, packet range or storage to fit a hardware allocation.
@@ -83,7 +85,7 @@ set -euo pipefail
 set -a
 . "$PRIVATE_ENV"
 set +a
-DPDS_BIN=/root/dpdk/dpds
+: "${DPDS_BIN:?approved deployed executable path required}"
 cd "$DPDS_SRC"
 umask 077
 mkdir -- "$OUT_DIR"
@@ -134,33 +136,31 @@ configuration. The unmodified example is fixed-MTU/100G and is not this profile.
 Verify aggregate 10G L1 per direction in bypass first. Keep captures active.
 Register approved 10G links and rates for both generator ports.
 
-Print the rendered command in a local shell, then open the approved console:
+Use the non-interactive tool through a transient system-manager unit:
 
 ```sh
-# GEN_HOST / root / system manager. Substitute the printed values in the console.
+# GEN_HOST / root / system manager. Preserve the one-line JSON reply and exit status.
 set -euo pipefail
 set -a
 . "$GEN_PRIVATE_ENV"
 set +a
-printf 'start -f %s -p %s -m 100%%\n' "$GEN_STL_PROFILE" "$GEN_PORTS"
-systemd-run --pty --unit="$GEN_CONSOLE_UNIT" \
+systemd-run --wait --pipe --collect --unit="${GEN_CONTROL_UNIT}-start" \
   --property="WorkingDirectory=$GEN_WORKDIR" \
   /bin/bash -euc '
     set -a; . "$1"; set +a
     export M7_VLAN="$ACTIVE_VLAN"
     read -r -a ports <<< "$GEN_PORTS"
-    [[ ${#ports[@]} -eq 2 && ${ports[0]} != "${ports[1]}" ]]
-    for port in "${ports[@]}"; do [[ $port =~ ^[0-9]+$ ]]; done
-    exec "$TREX_CONSOLE" --server "$GEN_SERVER" --acquire "${ports[@]}"
+    exec "$GEN_PYTHON" "$GEN_CONTROL" start --server "$GEN_SERVER" \
+      --ports "${ports[@]}" --profile "$GEN_STL_PROFILE"
   ' _ "$GEN_PRIVATE_ENV"
 ```
 
-Paste the rendered `start` command only after DUT readiness and owner permission.
-TRex does not expand shell variables in console commands. Do not use `--total`:
-the rate applies to each port, not a split across both.
+Run `start` only after DUT readiness and owner permission.
+Require exit 0 and a RUNNING reply with both `tx_active` values true.
+The tool uses each profile's rate, no total-rate split and no automatic duration.
 
-Acquire only the two reserved ports. Do not force acquisition
-of another session's ports. Keep the console open through the whole phase.
+Acquire only the two reserved ports. Do not force acquisition of another session's ports.
+The transient command releases ownership without stopping traffic. No console must stay open.
 
 Repeat this three-section procedure with a new attempt for the other VLAN.
 
@@ -285,7 +285,7 @@ Use actual monotonic intervals, not an assumed exactly ten seconds.
 The **99%-line-rate threshold of 804,617 pps** applies only to 1518-byte frames including
 FCS. The selected mixed frame sizes need the L1 byte calculation above.
 
-After the full residence/fill warm-up, require each port's RX >=9.9G L1 and
+After the [registered 2 s residence/fill warm-up](bprime-inputs.md#5-warm-up-drain-and-stop-bounds), require each port's RX >=9.9G L1 and
 TX within 1% of the modeled 9G. Q drops make TX<10G intentional.
 Record `Bprime-ready.time` only after complete stable intervals, then let the
 owner start its B-prime measurement window.
@@ -300,14 +300,26 @@ The owner decides the A1/B-prime/A2 pollution result.
 ## 3. Stop generation, drain and restore DPDS-off
 
 **First on `GEN_HOST`, as `root`, system manager.** On the owner's stop request,
-record the time and issue the rendered stop command in the existing console:
+record the time and stop both streams with the non-interactive tool:
 
 ```sh
-# GEN_HOST / root / system manager. Paste the printed command in the same console.
-printf 'stop -p %s\n' "$GEN_PORTS"
+# GEN_HOST / root / system manager. Accept only the registered STOPPED reply and exit 0.
+set -euo pipefail
+set -a
+. "$GEN_PRIVATE_ENV"
+set +a
+systemd-run --wait --pipe --collect --unit="${GEN_CONTROL_UNIT}-stop" \
+  --property="WorkingDirectory=$GEN_WORKDIR" \
+  /bin/bash -euc '
+    set -a; . "$1"; set +a
+    read -r -a ports <<< "$GEN_PORTS"
+    exec "$GEN_PYTHON" "$GEN_CONTROL" stop --server "$GEN_SERVER" \
+      --ports "${ports[@]}" --profile "$GEN_STL_PROFILE" --timeout 5 --poll-interval 0.25
+  ' _ "$GEN_PRIVATE_ENV"
 ```
 
-Confirm both generator TX streams stopped. Keep external capture active.
+Require the [reply contract](bprime-inputs.md#4-non-interactive-generator-control-and-reply-contract):
+both TX streams inactive and two unchanged counter intervals. Keep external capture active.
 Do not stop the DUT while ingress still runs.
 
 **Then on `DUT_HOST`, as `root`, system manager.** Keep telemetry through drain.
@@ -315,7 +327,8 @@ Bound the delay by `t + delta + Q_drain`, plus registered NIC/handoff/TX margin.
 For the selected minimum frame, a conservative Q bound is
 `8 * Q_bytes * (84/64) / C_bps`, about 9.79 ms. The model contribution is
 therefore less than 0.472 s. Set `DRAIN_WAIT_S` above this plus the registered
-margin. It is not a replacement for zero-backlog evidence.
+margin. The [registered values](bprime-inputs.md#5-warm-up-drain-and-stop-bounds)
+are `DRAIN_WAIT_S=2` and `STOP_TIMEOUT_S=10`. Neither replaces zero-backlog evidence.
 
 ```sh
 # DUT_HOST / root / system manager. Generator stop must already be confirmed.
@@ -369,7 +382,7 @@ A tool error or unknown device path is not proof of release.
 Review deleted hugepage mappings and the slice cgroup for surviving processes.
 
 Stop only this attempt's units. Do not kill another workload or the shared
-traffic server. On `GEN_HOST`, as `root`, stop `GEN_CONSOLE_UNIT` after its
-streams stop and captures close. Leave port bindings, hugepage reservations,
+traffic server. Generator control uses transient units that finish after each command.
+Leave port bindings, hugepage reservations,
 mounts and switch configuration exactly as the operator handed them over.
 Do not start A2 until the measurement owner confirms DPDS-off.
