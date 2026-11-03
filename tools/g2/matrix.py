@@ -36,7 +36,7 @@ def file_hash(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def source_hashes(path, mode):
+def source_hashes(path, mode, replacements=None):
     files = [path]
     manifest = strict_json(path.read_bytes())
     if mode == "pcapng":
@@ -68,7 +68,13 @@ def source_hashes(path, mode):
                 pair=strict_json(pair_path.read_bytes())
                 files.append(pair_path)
                 files.extend(pair_path.parent/pair[role]['path'] for role in ('before','receiver'))
-    return {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
+    result = {str(item): file_hash(item) for item in dict.fromkeys(item.resolve() for item in files)}
+    for name, (current, original) in (replacements or {}).items():
+        if name in result:
+            if result[name] != current:
+                raise ValueError("retained raw changed during resume verification")
+            result[name] = original
+    return result
 
 
 def output_hashes(path):
@@ -117,11 +123,11 @@ def check_deployment(manifest, expected):
         validate_deployment(manifest.get("deployment"))
 
 
-def completed_run(path, source, run_id, scope, mode, expected_deployment=None):
+def completed_run(path, source, run_id, scope, mode, expected_deployment=None, replacements=None):
     try:
         seal = strict_json((path / ".complete.json").read_bytes())
         if (seal["schema"] != "hng-m6-complete-v1" or seal["mode"] != mode
-                or seal["sources"] != source_hashes(source, mode)
+                or seal["sources"] != source_hashes(source, mode, replacements)
                 or seal["outputs"] != output_hashes(path)):
             return None
         report = strict_json((path / "report.json").read_bytes())
@@ -349,12 +355,15 @@ def read_matrix(matrix_path):
     return matrix
 
 
-def run_matrix(matrix_path, output):
+def run_matrix(matrix_path, output, *, prune_raw=False, apply_raw_prune=False, backup_scope_confirmed=False):
     path = Path(matrix_path)
     matrix = read_matrix(path)
     mode, workers = matrix.get("mode", "software"), matrix.get("workers", 1)
     expected_deployment = matrix["plan"].get("deployment")
     destination = Path(output)
+    from .raw_prune import Retention
+    retention = Retention(path, matrix, destination, enabled=prune_raw,
+                          apply=apply_raw_prune, backup_confirmed=backup_scope_confirmed)
     # shortcut: one writer per output directory; add locking if concurrent resumes are required.
     destination.mkdir(parents=True, exist_ok=True)
     marker = destination / ".matrix.json"
@@ -367,12 +376,15 @@ def run_matrix(matrix_path, output):
             raise ValueError("existing output is not a resumable matrix directory")
         archive(destination, destination / ".matrix.json.tmp")
         write_json(marker, registration)
-    archive(destination, destination / "summary.json", destination / ".summary.json.tmp")
     def evaluate(run):
         run_id = run["id"]
         source, target = (path.parent / run["manifest"]).resolve(), destination / run_id
         log_path = destination / (run_id + ".stderr.log")
-        cached = completed_run(target, source, run_id, matrix["scope"], mode, expected_deployment)
+        retention.guard_existing(run_id, target)
+        replacements = retention.replacements(run_id)
+        cached = completed_run(target, source, run_id, matrix["scope"], mode, expected_deployment, replacements)
+        if cached is None and retention.managed(run_id) and (target / ".complete.json").exists():
+            raise ValueError("retention resume verification failed; complete artifacts preserved")
         if cached is not None:
             verdict, returncode = cached
         else:
@@ -389,6 +401,7 @@ def run_matrix(matrix_path, output):
                 verdict = dict(run=run_id, scope=matrix["scope"], status="INVALID",
                                measurement_status="INCONCLUSIVE", g2_qualified=False,
                                reason_codes=["REPORTER_PROCESS_ERROR"], rows=[])
+        retention.finished(run_id)
         return dict(verdict, id=run_id, reporter_exit=returncode, family=run.get("family"),
                     report=run_id + "/report.json", stderr=run_id + ".stderr.log")
     if workers == 1:
@@ -402,6 +415,7 @@ def run_matrix(matrix_path, output):
                   status="INVALID" if state == "INCONCLUSIVE" else state, measurement_status=state,
                   g2_qualified=matrix["scope"] == "physical" and state == "PASS"
                                and all(run["g2_qualified"] is True for run in results), runs=results)
+    archive(destination, destination / "summary.json", destination / ".summary.json.tmp")
     write_json(destination / "summary.json", result)
     return result
 
@@ -412,8 +426,13 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--out", help="new or resumable output directory")
     action.add_argument("--preflight", action="store_true", help="check registration only; do not read captures or report")
+    parser.add_argument("--prune-raw", action="store_true", help="register raw prefix retention; dry-run by default")
+    parser.add_argument("--apply-raw-prune", action="store_true", help="replace full raw with diagnostic time prefixes")
+    parser.add_argument("--backup-scope-confirmed", action="store_true", help="operator confirms the registered raw backup scope")
     args = parser.parse_args()
     try:
+        if args.preflight and (args.prune_raw or args.apply_raw_prune or args.backup_scope_confirmed):
+            raise ValueError("retention flags require --out")
         if args.preflight:
             matrix = read_matrix(args.matrix)
             result = dict(schema="hng-m6-preflight-v1", scope="registration-only", status="PASS",
@@ -423,7 +442,8 @@ def main():
                 unavailable=["capture_files", "native_manifests", "hardware_qualification"],
                 generator_index_bytes=generator_budget(matrix["plan"]))
         else:
-            result = run_matrix(args.matrix, args.out)
+            result = run_matrix(args.matrix, args.out, prune_raw=args.prune_raw,
+                apply_raw_prune=args.apply_raw_prune, backup_scope_confirmed=args.backup_scope_confirmed)
     except (ValueError, KeyError, TypeError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2

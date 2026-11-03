@@ -685,4 +685,71 @@ Both input routes share verdict/statistics code. Regression tests compare
 `verdict.json`, `results.csv` and `summary.txt` byte for byte on identical raw
 evidence, including Q drops, trace clamp, seven writers and a Q mismatch FAIL.
 `report.json` retains input-specific provenance, integrity and processing times.
-No raw source is deleted automatically.
+Raw sources remain complete unless the operator enables the explicit [retention stage](#raw-retention-after-complete-judgment).
+
+## Raw retention after complete judgment
+
+The complete matrix registers `extensions.m6.raw_retention` for each acquisition.
+Bind its `capture_directory` with the same `CAPTURE_ROOT` as the pair paths.
+Freeze the matrix before the first report. Two directional runs share one byte quota.
+The default plan estimates at most 1.8 TB of raw prefixes across 1,380 acquisitions.
+See the [formula and limits](reports/m6-raw-retention.md).
+
+First, register the complete raw SHA256 values without deletion:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" \
+  --out "$REPORT_DIR" --prune-raw
+```
+
+The stage requires complete seals for every member of an acquisition.
+It writes `$REPORT_DIR/.raw-retention/ACQUISITION_ID/manifest.json`.
+This manifest contains the full original SHA256, size and range of each declared raw file.
+It also binds the complete member seals and producer versions.
+The stage does not change a sealed scientific result.
+An incomplete or changed seal causes refusal.
+
+After the operator confirms the registered backup scope, apply the time cuts:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" \
+  --out "$REPORT_DIR" --prune-raw --apply-raw-prune --backup-scope-confirmed
+```
+
+This command replaces full raw files with diagnostic prefixes.
+Before the first replacement, the stage creates all prefixes and checks their total against the acquisition quota.
+A larger total causes refusal and leaves all originals unchanged.
+Each replacement requires a durable JSON record with the original filename, size, SHA256, retained range and UTC time.
+The record also contains the retained SHA256, size and replacement state.
+Atomic replacement preserves a separate hardlinked backup.
+
+The time range starts at the first ingress packet across the acquisition directions.
+The prefix includes warmup when warmup precedes the observation window.
+PCAPNG cuts use capture timestamps with interface offsets.
+Native cuts use `at_ns` through the registered engine-to-observation clock map.
+The stage scans every native record because native time order can differ from event order.
+Only single-interface Ethernet, nanosecond, same-clock PCAPNG pairs with final healthy statistics are supported.
+Unsupported profiles cause refusal.
+
+A retained PCAPNG remains readable with its original packet blocks and new prefix statistics.
+A retained native binary uses the diagnostic `hng-native-prefix-v1` envelope.
+Its event bytes, global order and producer sequences remain unchanged, including gaps.
+Read this native prefix explicitly:
+
+```sh
+python3 -m tools.g2.raw_prefix "$NATIVE_PREFIX" --out "$DIAGNOSTIC_JSONL"
+```
+
+A prefix cannot reproduce the complete judgment.
+Resume verifies each retained hash, original seal, non-raw source and report artifact before it returns the original verdict.
+The complete samples, C results, report files and seals remain unchanged.
+A fresh full reporter rejects the native prefix.
+Missing receipts, changed prefixes or changed report evidence cause refusal and preserve the complete result.
+The usual resume command remains valid after a successful cut.
+Use the three explicit flags again to finish an interrupted replacement.
+
+The output directory supports one controller at a time.
+Stop capture and close the registered raw files before this stage.
+Do not change source paths, receipts or raw files during this stage.
+Do not copy partial prefixes over the only external backup of a complete capture.
+The confirmation flag records the operator decision. It does not create or verify a remote backup.
