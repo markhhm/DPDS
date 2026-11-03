@@ -22,6 +22,11 @@ int main(int argc, char **argv)
     assert(host_prepare_port(0) == 0 && host_prepare_port(1) == 0);
     struct port_resources saved0 = host.resources[0], saved1 = host.resources[1];
     assert(saved0.rx_descriptors == 4096 && saved1.rx_descriptors == 4096);
+    /* A one-direction model retains both pools; the idle ingress has no storage/TX reservation. */
+    size_t saved_lines = host.line_count, first_capacity = host.lines[0].storage_capacity_packets;
+    host.line_count = 1; host.lines[0].storage_capacity_packets = 6318588;
+    assert(host_pool_objects(0,7) == 6330140 && host_pool_objects(1,7) == 10528);
+    host.line_count = saved_lines; host.lines[0].storage_capacity_packets = first_capacity;
     /* Synthetic adjusted PMD limits: RX512 + egressTX768 + reserves6272 + storage64. */
     host.resources[0].rx_descriptors = 512;
     host.resources[0].tx_descriptors = 1024;
