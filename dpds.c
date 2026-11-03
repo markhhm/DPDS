@@ -183,9 +183,9 @@ int main(int argc, char **argv)
             if (observe_physical) {
                 const struct rte_bus *bus = info.device ? rte_dev_bus(info.device) : NULL;
                 const char *name = bus ? rte_bus_name(bus) : NULL;
-                if (!name || !((!strcmp(name, "pci") && !strcmp(info.driver_name, "mlx5_pci")) ||
+                if (!name || !((!strcmp(name, "pci") && (!strcmp(info.driver_name, "mlx5_pci") || !strcmp(info.driver_name, "net_i40e"))) ||
                                (!strcmp(name, "auxiliary") && !strcmp(info.driver_name, "mlx5_auxiliary"))))
-                    rte_exit(EXIT_FAILURE, "Physical mode requires supported mlx5 PCI/auxiliary devices on every port\n");
+                    rte_exit(EXIT_FAILURE, "Physical mode requires supported physical driver/bus pairs on every port\n");
             } else if (strcmp(info.driver_name, "net_pcap") && strcmp(info.driver_name, "net_ring") && strcmp(info.driver_name, "net_null"))
                 rte_exit(EXIT_FAILURE, "Native capture currently supports only pcap/ring/null software PMDs\n");
         }
@@ -316,6 +316,11 @@ int main(int argc, char **argv)
     }
     host_cleanup();
     if (!observer_close(true)) host_invalidate("native observation incomplete");
+    if (observe_binary) {
+        struct observer_storage_health storage = observer_storage_health();
+        printf("observer_io high_water=%"PRIu64" capacity=%"PRIu64" pending=%"PRIu64" cpu=%d\n",
+            storage.blocks_high_water, storage.blocks_capacity, storage.blocks_pending, storage.cpu);
+    }
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
     rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
     rte_ring_free(tx_owner_rings[0]); rte_ring_free(tx_owner_rings[1]);

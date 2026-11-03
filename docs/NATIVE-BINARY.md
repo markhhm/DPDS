@@ -10,7 +10,7 @@ the I/O pool fills; sustained slow storage therefore causes explicit queue loss.
 native JSONL for the adapter, oracle, and retention consumer.
 
 Software capture supports PCAP, ring, and null PMDs with explicit software
-scope and identity policy. The mlx5 physical capture path has a separate opt-in described
+scope and identity policy. The supported physical capture path has a separate opt-in described
 below; hardware qualification remains separate work. Binary capture does not establish a packet-rate guarantee.
 
 ## Capture and offline conversion
@@ -333,8 +333,8 @@ dpds EAL_PCI_ARGUMENTS -- -c registered.json --observe-binary physical.hngb \
   --observe-physical --observe-identity stage1 --observe-capacity 65536
 ```
 
-This mode requires a supported mlx5 hardware driver/bus pair on every port:
-`mlx5_pci` on PCI, or `mlx5_auxiliary` on the auxiliary bus. PCI membership alone
+This mode requires a supported hardware driver/bus pair on every port:
+`mlx5_pci` or `net_i40e` on PCI, or `mlx5_auxiliary` on the auxiliary bus. PCI membership alone
 is insufficient: paravirtual NICs such as virtio and VMXNET3 are rejected.
 Missing/unknown device buses and mixed software/physical port sets are rejected.
 It cannot use `--observe-fd`, `--observe-software`, or `software-l2` identity. All
@@ -350,3 +350,7 @@ reporter and custody qualification boundaries are unchanged. Check queue/storage
 loss, watermarks and final drain on every hardware run, with the NVMe requirements
 above. Software bus-substitution tests exercise the gate; they are not hardware
 acceptance evidence.
+
+The host prints `observer_io high_water=... capacity=... pending=... cpu=...`
+after closing binary observation. Preserve it with the run log and require
+strict pool headroom and zero pending blocks in addition to producer health.
