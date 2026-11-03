@@ -150,6 +150,49 @@ class BprimeProfileTests(unittest.TestCase):
             self.assertAlmostEqual(sum(s.mode.pps*8*(len(s.packet.pkt)+24) for s in streams),
                                    10_000_000_000, delta=1)
 
+    def test_100g_rate_override_alone_cannot_exceed_the_10g_registration(self):
+        os.environ['BPRIME_RATE_BPS'] = '100000000000'
+        with self.assertRaisesRegex(ValueError, 'no greater than the registered L1 rate'):
+            self.profile().get_streams(direction=0)
+
+    def test_100g_registered_x_mix_reuses_profile_with_four_or_eight_workers(self):
+        matrix = json.loads((ROOT/'examples/m6-x710-fullrate.json').read_text())
+        condition = next(c for c in matrix['plan']['conditions']
+                         if c['id']=='fixed-E3-142-320-1-both-L9-X')
+        condition['lines'][0].update(offered_bps=100_000_000_000,
+                                     c_bps=90_000_000_000, q_bytes=83_886_080)
+        config = json.loads((ROOT/'examples/m5/bprime-710.json').read_text())
+        for line in config['lines']:
+            for field in ('c_bps','q_bytes','storage_capacity_packets','storage_capacity_bytes'):
+                line['model'][field] *= 10
+        # Materialization only: this fixture does not qualify engine pools or NICs.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/'matrix.json').write_text(json.dumps(matrix))
+            (root/'config.json').write_text(json.dumps(config))
+            os.environ.update(BPRIME_MATRIX_FILE=str(root/'matrix.json'),
+                              BPRIME_CONFIG_FILE=str(root/'config.json'))
+            for cores in (4,8):
+                os.environ['BPRIME_CORES'] = str(cores)
+                identities = set()
+                for direction in (0,1):
+                    streams = self.profile().get_streams(direction=direction)
+                    rates = {60:0.0,508:0.0,1518:0.0}
+                    self.assertEqual(len(streams),64)
+                    self.assertEqual({s.core_id for s in streams},set(range(cores)))
+                    for flow,stream in enumerate(streams):
+                        self.assertEqual(stream.core_id,flow % cores)
+                        self.assertEqual(stream.packet.vm.cache_size,0)
+                        frames = list(stream.packets(3))
+                        self.assertEqual([decode_probe(frame[46:])[0] for frame in frames],[0,1,2])
+                        identities.add(frames[0][30:42])
+                        rates[len(frames[0])] += stream.mode.pps
+                    self.assertAlmostEqual(sum(8*(n+24)*pps for n,pps in rates.items()),
+                                           100_000_000_000,delta=1)
+                    for pps in rates.values():
+                        self.assertAlmostEqual(pps,100_000_000_000/(8*(84+532+1542)),delta=1e-6)
+                self.assertEqual(len(identities),128)
+
     def test_dense_sequences_and_single_core_ownership_for_each_flow(self):
         flows = set()
         for direction in (0, 1):
