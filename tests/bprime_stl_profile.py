@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Offline STL contract: packet templates and VM instructions, no server or NIC."""
 import importlib.util
+from fractions import Fraction
 from ipaddress import IPv4Address
 import json
 import os
@@ -105,7 +106,7 @@ def stub_api():
 
 class BprimeProfileTests(unittest.TestCase):
     def setUp(self):
-        self.env = {'BPRIME_VLAN':'710', 'BPRIME_CORES':'4'}
+        self.env = {'BPRIME_VLAN':'710', 'BPRIME_CORES':'4', 'BPRIME_DURATION_S':'60'}
         for direction in (0, 1):
             prefix = f'BPRIME_P{direction}_'
             self.env.update({prefix+'SRC_MAC':f'02:00:00:00:00:{direction+1:02x}',
@@ -200,13 +201,54 @@ class BprimeProfileTests(unittest.TestCase):
                 self.assertIn(stream.core_id, range(4))
                 self.assertEqual(stream.packet.vm.cache_size, 0)
                 var = next(c for c in stream.packet.vm.commands if isinstance(c, FlowVar))
-                self.assertEqual((var.initial,var.minimum,var.size,var.op,var.step,var.split), (0,0,8,'inc',1,False))
+                self.assertEqual((var.initial,var.minimum,var.size,var.op,var.step,var.split), (0,0,4,'inc',1,False))
+                self.assertEqual(var.maximum, (1 << 32)-1)
                 packets = list(stream.packets(4))
                 self.assertEqual([decode_probe(p[46:])[0] for p in packets], [0,1,2,3])
                 identity = packets[0][30:38]+packets[0][38:42]
                 self.assertNotIn(identity, flows)
                 flows.add(identity)
         self.assertEqual(len(flows), 128)
+
+    def test_u32_low_word_preserves_u64_decoder_and_fixed_high_word(self):
+        for direction in (0, 1):
+            for stream in self.profile().get_streams(direction=direction):
+                var = next(c for c in stream.packet.vm.commands if isinstance(c, FlowVar))
+                write = next(c for c in stream.packet.vm.commands if isinstance(c, WriteVar))
+                self.assertEqual((var.size,write.offset,write.big), (4,50,True))
+                original = bytes(stream.packet.pkt)
+                for initial in (0,255,65535,(1 << 32)-2):
+                    var.initial = initial
+                    packets = list(stream.packets(2))
+                    self.assertEqual([decode_probe(p[46:])[0] for p in packets], [initial,initial+1])
+                    for packet in packets:
+                        self.assertEqual(packet[46:50], bytes(4))
+                        self.assertEqual(packet[:50], original[:50])
+                        self.assertEqual(packet[54:], original[54:])
+
+    def test_planned_duration_is_required_positive_and_finite(self):
+        del os.environ['BPRIME_DURATION_S']
+        with self.assertRaises(ValueError):
+            self.profile().get_streams(direction=0)
+        for duration in ('', '0', '-1', 'nan', 'inf'):
+            with self.subTest(duration=duration),patch.dict(os.environ,{'BPRIME_DURATION_S':duration}):
+                with self.assertRaises(ValueError):
+                    self.profile().get_streams(direction=0)
+
+    def test_duration_bound_uses_fastest_flow_and_rounds_packet_count_up(self):
+        # At 10G, each fastest flow has pps=10e9/(8*2158*21).
+        packet_period = Fraction(8*2158*21, 10_000_000_000)
+        safe = packet_period*((1 << 32)-1)
+        for direction in (0,1):
+            os.environ['BPRIME_DURATION_S'] = str(safe)
+            self.assertEqual(len(self.profile().get_streams(direction=direction)),64)
+            for excess in (Fraction(1,2), 1):
+                os.environ['BPRIME_DURATION_S'] = str(safe+packet_period*excess)
+                with self.subTest(direction=direction,excess=excess),self.assertRaisesRegex(ValueError,r'2\^32'):
+                    self.profile().get_streams(direction=direction)
+        # The same duration is safe at one hundredth the rate.
+        os.environ['BPRIME_RATE_BPS'] = '100000000'
+        self.assertEqual(len(self.profile().get_streams(direction=0)),64)
 
     def test_vlan_lengths_and_existing_reporter_decoder(self):
         for vlan in (710, 711):

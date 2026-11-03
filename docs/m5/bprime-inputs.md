@@ -176,7 +176,7 @@ More descriptors do not remove CPU/IRQ delays. Keep the existing zero-new-missed
 
 Set `GEN_STL_PROFILE` to the local source checkout's
 [`examples/m5/stl_bprime_x.py`](../../examples/m5/stl_bprime_x.py).
-Its SHA256 is `e1ae0658aa0fb603aac13eef94f1209779407aea3eb90c4bdb7210dd6c9907e4`.
+Its SHA256 is `9ac0bb2954caf8dfd76d23a5ec8acf8ad59cd3527539a6f0bdf7ae042b5c2169`.
 Retain `sha256sum "$GEN_STL_PROFILE"` with the attempt before loading it.
 Deploy the checkout with `tools/g2/probe.py`, the selected engine JSON and
 `examples/m6-x710-fullrate.json`; copying only the profile omits its registered inputs.
@@ -207,7 +207,10 @@ Do not add a second tag through a VLAN insertion offload.
 
 The shared probe encoder supplies the header, including selected-late=1 for this fixed p=1 condition.
 The 60-byte template retains the complete 13-byte header and one padding byte.
-Only the big-endian u64 sequence at UDP payload offset 0 changes; IPv4 UDP checksum is disabled.
+The sequence remains a big-endian u64 at UDP payload offset 0.
+Its high four bytes stay zero in the template. A 32-bit flow variable writes the
+low four bytes at absolute packet offset 50 (UDP payload offset 4), big-endian.
+IPv4 UDP checksum is disabled.
 The IPv4 header is fixed, so that write does not require an IP checksum update.
 
 ### Profile environment and core ownership
@@ -218,6 +221,7 @@ Values come from the operator's private settings. No network address defaults ar
 | --- | --- |
 | `BPRIME_VLAN` | Approved tag; must match the selected engine JSON |
 | `BPRIME_CORES` | Actual number of selectable TRex data-plane cores per port, 1 through flow count |
+| `BPRIME_DURATION_S` | Required positive planned total TX duration in seconds, including warm-up and all active phases; decimal or exact fraction |
 | `BPRIME_P0_SRC_MAC`, `BPRIME_P0_DST_MAC`, `BPRIME_P0_SRC_IP`, `BPRIME_P0_DST_IP` | Direction-0 packet addresses |
 | `BPRIME_P1_SRC_MAC`, `BPRIME_P1_DST_MAC`, `BPRIME_P1_SRC_IP`, `BPRIME_P1_DST_IP` | Direction-1 packet addresses |
 | `BPRIME_CONFIG_FILE` | Optional selected engine JSON; default is `examples/m5/bprime-$BPRIME_VLAN.json` in the checkout |
@@ -228,13 +232,36 @@ Export these variables into the **local generator-control interpreter**, not onl
 Retain hashes of any input-file overrides. A lower offer is diagnostic and does not qualify full B-prime.
 
 Each stream has one immutable flow tuple and its own uncached VM counter:
-`init=0`, `step=1`, `size=8`, `split_to_cores=False`.
+`init=0`, `step=1`, `size=4`, `max_value=4294967295`, `split_to_cores=False`.
 Its `core_id=flow_index % BPRIME_CORES` pins the entire stream to one core.
 There is no second stream or core producing that flow's counter, so multi-core scheduling
 cannot duplicate, interleave or skip sequence values within that flow's generated sequence.
 UDP source-port ranges separate flows and directions even if the operator uses the same IP pair.
-Sequence values are unique per flow until u64 wrap; keep each attempt separate and reload before a new one.
+The u32 VM avoids TRex v3.08's full-u64-range overflow: `max-min+1` becomes zero
+for max=u64::MAX, then its flow-variable constructor divides by that range.
+The existing u64 decoder therefore reads the same sequence values without changes.
+
+Before returning any streams, the profile checks every size class using exact
+rational arithmetic: `ceil(stream_pps * BPRIME_DURATION_S) < 2^32`.
+Missing, nonpositive, nonfinite or over-limit duration is rejected.
+At the registered 10G offer the fastest flows are the two classes with 21 flows:
+`stream_pps = 10000000000 / (8 * 2158 * 21) = 27582.858908160113`.
+The nominal wrap time is 155711.4623361024 seconds, about **43.25 hours**;
+the strict rounded packet-count check is slightly more conservative.
+Lower diagnostic rates increase that bound proportionally; all classes are still checked.
+This validates the planned duration, not elapsed server time. The control tool's
+start remains indefinite: the measurement owner must enforce stop within the
+declared total duration and reload streams for each new attempt.
+Do not extend an active attempt beyond its declared duration or raise its rate.
+Keep each attempt separate. A fresh load resets the high word and low-word counter.
 Generator or capture drops remain observable losses, not a sequence guarantee for received packets.
+
+For E810 with the affected v3.08 driver, a server-side workaround is
+`ext_dpdk_opt: ['--force-max-simd-bitwidth=64']` in its TRex YAML, with normal
+checksum defaults and `cache_size=0`. This disables the defective vector TX path;
+it does not change the registered packet mix or 10G offer. Hardware TX size-bin
+counters and RX lengths must pass a low-rate bypass check before full-rate use.
+Positive VM cache sizes replay precomputed sequence values and are not a substitute.
 
 Use a server with two approved 10G full-duplex ports and the matching STL client SDK.
 Configure its per-port/dual-port data-plane worker count to match `BPRIME_CORES`;
@@ -266,6 +293,7 @@ The [single-port candidate](#single-port-reduced-variant-pending-decision) has a
 
 ```sh
 # On the approved generator-control host, through its approved system-manager wrapper.
+export BPRIME_DURATION_S="${TOTAL_TX_SECONDS:?positive total active duration required}"
 "$GEN_PYTHON" "$GEN_CONTROL" start --server "$GEN_SERVER" \
   --ports "$GEN_PORT0" "$GEN_PORT1" --profile "$GEN_STL_PROFILE"
 "$GEN_PYTHON" "$GEN_CONTROL" status --server "$GEN_SERVER" \
