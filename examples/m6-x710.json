@@ -67,7 +67,7 @@
     "fixed_exposure_formula": "max(30,ceil(431*1024*8*1542/(min(C,R)*p_late))); p=0/1 uses main",
     "trace_registration": {
       "repository_path": "examples/m6-trace-conditions.json",
-      "sha256": "16d21ff342ecce9997c2305cc80e0a9f12898d18671449f0c483b4951b58f470"
+      "sha256": "700bf919a2524ea3f755182f7d49364a3698821bc8ed4973c74ded665bc50caf"
     },
     "traffic": {
       "U": {
@@ -278,6 +278,23 @@
           "numerator": 31,
           "denominator": 16883,
           "estimate": 0.0018361665580761714
+        }
+      }
+    },
+    "generator": {
+      "profile": "examples/m7-traffic/stl_probe.py",
+      "sequence_policy": "per-flow-dense",
+      "sequence_start": 0,
+      "sequence_step": 1,
+      "seqcheck_memory_limit_bytes": 4294967296,
+      "seqcheck_profiles": {
+        "U": {
+          "flows": 2,
+          "max_sequence_per_flow": 51070038
+        },
+        "X": {
+          "flows": 128,
+          "max_sequence_per_flow": 1710568
         }
       }
     },

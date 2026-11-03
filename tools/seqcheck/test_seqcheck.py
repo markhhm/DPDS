@@ -177,6 +177,19 @@ class SeqcheckTests(unittest.TestCase):
         code, r = self.check_pair(packets, list(reversed(packets)))
         self.assertEqual((code, len(r['flows']), r['totals']['ordinary_reorder']), (0, 40, 0))
 
+    def test_dense_sequence_zero_is_independent_in_every_flow_and_direction(self):
+        packets=[(seq,False,{'sport':12000+2*flow+direction})
+                 for seq in range(64) for direction in range(2) for flow in range(64)]
+        code,report=self.check_pair(packets,packets)
+        self.assertEqual(code,0)
+        self.assertEqual(len(report['flows']),128)
+        self.assertEqual(report['totals']['ingress'],8192)
+        for flow in report['flows']:
+            self.assertEqual(flow['ingress'],64)
+            self.assertEqual(flow['receiver'],64)
+            self.assertEqual(flow['missing'],0)
+            self.assertEqual(flow['duplicate_ingress'],0)
+
     def test_receiver_only_flow_is_unexpected_and_source_flow_missing(self):
         code, r = self.check_pair([(0, False)], [(0, False, {'vlan': 101})])
         self.assertEqual((code, len(r['flows']), r['totals']['missing'], r['totals']['unexpected']), (1, 2, 1, 1))

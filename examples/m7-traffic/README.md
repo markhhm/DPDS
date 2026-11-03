@@ -36,12 +36,27 @@ accounting is 1542 bytes, about 8.106 Mpps/direction at 100G. Payload starts at
 byte 46 and preserves the probe's `!QIB` header and padding. The selected-late
 flag is zero; model/reference selection determines emulator lateness.
 
-The VM increments the big-endian uint64 ID, splits values across data cores,
-and reserves the high bit for direction. IDs reset on a new run: record a new
-run ID. Use no packet cache or duplicate copy of a stream. Multi-core IDs are
-identities; actual ingress observation supplies wire order. IPv4 UDP checksum
-is zero, so payload ID writes need no checksum offload. STL already carries
-its VLAN; use its matching platform template to retain one tag.
+Set `M7_FLOWS` (default 64) and `M7_RATE_BPS` (default 100G L1 per direction).
+The profile creates one stream and fixed UDP five-tuple per flow. Each stream
+owns a uint64 counter that starts at zero and increments by one. The source
+port distinguishes flows and directions. No direction bit enters the sequence.
+
+The VM does not split that counter across cores. `core_id` pins each stream
+to one relative TRex data-core index, round-robin over `M7_DATA_CORES`.
+
+Do not replicate a flow on another core or cache copies of its packets.
+Load fresh streams for each new run and retain a new run ID. Each flow's
+sequence must stay unique for the whole capture, without wrap or resets.
+Actual ingress observation supplies wire order. UDP checksum is zero.
+The profile already carries one VLAN tag.
+
+M6 uses this same counter recipe. Set `M7_RATE_BPS` from that condition's offer
+and `M7_FLOWS=1` for U or `64` for X. The fixed-MTU example does not configure
+the X frame mix. The private X profile must retain **one counter per five-tuple**
+across all packet sizes, with equal packet counts at Q charges 64/512/1522.
+Do not create three independent counters for the same flow's three sizes.
+Register that rendered profile and its dense sequence bounds as described in
+[the matrix preflight](../../docs/M6-RUNNER.md#generator-sequence-and-index-budget).
 
 **ASTF:** set disjoint `M7_CLIENT_START/END` and `M7_SERVER_START/END`
 ranges, with at least 64 client addresses; set `M7_IP_OFFSET` for this port
@@ -54,6 +69,12 @@ connection rate, not a bit rate. The platform template supplies the VLAN.
 The 284 ms RTT comes from the registered path/emulator, with no application
 delay inserted. At 100G the BDP is 3.55 GB, so
 `ceil(100e9 * 0.284 / (8 * 64 * 2**20)) = 53` flows; 64 provides margin.
+
+ASTF retains the TCP stack's per-connection byte sequence space. It does not
+produce UDP probe IDs and does not use UDP seqcheck. TCP ISNs, segmentation
+and retransmissions are not a dense packet counter starting at zero. Use STL
+probes for the sequence-qualified M6 path. Do not relabel ASTF as that evidence.
+
 Buffer caps do not prove negotiated rwnd/cwnd or throughput. Provision generator
 RAM separately and confirm steady traffic after connection warmup. ACKs,
 retransmissions and headers count toward L1; record L1/L2/L7 separately.

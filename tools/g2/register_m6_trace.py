@@ -66,6 +66,9 @@ def register_episode_acceptance(matrix):
             row['late_diagnostic_target_431_met'] = row.pop('steady_planning_target_431_met')
             row['late_diagnostic_expected_368_met'] = row.pop('steady_expected_368_met')
             row['late_subset_affects_acceptance'] = False
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.g2.expand_m6_x710 import generator_registration
+    plan['generator'] = generator_registration(plan)
     return matrix
 
 

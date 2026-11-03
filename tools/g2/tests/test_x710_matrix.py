@@ -26,7 +26,9 @@ def fixture(root):
         runs.append(dict(id=family,manifest=f'{family}/pair.json'))
     matrix=root/'matrix.json'
     matrix.write_text(json.dumps(dict(schema='hng-m6-matrix-v1',mode='pcapng',scope='software-only',
-        plan=dict(deployment=deployment()),runs=runs)))
+        plan=dict(deployment=deployment(),generator=dict(sequence_policy='per-flow-dense',
+            sequence_start=0,sequence_step=1,seqcheck_memory_limit_bytes=4294967296,
+            seqcheck_profiles=dict(probe=dict(flows=1,max_sequence_per_flow=399)))),runs=runs)))
     return matrix
 
 

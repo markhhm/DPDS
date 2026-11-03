@@ -55,6 +55,27 @@ def fixed_conditions():
     return rows
 
 
+def generator_registration(plan):
+    """Bound one directional capture, including all VLAN groups and warmup offers."""
+    profiles={}
+    conditions=plan['conditions'] if 'conditions' in plan else plan['trace_conditions']
+    for condition in conditions:
+        traffic=plan['traffic'][condition['traffic']];flows=traffic['flows']
+        wire=Fraction(sum(traffic['wire_bytes']),len(traffic['wire_bytes']))
+        duration=Fraction(str(condition.get('observation_seconds',condition.get('steady_seconds'))))+plan['warmup_seconds']
+        lines=condition['lines'] if 'lines' in condition else [
+            dict(offered_bps=condition['offered_bps_per_line'])]*(2 if condition['trace_kind']=='pair' else 1)
+        for item in lines:
+            offers=Fraction(item['offered_bps'])*duration/(8*wire)
+            packets=-(-offers.numerator//offers.denominator)
+            bound=profiles.setdefault(condition['traffic'],dict(flows=0,max_sequence_per_flow=0))
+            bound['flows']=max(bound['flows'],flows*len(lines))
+            bound['max_sequence_per_flow']=max(bound['max_sequence_per_flow'],(packets+flows-1)//flows-1)
+    return dict(profile='examples/m7-traffic/stl_probe.py',sequence_policy='per-flow-dense',
+        sequence_start=0,sequence_step=1,seqcheck_memory_limit_bytes=4294967296,
+        seqcheck_profiles=profiles)
+
+
 def build_matrix():
     base=json.loads((EXAMPLES/'m6-short.json').read_text())
     raw=(EXAMPLES/'m6-trace-conditions.json').read_bytes();source=json.loads(raw)
@@ -94,6 +115,7 @@ def build_matrix():
                           ingress_port=port,egress_port=1-port)
                 runs.append(dict(id=f'{aid}-d{port}',family='trace' if c['input_kind']=='trace' else c['family'],
                     manifest='${CAPTURE_ROOT}/'+aid+f'/d{port}/pair.json',extensions=dict(m6=meta)))
+    plan['generator']=generator_registration(plan)
     total=sum(seconds.values())
     plan['budget']=dict(status='ESTIMATE',acquisition_runs=sum(acquisitions.values()),
         fixed_acquisition_runs=acquisitions['fixed'],trace_episode_runs=acquisitions['trace'],

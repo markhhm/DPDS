@@ -20,6 +20,23 @@
     "f_definition": "full 11s received-source late share; full-source 15s median baseline; strict excess >20ms",
     "episode_formula": "min(20,ceil(431/(surviving_bps/(8*1542*1024)*9*f)))",
     "caveat": "Episode counts retain the capped planning formula. Each episode is judged independently from measured main timing pairs and full-identity integrity checks. Late-subset sample estimates are diagnostic only; no episode aggregation is needed.",
+    "generator": {
+      "profile": "examples/m7-traffic/stl_probe.py",
+      "sequence_policy": "per-flow-dense",
+      "sequence_start": 0,
+      "sequence_step": 1,
+      "seqcheck_memory_limit_bytes": 4294967296,
+      "seqcheck_profiles": {
+        "U": {
+          "flows": 2,
+          "max_sequence_per_flow": 8916990
+        },
+        "X": {
+          "flows": 128,
+          "max_sequence_per_flow": 298670
+        }
+      }
+    },
     "traffic": {
       "U": {
         "q_bytes": [

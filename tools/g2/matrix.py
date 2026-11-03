@@ -19,6 +19,7 @@ from .reference import strict_json
 from .report import error_report, write_outputs
 from .registration import validate_deployment
 from .validate import load_registration
+from tools.seqcheck.budget import index_bytes
 
 
 EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "INCONCLUSIVE": 2}
@@ -275,6 +276,37 @@ def report_one(manifest_path, output, run_id, scope, mode="software", expected_d
     return EXIT[result["status"]]
 
 
+def generator_budget(plan):
+    """Check declared bounds, not actual traffic; legacy unregistered inputs stay supported."""
+    generator=plan.get('generator')
+    if generator is None and 'generator' not in plan:
+        if 'traffic' not in plan and 'deployment' not in plan:
+            return None
+        raise ValueError('INVALID generator: register per-flow-dense sequence policy and seqcheck bounds')
+    try:
+        if not isinstance(generator,dict) or generator.get('sequence_policy')!='per-flow-dense':
+            raise ValueError('sequence_policy must be per-flow-dense; global sequences are not allowed')
+        if (type(generator.get('sequence_start')) is not int or generator['sequence_start']!=0 or
+                type(generator.get('sequence_step')) is not int or generator['sequence_step']!=1):
+            raise ValueError('each flow requires sequence_start=0 and sequence_step=1')
+        limit=generator['seqcheck_memory_limit_bytes']
+        if type(limit) is not int or not 0<limit<=4294967296:
+            raise ValueError('seqcheck_memory_limit_bytes must be positive and at most 4294967296')
+        profiles=generator['seqcheck_profiles']
+        if not isinstance(profiles,dict) or not profiles:
+            raise ValueError('seqcheck_profiles requires flow counts and inclusive per-flow sequence maxima')
+        budgets={}
+        for name,bounds in profiles.items():
+            shape(bounds,('flows','max_sequence_per_flow'))
+            budgets[name]=index_bytes(bounds['flows'],bounds['max_sequence_per_flow'])
+            if budgets[name]>limit:
+                raise ValueError(f'{name}: estimated seqcheck index {budgets[name]} bytes exceeds '
+                                 f'{limit} byte limit; split captures and register the full actual flow/sequence bounds')
+        return budgets
+    except (ValueError,KeyError,TypeError) as error:
+        raise ValueError('INVALID generator: '+str(error)) from error
+
+
 def read_matrix(matrix_path):
     """Check registration schema, IDs and resolved paths; never open captures."""
     path = Path(matrix_path)
@@ -287,6 +319,7 @@ def read_matrix(matrix_path):
         raise ValueError("unsupported matrix schema/scope")
     if not isinstance(matrix["plan"], dict) or not isinstance(matrix["runs"], list) or not matrix["runs"]:
         raise ValueError("matrix requires plan metadata and at least one registered run")
+    generator_budget(matrix["plan"])
     expected_deployment = matrix["plan"].get("deployment")
     if "deployment" in matrix["plan"]:
         validate_deployment(expected_deployment)
@@ -387,7 +420,8 @@ def main():
                 registered_scope=matrix["scope"], g2_qualified=False,
                 run_count=len(matrix["runs"]), path_count=len(matrix["runs"]),
                 families=dict(Counter(run.get("family", "unclassified") for run in matrix["runs"])),
-                unavailable=["capture_files", "native_manifests", "hardware_qualification"])
+                unavailable=["capture_files", "native_manifests", "hardware_qualification"],
+                generator_index_bytes=generator_budget(matrix["plan"]))
         else:
             result = run_matrix(args.matrix, args.out)
     except (ValueError, KeyError, TypeError, OSError) as error:
