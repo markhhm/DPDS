@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import time
 
 from tools.seqcheck.test_seqcheck import block, frame, option
@@ -75,7 +76,8 @@ def main():
                    for k in ('ingress', 'receiver'))
         runs.append(dict(wall_seconds=elapsed,
                          cpu_seconds=usage.ru_utime + usage.ru_stime,
-                         max_rss_kib=usage.ru_maxrss,
+                         # Darwin reports bytes; Linux already reports KiB.
+                         max_rss_kib=usage.ru_maxrss / 1024 if sys.platform == 'darwin' else usage.ru_maxrss,
                          observed_packets_per_second=2 * args.packets / elapsed,
                          ingress_pairs_per_second=args.packets / elapsed))
     summary = dict(packets_per_capture=args.packets, flows=args.flows, caplen=args.caplen,
