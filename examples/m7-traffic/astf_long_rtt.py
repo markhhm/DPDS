@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""64 persistent full-duplex TCP flows, 64 MiB endpoint buffers; configuration only."""
+"""64 persistent TCP flows; native TCP sequencing, not UDP probe/seqcheck identities."""
 import os
 
 from trex.astf.api import (

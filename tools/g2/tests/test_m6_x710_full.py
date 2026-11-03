@@ -57,6 +57,40 @@ class FullX710Tests(unittest.TestCase):
             self.assertEqual(len(checked['runs']),1960)
             self.assertEqual(list(root.iterdir()),[path])
 
+    def test_full_length_x_per_flow_index_is_below_one_decimal_gigabyte(self):
+        from tools.seqcheck.budget import index_bytes
+        from tools.g2.matrix import generator_budget
+        from fractions import Fraction
+        matrix=json.loads((EXAMPLES/'m6-x710.json').read_text());plan=matrix['plan']
+        condition=next(c for c in plan['conditions'] if c['id']=='fixed-E1-65-5-0.01-forward-L9-X')
+        self.assertEqual(condition['observation_seconds'],61)
+        bits=condition['lines'][0]['offered_bps']*(condition['observation_seconds']+plan['warmup_seconds'])
+        packets=Fraction(bits*3,8*(84+532+1542))
+        packets=-(-packets.numerator//packets.denominator)
+        self.assertEqual(packets,109476368)
+        maximum=(packets+63)//64-1
+        self.assertEqual(maximum,1710568)
+        dense=index_bytes(64,maximum);global_ids=index_bytes(64,packets-1)
+        self.assertLessEqual(dense,1000000000)
+        self.assertGreater(global_ids,4294967296)
+        self.assertTrue(all(size<=4294967296 for size in generator_budget(plan).values()))
+
+    def test_trace_only_snapshot_and_producer_keep_generator_registration(self):
+        import copy
+        from tools.g2.matrix import read_matrix
+        from tools.g2.register_m6_trace import register_episode_acceptance
+        path=EXAMPLES/'m6-trace-conditions.json'
+        snapshot=json.loads(path.read_text())
+        self.assertEqual(len(read_matrix(path)['runs']),len(snapshot['runs']))
+        original=copy.deepcopy(snapshot)
+        for condition in original['plan']['trace_conditions']:
+            condition['all_steady_planning_targets_met']=condition.pop('all_late_diagnostic_targets_met')
+            for row in condition['directions'].values():
+                row['steady_planning_target_431_met']=row.pop('late_diagnostic_target_431_met')
+                row['steady_expected_368_met']=row.pop('late_diagnostic_expected_368_met')
+        original['plan'].pop('generator',None)
+        self.assertEqual(register_episode_acceptance(original),snapshot)
+
     def test_generator_is_deterministic_and_preserves_trace_registration(self):
         from tools.g2.expand_m6_x710 import build_matrix
         matrix=build_matrix()

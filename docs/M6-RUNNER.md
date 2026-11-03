@@ -285,6 +285,56 @@ self-loop alone does not satisfy this check. This preparation does not execute
 hardware or establish physical acceptance; an eventual NIC/PMD change requires
 clock and topology qualification again.
 
+### Generator sequence and index budget
+
+Register probe generators in `plan.generator`, before capture or offline reporting.
+Matrices with deployment/traffic registration require this block. Legacy matrices
+without those registrations can retain their original input form.
+The reader rejects a missing policy, a global sequence or a nonzero start.
+It also rejects a stride other than one or an index estimate above the limit.
+CLI errors exit 2 with `INVALID generator` before capture reads or output creation.
+
+```json
+{
+  "profile": "examples/m7-traffic/stl_probe.py",
+  "sequence_policy": "per-flow-dense",
+  "sequence_start": 0,
+  "sequence_step": 1,
+  "seqcheck_memory_limit_bytes": 4294967296,
+  "seqcheck_profiles": {
+    "X": {"flows": 64, "max_sequence_per_flow": 1710568}
+  }
+}
+```
+
+Each profile describes an alternative worst directional capture. `flows` includes
+all distinct five-tuple/VLAN groups in that capture. `max_sequence_per_flow` is
+an inclusive upper bound. Include warmup offers, including packets that the DUT
+later drops. Require balanced per-flow packet counts for the generated bounds.
+After any change to flow counts, exposure, rates or frame mix, regenerate the bounds.
+
+The [STL recipe](../examples/m7-traffic/README.md) keeps each flow's counter on
+one data core. The generated X710 matrix records conservative U/X bounds for
+all conditions, with both VLAN groups where applicable. No generator or capture
+starts during preflight. For M5's registration template, replace the flow/range
+placeholders with JSON integers, not quoted numeric strings.
+
+The LP64 estimate uses the existing C index: 4096 sequence slots and 34312 bytes
+per page, plus allocation/hash-table growth allowance. It does not allocate the
+index. Preflight reports `generator_index_bytes` per registered profile.
+
+A full 63-second X direction at 10G has at most 109,476,368 offers by the
+registered equal-packet frame mix. Sixty-four dense flows need **918,887,424 bytes**
+by this estimate, below 1 GB (decimal). Global-strided IDs require about 58.76 GB.
+
+The full two-VLAN X bound is 1,837,770,752 bytes. The process limit remains 4 GiB.
+
+These are index estimates, not measured total RSS. Capture buffers, libraries and
+other processing also need memory. Registration checks declarations, not actual
+profile behavior or captures. Retain the process limit and full stream checks.
+An allocation failure still yields INVALID, never partial PASS. ASTF TCP is
+outside this UDP-probe index contract.
+
 ### Complete G-short inventory and acquisition budget
 
 The 72 main and 288 boundary conditions include the 60 trace conditions;

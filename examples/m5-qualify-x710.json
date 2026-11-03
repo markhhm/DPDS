@@ -21,6 +21,11 @@
       "line": "${LINE_NAME}"
     },
     "generator": {
+      "sequence_policy": "per-flow-dense",
+      "sequence_start": 0,
+      "sequence_step": 1,
+      "seqcheck_memory_limit_bytes": 4294967296,
+      "seqcheck_profiles": {"probe": {"flows": "${GENERATOR_FLOWS}", "max_sequence_per_flow": "${MAX_SEQUENCE_PER_FLOW}"}},
       "host": "${GENERATOR_HOST}",
       "tx_interface": "${GENERATOR_TX_IF}",
       "rx_interface": "${GENERATOR_RX_IF}"
