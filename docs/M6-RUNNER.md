@@ -302,7 +302,7 @@ CLI errors exit 2 with `INVALID generator` before capture reads or output creati
   "sequence_step": 1,
   "seqcheck_memory_limit_bytes": 4294967296,
   "seqcheck_profiles": {
-    "X": {"flows": 64, "max_sequence_per_flow": 1710568}
+    "X": {"flows": 64, "max_sequence_per_flow": 1656264}
   }
 }
 ```
@@ -323,11 +323,11 @@ The LP64 estimate uses the existing C index: 4096 sequence slots and 34312 bytes
 per page, plus allocation/hash-table growth allowance. It does not allocate the
 index. Preflight reports `generator_index_bytes` per registered profile.
 
-A full 63-second X direction at 10G has at most 109,476,368 offers by the
-registered equal-packet frame mix. Sixty-four dense flows need **918,887,424 bytes**
-by this estimate, below 1 GB (decimal). Global-strided IDs require about 58.76 GB.
+A 244-second X capture at 2.5G has at most 106,000,927 offers by the
+registered equal-packet frame mix. Sixty-four dense flows need **890,326,528 bytes**
+by this estimate, below 1 GB (decimal). Global-strided IDs exceed the 4 GiB process limit.
 
-The full two-VLAN X bound is 1,837,770,752 bytes. The process limit remains 4 GiB.
+The conservative two-VLAN X bound is 1,780,648,960 bytes. The process limit remains 4 GiB.
 
 These are index estimates, not measured total RSS. Capture buffers, libraries and
 other processing also need memory. Registration checks declarations, not actual
@@ -336,6 +336,13 @@ An allocation failure still yields INVALID, never partial PASS. ASTF TCP is
 outside this UDP-probe index contract.
 
 ### Complete G-short inventory and acquisition budget
+
+The main A matrix uses quarter-rate R, C and byte Q, preserving R/C and Q/C.
+See the [scaling and resource estimate](reports/m6-quarter-rate.md) and
+[four-source, single-port mirror procedure](m6/quarter-rate-capture.md).
+Use [m6-x710-fullrate.json](../examples/m6-x710-fullrate.json) for the separate full-rate C campaign and B-prime STL traffic.
+Its conditions retain their original rates and exposures; the B-prime condition offers 10G with C=9G per direction.
+The main `m6-x710.json` is quarter-rate A. It does not supply the full-rate traffic settings.
 
 The 72 main and 288 boundary conditions include the 60 trace conditions;
 the trace count is **not** an additional 60. Main is M-CA/M-CB fixed cable
@@ -359,21 +366,22 @@ it does not acquire or split captures.
 | Inventory | Conditions | Acquisitions | Directional reporter inputs | Acquisition time estimate |
 | --- | ---: | ---: | ---: | ---: |
 | Fixed main | 36 | 108 | 144 | 1 h 08 min 24 s |
-| Fixed boundary | 264 | 264 | 352 | 3 h 27 min 30 s |
+| Fixed boundary | 264 | 264 | 352 | 7 h 22 min 48 s |
 | Trace, including all registered episodes | 60 | 1,008 | 1,464 | 4 h 45 min 36 s |
-| Total | 360 | 1,380 | 1,960 | 9 h 21 min 30 s |
+| Total | 360 | 1,380 | 1,960 | 13 h 16 min 48 s |
 
 Fixed observation uses the G rule, with surviving rate `min(C,R)` per line:
 `max(30, ceil(431*1024*8*1542/(surviving_bps*p_late)))` seconds.
 Empty ordinary/late strata at p=0 or p=1 use main. Of the 300 fixed conditions,
-222 observe for 30 s and 78 for 61 s (the p=.01 cells at 9G); each acquisition
-adds 2 s warmup, 1 s drain and 5 s reset. This applies the 30–70 s rule directly,
-without the conditional 1/256 shortening. Both directions count once in elapsed
+222 observe for 30 s and 78 for 242 s (the p=.01 cells at a 2.25G surviving rate); each acquisition
+adds 2 s warmup, 1 s drain and 5 s reset. The old 30–70 s window is insufficient
+at quarter rate. The sample thresholds and mask remain unchanged, without
+the conditional 1/256 shortening. Both directions count once in elapsed
 time. Trace episodes retain 2+9+1+5=17 s; repetitions/episodes never pool gates.
 
 Adding the planning reserve of 4 h for setup, recalibration and reruns gives
-**13 h 21 min 30 s**. A conservative alternative with every fixed acquisition
-at 70 s gives 12 h 49 min 12 s before reserve, or **16 h 49 min 12 s** with it.
+**17 h 16 min 48 s**. The lower rate requires longer rare-late exposures,
+so the original full-rate acquisition estimate cannot be reused.
 These are estimates, not measured runtimes. Offline reporting, capture disk
 throughput, equipment availability and hardware prerequisites are not included.
 Measured sample counts and unchanged reporter gates remain authoritative.
@@ -382,6 +390,7 @@ Regenerate the committed inventory without reading profiles or captures:
 
 ```sh
 python3 -m tools.g2.expand_m6_x710 --out examples/m6-x710.json
+python3 -m tools.g2.expand_m6_x710 --rate-divisor 1 --out examples/m6-x710-fullrate.json
 ```
 
 After binding private deployment, capture-root and trace-profile-root variables,
@@ -430,7 +439,7 @@ On failure, stop traffic, drain and restore the allocated resources per [Handoff
 |---|---|---|
 | 1. Bypass and clocks | `sh -c "$BYPASS_COMMAND"`<br>`sh -c "$CALIBRATION_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.m5_qualify "$M5_MATRIX" --out "$M5_REPORT_DIR" --p1-manifest "$P1_0_MANIFEST" --manifest-out "$P1_0_QUALIFIED"` | Register zero-delay captures at low and target loads. Keep identities/counters and `CALIBRATION_FILE`. Require physical M5 PASS, zero bypass missing identities and uncertainty ≤10,000 ns; the exported P1-0 environment status must also be PASS. Otherwise stop here. |
 | 2. Observer cost pilot | `python3 -m tools.g2.validate "$PILOT_MANIFEST"`<br>`OFFERED_BPS=10000000000 sh -c "$PILOT_CAPTURE_COMMAND"`<br>`prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$PILOT_MATRIX" --out "$PILOT_REPORT_DIR"` | Register the pilot with required-cell `mask_bits=8`. Require preflight PASS before capture. Require zero observer drops, positive queue capacity, high-water below capacity and no `observer_cost` warnings or missing evidence. Record `OBSERVER_COST_REPORT`, `EVIDENCE_COMMIT` and `RUN_ID` per the [cost gate](BRING-UP.md#observer-cost-gate-before-m6). On failure, retain the previous plan and stop for review. |
-| 3. Register and capture M6 | `cp -n examples/m6-x710.json "$M6_MATRIX"`<br>`python3 -m tools.g2.matrix "$M6_MATRIX" --preflight`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Bind private variables, register the expanded repeat/episode pair paths and copy `plan.deployment` to every native manifest; declare each line family. Preserve simultaneous-direction acquisition groups. After step 2 passes, register fixed cells at 1/256 and 30 s exposure and recalculate the budget. Keep the v1 header, sample gates and trace plan. Require registration-only PASS and preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
+| 3. Register and capture M6 | `cp -n examples/m6-x710.json "$M6_MATRIX"`<br>`python3 -m tools.g2.matrix "$M6_MATRIX" --preflight`<br>`python3 -m tools.g2.validate "$RUN_MANIFEST"`<br>`sh -c "$M6_CAPTURE_COMMAND"` | Bind private variables, register the expanded repeat/episode pair paths and copy `plan.deployment` to every native manifest; declare each line family. Preserve simultaneous-direction acquisition groups. After step 2 passes, retain the A matrix mask of 1/1024 and its registered 30 s or 242 s fixed exposure. Bind both capture interfaces to the one `CAPTURE_IF` and qualify all four labelled mirror sources per the [A capture procedure](m6/quarter-rate-capture.md). Keep the v1 header, sample gates and trace plan; the pilot does not authorize a sampling shortcut. Require registration-only PASS and preflight PASS for every native run manifest before capture. Require closed pairs, native seals and capture-health evidence. On rejection or incomplete capture, stop here. |
 | 4. Release the testbed | `sh -c "$POST_BYPASS_COMMAND"`<br>`sh -c "$RESTORE_COMMAND"` | Require the post-run bypass check, drain and restoration records. On failure, record the reason and stop here. Preserve source directories for adapter symlinks. |
 | 5. Report offline | `prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" --out "$REPORT_DIR"` | Run after capture, away from the testbed. Expect per-run `report.json`, `results.csv`, `verdict.json` and final `summary.json`. On interruption, stop controller and worker, then repeat this exact command/directory. [Resume](#resume-an-interrupted-matrix) skips verified sealed reports and preserves partial attempts. It resumes reports, not capture. |
 | 6. Read the aggregate | `cat "$REPORT_DIR/summary.json"` | Read `status` and `measurement_status`. Require all registered run IDs, repeats and required rows. Step 5 reporter exits: 0 all PASS, 1 FAIL, 2 invalid/inconclusive evidence. The `cat` exit is not a verdict. Keep verdicts and stderr logs. If the summary is absent, stop here and resume step 5. |

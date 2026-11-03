@@ -41,7 +41,14 @@ provenance below. A source checkout is not proof of its executable's revision.
 ## 2. Expanded CONFIG_FILE and node memory
 
 Condition: **`fixed-E3-142-320-1-both-L9-X`** from
-[the registered matrix](../../examples/m6-x710.json).
+[the full-rate registered matrix](../../examples/m6-x710-fullrate.json).
+The main `m6-x710.json` now defines quarter-rate A conditions and must not supply B-prime traffic rates.
+For the B-prime STL profile, explicitly select the full-rate registration:
+
+```sh
+export BPRIME_MATRIX_FILE="$DPDS_SRC/examples/m6-x710-fullrate.json"
+```
+
 Use the committed engine file for the selected `ACTIVE_VLAN`, one new attempt per tag:
 
 | ACTIVE_VLAN | CONFIG_FILE relative to DPDS_SRC | SHA256 |
