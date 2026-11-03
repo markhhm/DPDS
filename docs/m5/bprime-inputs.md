@@ -172,13 +172,92 @@ The all-small arrival rate is 10000000000/(8*84) = **14880952.380952 packets/s**
 Use the PMD's actual descriptor count in the formula. Free space can be less than the full count.
 More descriptors do not remove CPU/IRQ delays. Keep the existing zero-new-missed/error gates.
 
+## 3. Registered STL X profile
+
+Set `GEN_STL_PROFILE` to the local source checkout's
+[`examples/m5/stl_bprime_x.py`](../../examples/m5/stl_bprime_x.py).
+Its SHA256 is `e1ae0658aa0fb603aac13eef94f1209779407aea3eb90c4bdb7210dd6c9907e4`.
+Retain `sha256sum "$GEN_STL_PROFILE"` with the attempt before loading it.
+Deploy the checkout with `tools/g2/probe.py`, the selected engine JSON and
+`examples/m6-x710-fullrate.json`; copying only the profile omits its registered inputs.
+Add that checkout to the control interpreter's `PYTHONPATH`, alongside its matching STL API.
+
+The profile defaults to the preserved full-rate matrix, independent of the main M6 quarter-rate matrix.
+It reads `plan.traffic.X` and condition
+`fixed-E3-142-320-1-both-L9-X` from the registered matrix.
+The engine JSON provides the VLAN and min/max envelope; it does not contain mix proportions.
+The profile cross-checks those against the selected direction before producing streams.
+
+Each direction contains 64 distinct UDP flows, one fixed-size stream per flow.
+Round-robin size assignment gives 22/21/21 flows at Q charges 64/512/1522.
+Each size class receives the same packet rate:
+
+```text
+class_pps = offered_bps / (8 * sum(wire_bytes))
+stream_pps = class_pps / number_of_flows_in_its_size_class
+wire_bytes = stored_bytes + 4 FCS + 20 preamble/IFG
+```
+
+Thus equal packet counts remain exact in the rate model despite 64 not being divisible by three.
+The default offer comes from the condition: **10G L1 per direction**, with multiplier 1.
+Tests allow at most **1 bit/s** of floating-point sum error, and 1e-6 pps per class.
+Actual wire rate and capture loss still require the existing runtime checks.
+Templates contain one VLAN tag and 60/508/1518 stored bytes; the NIC supplies FCS.
+Do not add a second tag through a VLAN insertion offload.
+
+The shared probe encoder supplies the header, including selected-late=1 for this fixed p=1 condition.
+The 60-byte template retains the complete 13-byte header and one padding byte.
+Only the big-endian u64 sequence at UDP payload offset 0 changes; IPv4 UDP checksum is disabled.
+The IPv4 header is fixed, so that write does not require an IP checksum update.
+
+### Profile environment and core ownership
+
+Values come from the operator's private settings. No network address defaults are supplied.
+
+| Variable | Meaning |
+| --- | --- |
+| `BPRIME_VLAN` | Approved tag; must match the selected engine JSON |
+| `BPRIME_CORES` | Actual number of selectable TRex data-plane cores per port, 1 through flow count |
+| `BPRIME_P0_SRC_MAC`, `BPRIME_P0_DST_MAC`, `BPRIME_P0_SRC_IP`, `BPRIME_P0_DST_IP` | Direction-0 packet addresses |
+| `BPRIME_P1_SRC_MAC`, `BPRIME_P1_DST_MAC`, `BPRIME_P1_SRC_IP`, `BPRIME_P1_DST_IP` | Direction-1 packet addresses |
+| `BPRIME_CONFIG_FILE` | Optional selected engine JSON; default is `examples/m5/bprime-$BPRIME_VLAN.json` in the checkout |
+| `BPRIME_MATRIX_FILE` | Optional immutable registered matrix; default is `examples/m6-x710-fullrate.json` in the checkout |
+| `BPRIME_RATE_BPS` | Optional positive L1 offer override, no greater than the condition's offer; full B-prime requires 10000000000 |
+
+Export these variables into the **local generator-control interpreter**, not only the server service.
+Retain hashes of any input-file overrides. A lower offer is diagnostic and does not qualify full B-prime.
+
+Each stream has one immutable flow tuple and its own uncached VM counter:
+`init=0`, `step=1`, `size=8`, `split_to_cores=False`.
+Its `core_id=flow_index % BPRIME_CORES` pins the entire stream to one core.
+There is no second stream or core producing that flow's counter, so multi-core scheduling
+cannot duplicate, interleave or skip sequence values within that flow's generated sequence.
+UDP source-port ranges separate flows and directions even if the operator uses the same IP pair.
+Sequence values are unique per flow until u64 wrap; keep each attempt separate and reload before a new one.
+Generator or capture drops remain observable losses, not a sequence guarantee for received packets.
+
+Use a server with two approved 10G full-duplex ports and the matching STL client SDK.
+Configure its per-port/dual-port data-plane worker count to match `BPRIME_CORES`;
+`core_id` is a TRex logical worker index, not a Linux CPU ID or the DUT's seven-core count.
+The installed SDK/server must support core-pinned streams and uncached flow variables.
+The upstream [STLStream API](https://trex-tgn.cisco.com/trex/doc/cp_stl_docs/api/profile_code.html)
+defines that pin, and the [field-engine API](https://trex-tgn.cisco.com/trex/doc/cp_stl_docs/api/field_engine.html)
+defines the variable's step and core-splitting behavior.
+The offline stub tests check the generated contract; they do not claim server or hardware throughput.
+
+The existing control tool maps profile `direction=0` to the first argv generator port
+and `direction=1` to the second, regardless of those ports' numeric IDs.
+Keep both on multiplier 1 without `total` rate sharing.
+Start capture before loading/starting a fresh attempt and retain it through drain.
+For the separately scoped one-port candidate, the same profile can load direction 0 only;
+that remains a reduced trial, not full B-prime qualification.
+
 ## 4. Non-interactive generator control and reply contract
 
 Use [scripts/trex_control.py](../../scripts/trex_control.py) with the installed
 TRex STL API that matches the server. `GEN_HOST`, `GEN_SERVER`, `GEN_WORKDIR`,
 `GEN_PYTHON`, `GEN_CONTROL`, `GEN_STL_PROFILE` and reserved port IDs are private owner inputs.
-The profile must already contain the registered 10G X mix and per-flow dense IDs.
-The unmodified MTU/100G example does not meet that input.
+Use the registered X profile in section 3 for the 10G mix and per-flow dense IDs.
 The client loads a local profile, not a path on the remote server.
 Configure `GEN_PYTHON` and private `PYTHONPATH` for both the STL API and the profile's imports.
 
