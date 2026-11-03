@@ -11,7 +11,7 @@ These inputs do not authorize a hardware run.
 ## 1. Source ref and immutable pin
 
 The integration ref is **`hng/core`**, not `main`.
-The calculation baseline is DPDS `7e9cfee14b506440d90196b5e5cbc4249f30fe0f`,
+The calculation baseline is DPDS `dbb7a578b31a5ad52a3f40cd7146aa220656b3f5`,
 with Core `f3d255dc734b2e4dc3ed9877dcd1e691ce6a20e3`.
 The integration owner sends the approved post-merge full SHA to the measurement owner.
 Set `DPDS_REV` to that SHA and `DPDS_SRC` to its local source checkout.
@@ -83,7 +83,7 @@ Use the [pool calculator](../../perf/pool_calc.c) without EAL or full allocation
 ```sh
 "$POOL_CALC" --c-bps 9000000000 --t-ms 142 --delta-ms 320 \
   --q-ms 7.456541 --p 1 --min-frame 64 --max-frame 1522 --burst 16 \
-  --lines-per-port 1 --lcores 7 --rx-desc 256 --tx-desc 1024 --page-bytes 1073741824
+  --lines-per-port 1 --lcores 7 --rx-desc 4096 --tx-desc 1024 --page-bytes 1073741824
 ```
 
 The calculator converts 7.456541 ms to 7,456,541 ns, then floors C times ns / 8e9.
@@ -98,10 +98,10 @@ Sources: [pool calculator](../../perf/pool_calc.c),
 
 | Allocation | Actual algorithm and bytes |
 | --- | --- |
-| Objects in each ingress pool | 6318588 + 256 RX descriptors + 1024 RX handoff + 1024 TX handoff + 7*32 cache + 4*1024 pending + 4*16 burst + 1024 TX descriptors = **6326300** |
+| Objects in each ingress pool | 6318588 + 4096 RX descriptors + 1024 RX handoff + 1024 TX handoff + 7*32 cache + 4*1024 pending + 4*16 burst + 1024 TX descriptors = **6330140** |
 | Mbuf object / stride | 2456 / **2624** bytes from `rte_mempool_calc_obj_size()` |
 | Objects in each 1 GiB page | floor(1073741824/2624) = **409200** |
-| Object pages in each pool | ceil(6326300/409200) = **16**, or 17179869184 bytes |
+| Object pages in each pool | ceil(6330140/409200) = **16**, or 17179869184 bytes |
 | Pool free-object ring | `rte_ring_get_memsize(8388608)` = **67109248** bytes |
 | Pool header and caches | `RTE_MEMPOOL_HEADER_SIZE(NULL,32)` = **1056960** bytes |
 | Each pool | **17248035392** bytes, or 16.0634847283 GiB |
@@ -117,7 +117,14 @@ Use the same vector for `--socket-limit`, plus the existing CPU/node bind.
 The EAL reserve above the subtotal is **937370304 bytes**, or 0.8729941249 GiB.
 It covers allocator/memzone overhead, driver queues and page alignment beyond the base model.
 
-Require the printed descriptors to be RX=256 and TX=1024. Recalculate if the PMD adjusts them.
+The engine requests RX=4096 and TX=1024 through `rte_eth_dev_adjust_nb_rx_tx_desc()`.
+It prints the actual values before pool creation. Recalculate if the PMD adjusts them.
+
+RX4096 adds **3840 mbufs per pool** over RX256: 2*3840*2624 = **20152320** raw stride bytes.
+Both counts still fit 16 object pages per pool. The free-object ring and header sizes also stay the same.
+
+Thus the rounded EAL base, `LOAD_SOCKET_MEM` and 36 GiB headroom below stay the same.
+NIC queue allocations use the EAL reserve. This is a page-rounded budget, not a claim of identical RSS.
 
 Within the 36 GiB accounting budget:
 
@@ -136,6 +143,27 @@ for Core plus the 256 MiB reserve. Do not count reserved hugepages as that memor
 Stop if either budget or the full pool allocation fails. Do not shrink this condition.
 
 The calculator's `both_nodes` label means two pools here: both pools belong on node1.
+
+### RX buffering time at 10G
+
+The X mix has equal packet counts at 84/532/1542 wire bytes.
+Mean wire size is (84+532+1542)/3 = **719.333333333 bytes**.
+At 10,000,000,000 bit/s, mean arrival rate is **1737720.111214 packets/s**.
+One packet uses one descriptor for these unscattered frame sizes.
+
+```text
+nominal buffer_us = descriptors * 8 * wire_bytes / 10000000000 * 1000000
+```
+
+| RX descriptors | Equal-packet X mix, mean wire size | All-small burst, 84 wire bytes |
+| --- | ---: | ---: |
+| 256 | **147.319467 us** | **17.2032 us** |
+| 4096 | **2357.111467 us** | **275.2512 us** |
+
+These are nominal times to fill an empty ring if the RX poller stops.
+The all-small arrival rate is 10000000000/(8*84) = **14880952.380952 packets/s**.
+Use the PMD's actual descriptor count in the formula. Free space can be less than the full count.
+More descriptors do not remove CPU/IRQ delays. Keep the existing zero-new-missed/error gates.
 
 ## 4. Non-interactive generator control and reply contract
 
@@ -210,14 +238,14 @@ For one direction, the following conservative bounds include the active packet:
 Q_drain = 8 * 8388608 * (84/64) / 9000000000 = 0.009786709333 s
 D_model = 0.142 + 0.320 + Q_drain = 0.471786709333 s
 Q_fill  = 8 * 8388608 * (84/64) / (10000000000-9000000000) = 0.088080384 s
-I/O packets = 256 RX + 1023 RX ring + 1023 TX ring + 1024 TX pending
-            + 1024 TX descriptors + 4*16 burst = 4414
-D_io = 4414 * 1542 * 8 / 9000000000 = 0.006050122667 s
+I/O packets = 4096 RX + 1023 RX ring + 1023 TX ring + 1024 TX pending
+            + 1024 TX descriptors + 4*16 burst = 8254
+D_io = 8254 * 1542 * 8 / 9000000000 = 0.011313482667 s
 TX tolerance = TERMINAL_TIMEOUT_NS / 1e9 = 1 s
-WARMUP_S = ceil(D_model + Q_fill + D_io + TX tolerance) = ceil(1.565917216) = 2
-DRAIN_WAIT_S = ceil(D_model + D_io + TX tolerance) = ceil(1.477836832) = 2
-STOP_TIMEOUT_S = round that 1.477836832 s allowance up to 10 s
-               = 10 s, with 8.522163168 s for control/port/EAL teardown
+WARMUP_S = ceil(D_model + Q_fill + D_io + TX tolerance) = ceil(1.571180576) = 2
+DRAIN_WAIT_S = ceil(D_model + D_io + TX tolerance) = ceil(1.483100192) = 2
+STOP_TIMEOUT_S = round that 1.483100192 s allowance up to 10 s
+               = 10 s, with 8.516899808 s for control/port/EAL teardown
 ```
 
 The ring capacities come from a 1024-entry DPDK ring with one reserved slot.
@@ -270,18 +298,16 @@ PY
 Require the exact socket's handshake PID to match MainPID and `/ethdev/list` to be `[0,1]`.
 An 81-byte name does not prove that a socket exists or that the PID matches.
 
-## Existing executable provenance
+## RX4096 executable provenance
 
-Keep the separately supplied static binary and its build record together:
-DPDS `b59fe424ba5146529614d8174f6c1c811184c897`,
-Core `817624f2dc1a24938af47e51f3feee4bb6d56931`, DPDK 26.03.
-Binary SHA256 is `6112faf68de5722166feee691304736bd83887b0a51ccccb3f0a4c4a6745e679`.
-The new source baseline changes physical-observer setup/header paths only.
-Core runtime source is unchanged. This B-prime command enables no observer.
-
-Those changes do not require a B-prime binary rebuild. Do not describe the old binary as a new-source build.
+Use the updated RX4096 static binary with its build record:
+DPDS `dbb7a578b31a5ad52a3f40cd7146aa220656b3f5`,
+Core `f3d255dc734b2e4dc3ed9877dcd1e691ce6a20e3`, DPDK 26.03.
+Binary SHA256 is `1295c5207cd2436642ccc35115617adcd2ad95e9e209b8ec7a3569ec785e6bdd`.
+This build uses the 4096 default and the actual PMD-adjusted pool count.
 
 The current bundle passed a fresh `ldd`/symbol check: only glibc components remain dynamic,
 with highest required symbol GLIBC_2.39, below the 2.41 ceiling.
-Its existing null/ring telemetry smokes are zero-packet software evidence.
+Both null and ring smokes confirmed RX=4096, TX=1024, seven lcores, telemetry and normal drain.
+Those smokes are zero-packet software evidence.
 No full 36 GiB allocation, physical NIC, rate or concurrency test ran for this input package.
