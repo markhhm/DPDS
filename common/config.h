@@ -6,7 +6,7 @@
 // -------------------------------------------
 // Static settings
 // -------------------------------------------
-#define RX_RING_SIZE 256
+#define RX_RING_SIZE 4096
 #define TX_RING_SIZE 1024
 
 #define MBUF_CACHE_SIZE 32

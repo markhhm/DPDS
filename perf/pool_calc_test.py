@@ -13,6 +13,17 @@ node = re.search(r"per_numa_node envelope slots_per_line=(\d+) pool_objects=(\d+
 assert node and float(node.group(3)) > 0, calc
 assert calc.count("mean_occupancy") == 2, calc
 assert " lcores=7 " in calc and "page_bytes=2097152 (unverified)" in calc, calc
+assert " rx_desc=4096 tx_desc=1024 " in calc, calc
+# The B-prime envelope keeps all storage slots; RX4096 adds 3840 mbufs per pool.
+bprime_args=["--c-bps","9000000000","--t-ms","142","--delta-ms","320",
+             "--q-ms","7.456541","--p","1","--min-frame","64","--max-frame","1522",
+             "--burst","16","--lines-per-port","1","--lcores","7","--page-bytes","1073741824"]
+bprime=subprocess.run([binary,*bprime_args],capture_output=True,text=True,check=True).stdout
+legacy=subprocess.run([binary,*bprime_args,"--rx-desc","256"],capture_output=True,text=True,check=True).stdout
+assert "q_l2_bytes=8388608 " in bprime and "slots_per_line=6318588 pool_objects=6330140 " in bprime,bprime
+assert "slots_per_line=6318588 pool_objects=6326300 " in legacy,legacy
+for label in ("mempool_gib","core_metadata_gib","total_gib"):
+    assert re.search(label+r"=([\d.]+)",bprime).group(1)==re.search(label+r"=([\d.]+)",legacy).group(1),(label,bprime,legacy)
 # Each lcore adds one mempool cache (MBUF_CACHE_SIZE = 32): 7 lcores need 64 objects more than 5.
 five, _ = (lambda o: (int(re.search(r"pool_objects=(\d+)", o).group(1)), o))(
     subprocess.run([binary, "--lcores", "5"], capture_output=True, text=True, check=True).stdout)

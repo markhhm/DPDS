@@ -21,6 +21,7 @@ int main(int argc, char **argv)
     assert(host_pool_objects(0, 2) == 0);
     assert(host_prepare_port(0) == 0 && host_prepare_port(1) == 0);
     struct port_resources saved0 = host.resources[0], saved1 = host.resources[1];
+    assert(saved0.rx_descriptors == 4096 && saved1.rx_descriptors == 4096);
     /* Synthetic adjusted PMD limits: RX512 + egressTX768 + reserves6272 + storage64. */
     host.resources[0].rx_descriptors = 512;
     host.resources[0].tx_descriptors = 1024;
