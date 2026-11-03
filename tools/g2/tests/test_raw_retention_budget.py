@@ -13,6 +13,44 @@ except ImportError:
 
 
 class RawRetentionBudgetTests(unittest.TestCase):
+    def test_small_bidirectional_estimate_has_twenty_unique_forty_processed_offers(self):
+        condition=dict(id='toy',input_kind='fixed',traffic='U',direction_mode='both',
+            repeats=1,episodes_per_repeat=1,observation_seconds=8,lines=[dict(offered_bps=800,c_bps=1600)])
+        plan=dict(conditions=[condition],warmup_seconds=2,timing_mask_bits=10,rate_scaling=dict(divisor=4),
+            traffic=dict(U=dict(wire_bytes=[100],q_bytes=[80])),
+            budget=dict(acquisition_seconds=10,total_with_reserve_seconds=14))
+        meta=dict(acquisition_id='toy-r1',raw_retention=dict(estimated_bytes=100,keep_seconds='5.000000000'))
+        matrix=dict(plan=plan,runs=[dict(extensions=dict(m6=meta)),dict(extensions=dict(m6=meta))])
+        estimate=self.module().estimate_resources(matrix)
+        self.assertEqual((estimate['unique_offers'],estimate['processed_offers']),(20,40))
+        self.assertEqual(estimate['judge_cpu_ns'],520262920)
+        self.assertEqual(estimate['raw_bytes_by_native_density'],{'188':8080,'252':9360,'316':10640})
+        self.assertEqual(estimate['estimated_sample_bytes'],77)
+        self.assertEqual(estimate['estimated_other_report_bytes'],122294)
+        self.assertEqual(estimate['retained_raw_bytes'],100)
+        self.assertEqual(estimate['expected_selected_offers'],1)
+        plan['timing_mask_bits']=8
+        with self.assertRaises(ValueError):self.module().estimate_resources(matrix)
+
+    def test_resource_estimate_counts_shared_raw_once_and_each_directional_judge(self):
+        module=self.module()
+        from tools.g2.expand_m6_x710 import build_matrix
+        matrix=build_matrix();estimate=module.estimate_resources(matrix)
+        self.assertEqual(estimate['status'],'ESTIMATE')
+        self.assertEqual(estimate['acquisitions'],1380)
+        self.assertEqual(estimate['directional_reports'],1960)
+        self.assertEqual(estimate['acquisition_seconds'],47808)
+        self.assertEqual(estimate['total_with_reserve_seconds'],62208)
+        self.assertEqual(estimate['judge_cpu_ns'],sum(s['estimated_cpu_ns'] for s in matrix['plan']['judge_shards']['shards'].values()))
+        self.assertLess(estimate['retained_raw_bytes'],1_800_000_000_000)
+        self.assertEqual(sum(estimate['retained_seconds_acquisitions'].values()),1380)
+        full=module.estimate_resources(build_matrix(rate_divisor=1))
+        self.assertGreater(estimate['raw_bytes_by_native_density']['316'],full['raw_bytes_by_native_density']['316']//4)
+        self.assertLess(estimate['raw_bytes_by_native_density']['316'],full['raw_bytes_by_native_density']['316'])
+        self.assertGreater(estimate['processed_offers'],estimate['unique_offers'])
+        # The reviewed machine-readable estimate must be reproducible.
+        self.assertEqual(estimate,json.loads(Path('docs/reports/m6-quarter-rate.json').read_text()))
+
     def module(self):
         self.assertIsNotNone(raw_budget, 'raw-prefix retention budget is missing')
         return raw_budget

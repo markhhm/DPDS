@@ -2,8 +2,15 @@
 """Register bounded raw-prefix budgets once per physical acquisition."""
 from fractions import Fraction
 from pathlib import PurePosixPath
+from collections import Counter
 
 DIRECTIONS={'forward':(0,), 'reverse':(1,), 'both':(0,1)}
+# Largest artifacts among two software-only million-offer witnesses per class,
+# at mask 10. See docs/reports/m6-quarter-rate.md for fit limits/provenance.
+SAMPLE_BYTES_PER_MILLION={'fixed-U':1924179,'fixed-X':1873641,
+    'trace-U':1909777,'trace-X':1932515,'trace-stress-U':1960268,'trace-stress-X':1905890}
+REPORT_BYTES={'fixed-U':61147,'fixed-X':82545,'trace-U':58120,
+    'trace-X':79348,'trace-stress-U':61647,'trace-stress-X':83097}
 
 
 def _positive(value,name):
@@ -71,3 +78,37 @@ def register_retention(matrix,*,limit_bytes=2_000_000_000_000,headroom_percent=1
         metadata_reserve_bytes=reserve,sequence_policy='per-flow-dense',default_action='dry-run',
         scope='diagnostic raw prefixes; complete sealed judgments are preserved')
     return matrix
+
+
+def estimate_resources(matrix):
+    """Planning only; no captures, source parsing, pruning or hardware access."""
+    from .judge_shards import estimate_condition_ns
+    plan=matrix['plan']
+    if plan['timing_mask_bits']!=10:raise ValueError('sample size fit requires mask 10')
+    unique=processed=samples=Fraction(0);reports=cpu=0;raw={str(d):0 for d in (188,252,316)}
+    classes={}
+    for c in plan['conditions']:
+        ports=len(DIRECTIONS[c['direction_mode']]);count=c['repeats']*c['episodes_per_repeat']
+        duration=c['observation_seconds']+plan['warmup_seconds'];traffic=plan['traffic'][c['traffic']]
+        offers=Fraction(sum(l['offered_bps'] for l in c['lines'])*ports*duration*count*len(traffic['wire_bytes']),8*sum(traffic['wire_bytes']))
+        work=offers*ports
+        stress=c['input_kind']=='trace' and any(l['offered_bps']>l['c_bps'] for l in c['lines'])
+        kind=('trace-stress' if stress else c['input_kind'])+'-'+c['traffic']
+        unique+=offers;processed+=work;samples+=work*SAMPLE_BYTES_PER_MILLION[kind]/1_000_000
+        reports+=ports*count*REPORT_BYTES[kind];cpu+=estimate_condition_ns(plan,c)
+        row=classes.setdefault(kind,dict(unique_offers=Fraction(0),processed_offers=Fraction(0)))
+        row['unique_offers']+=offers;row['processed_offers']+=work
+        for density in raw:
+            raw[density]+=rates(c,traffic,native_bytes_per_offer=int(density))['total']*duration*count
+    # Source/native files are shared by the two directional reports.
+    acquisitions={r['extensions']['m6']['acquisition_id']:r['extensions']['m6']['raw_retention'] for r in matrix['runs']}
+    return dict(status='ESTIMATE',rate_divisor=plan['rate_scaling']['divisor'],
+        conditions=len(plan['conditions']),acquisitions=len(acquisitions),directional_reports=len(matrix['runs']),
+        acquisition_seconds=plan['budget']['acquisition_seconds'],total_with_reserve_seconds=plan['budget']['total_with_reserve_seconds'],
+        judge_cpu_ns=cpu,judge_core_hours=cpu/3_600_000_000_000,
+        unique_offers=_ceil(unique),processed_offers=_ceil(processed),
+        populations={k:{field:_ceil(value) for field,value in row.items()} for k,row in sorted(classes.items())},
+        expected_selected_offers=_ceil(processed/1024),estimated_sample_bytes=_ceil(samples),estimated_other_report_bytes=reports,
+        sample_bytes_per_million_processed_offers=SAMPLE_BYTES_PER_MILLION.copy(),report_bytes_per_direction=REPORT_BYTES.copy(),
+        raw_bytes_by_native_density=raw,retained_raw_bytes=sum(e['estimated_bytes'] for e in acquisitions.values()),
+        retained_seconds_acquisitions=dict(sorted(Counter(e['keep_seconds'] for e in acquisitions.values()).items(),key=lambda item:Fraction(item[0]))))

@@ -37,9 +37,10 @@ Sort conditions by integer estimated cost, largest first, then by ID. Assign eac
 condition to the cheaper shard, with an exact half-count cap. Break ties by
 count, then shard name. Input order does not change the assignment.
 
-For the committed inventory, each shard estimates **164.59 core-hours**.
+For the committed quarter-rate A inventory, each shard estimates **58.06 core-hours**.
 The estimated difference is **0%**, below the 5% limit relative to mean shard cost.
 Equal estimated work does not guarantee equal wall time on different machines.
+See the [resource estimate](../reports/m6-quarter-rate.md) for exposure, raw retention and sample-size assumptions.
 
 Regenerate registration before the campaign if the approved model or conditions change:
 

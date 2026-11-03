@@ -2,6 +2,7 @@
 # M6 diagnostic raw retention budget
 
 This budget implements K-1 for the complete 360-condition matrix.
+The current matrix uses quarter-rate A conditions; see the [resource estimate](m6-quarter-rate.md).
 It covers 1,380 acquisitions and 1,960 directional reporter inputs.
 It estimates retained raw bytes after complete judgment.
 It does not qualify hardware or measure physical disk performance.
@@ -48,17 +49,18 @@ The following counts deduplicate shared acquisition IDs.
 
 | Retained seconds N | Acquisitions |
 | ---: | ---: |
-| 0.635359182 | 162 |
-| 0.705954647 | 118 |
-| 1.264907727 | 162 |
-| 1.270718363 | 220 |
-| 1.405453029 | 138 |
-| 1.411909294 | 160 |
-| 2.529815447 | 220 |
-| 2.810906055 | 200 |
+| 2.541436727 | 162 |
+| 2.823818589 | 118 |
+| 5.059630865 | 162 |
+| 5.082873454 | 220 |
+| 5.621812111 | 138 |
+| 5.647637154 | 160 |
+| 10.119261731 | 220 |
+| 11.000000000 | 116 |
+| 11.243624126 | 84 |
 | Total | 1,380 |
 
-The estimated total is **1,799,999,999,718 bytes**.
+The estimated total is **1,796,721,738,612 bytes**.
 The total integer quotas are **1,799,999,999,880 bytes**.
 Both remain below 1.8 TB and leave at least 200 GB below the 2 TB raw limit.
 No raw prefix combines evidence from different repeats or episodes.
@@ -73,7 +75,7 @@ Resume checks receipts and sealed artifacts before it returns the original resul
 
 The quota covers declared raw prefixes only.
 It excludes samples, reports, backups, filesystem overhead and full acquisitions that await judgment.
-The prior dry run estimated about 122 GB for samples and reports across this matrix.
+The current quarter-rate projection is about 44.444 GB for samples and reports across this matrix.
 That estimate does not include external backups.
 A cut temporarily needs the original files plus one acquisition's staged prefixes.
 An interrupted process can leave staged files. Preserve receipts and inspect those files before manual cleanup.

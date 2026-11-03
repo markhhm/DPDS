@@ -12,6 +12,19 @@ CONDITION='fixed-E3-142-320-1-both-L9-X'
 
 
 class BprimeInputsTests(unittest.TestCase):
+    def test_quarter_engine_export_requires_explicit_divisor(self):
+        from tools.g2.expand_m6_x710 import engine_config
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'quarter.json'
+            result=subprocess.run([sys.executable,'-B','-m','tools.g2.expand_m6_x710','--condition',CONDITION,
+                '--active-vlan','711','--rate-divisor','4','--out',str(out)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            config=json.loads(out.read_text());self.assertEqual(config,engine_config(CONDITION,711,4))
+            for line in config['lines']:
+                self.assertEqual(line['model']['c_bps'],2_250_000_000)
+                self.assertEqual(line['model']['q_bytes'],2_097_152)
+            self.assertEqual(engine_config(CONDITION,711)['lines'][0]['model']['c_bps'],9_000_000_000)
+
     def test_single_port_candidate_is_exact_forward_line_with_full_capacity(self):
         from tools.g2.expand_m6_x710 import engine_config
         from tools.g2.reference import Reference
