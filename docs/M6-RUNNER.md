@@ -691,4 +691,124 @@ Both input routes share verdict/statistics code. Regression tests compare
 `verdict.json`, `results.csv` and `summary.txt` byte for byte on identical raw
 evidence, including Q drops, trace clamp, seven writers and a Q mismatch FAIL.
 `report.json` retains input-specific provenance, integrity and processing times.
-No raw source is deleted automatically.
+Raw sources remain complete unless the operator enables the explicit [retention stage](#raw-retention-after-complete-judgment).
+
+## Raw retention after complete judgment
+
+The complete matrix registers `extensions.m6.raw_retention` for each acquisition.
+Bind its `capture_directory` with the same `CAPTURE_ROOT` as the pair paths.
+Freeze the matrix before the first report. Two directional runs share one byte quota.
+The default plan estimates at most 1.8 TB of raw prefixes across 1,380 acquisitions.
+See the [formula and limits](reports/m6-raw-retention.md).
+
+First, register the complete raw SHA256 values without deletion:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" \
+  --out "$REPORT_DIR" --prune-raw
+```
+
+The stage requires complete seals for every member of an acquisition.
+It writes `$REPORT_DIR/.raw-retention/ACQUISITION_ID/manifest.json`.
+This manifest contains the full original SHA256, size and range of each declared raw file.
+It also binds the complete member seals and producer versions.
+The stage does not change a sealed scientific result.
+An incomplete or changed seal causes refusal.
+
+After the operator confirms the registered backup scope, apply the time cuts:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" \
+  --out "$REPORT_DIR" --prune-raw --apply-raw-prune --backup-scope-confirmed
+```
+
+This command replaces full raw files with diagnostic prefixes.
+Before the first replacement, the stage creates all prefixes and checks their total against the acquisition quota.
+A larger total causes refusal and leaves all originals unchanged.
+Before deletion, the stage flushes complete scientific files, seals, registration and directory entries to storage.
+Each replacement requires a durable JSON record with the original filename, size, SHA256, retained range and UTC time.
+The record also contains the retained SHA256, size and replacement state.
+Atomic replacement preserves a separate hardlinked backup.
+
+The time range starts at the first ingress packet across the acquisition directions.
+The prefix includes warmup when warmup precedes the observation window.
+PCAPNG cuts use capture timestamps with interface offsets.
+Native cuts use `at_ns` through the registered engine-to-observation clock map.
+The stage scans every native record because native time order can differ from event order.
+Only single-interface Ethernet, nanosecond, same-clock PCAPNG pairs with final healthy statistics are supported.
+Unsupported profiles cause refusal.
+
+A retained PCAPNG remains readable with its original packet blocks and new prefix statistics.
+A retained native binary uses the diagnostic `hng-native-prefix-v1` envelope.
+Its event bytes, global order and producer sequences remain unchanged, including gaps.
+The stage recalculates the registered time interval and clock before it accepts a stored retention manifest.
+Read this native prefix explicitly:
+
+```sh
+python3 -m tools.g2.raw_prefix "$NATIVE_PREFIX" --out "$DIAGNOSTIC_JSONL"
+```
+
+A prefix cannot reproduce the complete judgment.
+Resume verifies each retained hash, original seal, non-raw source and report artifact before it returns the original verdict.
+The complete samples, C results, report files and seals remain unchanged.
+A fresh full reporter rejects the native prefix.
+Missing receipts, changed prefixes or changed report evidence cause refusal and preserve the complete result.
+The usual resume command remains valid after a successful cut.
+Use the three explicit flags again to finish an interrupted replacement.
+
+The output directory supports one controller at a time.
+Stop capture and close the registered raw files before this stage.
+Do not change source paths, receipts or raw files during this stage.
+Do not copy partial prefixes over the only external backup of a complete capture.
+The confirmation flag records the operator decision. It does not create or verify a remote backup.
+
+### Inspect a retained prefix as a short run
+
+Use the diagnostic reporter after a successful raw cut:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.prefix_report "$M6_MATRIX" \
+  --reports "$REPORT_DIR" --run "$RUN_ID" --out "$PREFIX_REPORT_DIR"
+```
+
+Set `PREFIX_REPORT_DIR` to a new directory outside the complete report and capture directories.
+The tool refuses existing output directories. It does not overwrite a complete seal or scientific result.
+It writes its own `report.json`, `results.csv`, `summary.txt`, `samples.jsonl`, prefix manifest and C sequence-check results.
+It does not create a full-run `.complete.json`.
+
+The reporter verifies the original seals, raw receipts and retained hashes before calculation.
+It recomputes reference results from the prefix itself with the registered configuration, calibration and trace profiles.
+It does not copy the complete verdict or timing values.
+Native reads use bounded array batches and preserve original event and producer sequence gaps.
+They validate classification, identities, actor ownership and the visible arrival prefix.
+Capture and host metadata must agree with the reference sample.
+C order faults apply to their registered direction and line/VLAN.
+Stress and trace use the exact retained arrival prefix, including the trace clamp state.
+A gap in the required arrival state causes INCONCLUSIVE evidence.
+The tool does not invent END records, final counters or a drain interval.
+
+Each diagnostic line uses the densest mask registered for that line.
+The original run ID and sample seed remain the sample hash domain.
+The report declares this selection and the retained interval.
+It combines the interval as `retained-prefix`, including warmup when present.
+It does not replace phase, repeat or episode gates from the complete run.
+
+The C checker inspects every identity in the retained capture pair for order and duplicate anomalies.
+Its raw missing count includes packets whose expected delivery follows the cut.
+That count alone cannot prove a storage drop in this short interval.
+For selected samples, the reporter separates a delivery due before the cut from a packet still pending at the cut.
+Pending packets do not become missing-delivery failures.
+A sample expected before the cut but absent at the cut remains right-censored.
+The reporter records it as `unobserved_due_samples` and returns INCONCLUSIVE instead of a storage-drop failure.
+Visible terminal drops and probe-flag errors remain failures, including when other packets are pending.
+A missing host decision remains unverified.
+
+Fixed calibration keeps the registered `t + I*delta` OWD target.
+Stress and trace use the reference release minus arrival, including Q and clamp effects.
+The short report uses the existing median 100 us and p99 500 us timing limits with confidence intervals and clock uncertainty.
+Insufficient timing evidence remains INCONCLUSIVE.
+Order covers the retained captures. Q and timing checks cover selected samples.
+The prefix alone cannot prove a missing-delivery storage drop without drain evidence.
+Complete counter, drain and custody gates remain unverified.
+Every short result uses `schema=hng-g2-prefix-report-v1` and declares `scope=diagnostic-prefix`, `diagnostic_only=true` and `g2_qualified=false`.
+A short PASS describes the stated diagnostic checks. It does not qualify M6 or reconstruct the complete run.

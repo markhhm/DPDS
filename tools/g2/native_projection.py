@@ -204,20 +204,59 @@ class NativeProjection:
         old = self.runtime.get(str(port), (low, high))
         self.runtime[str(port)] = min(low, old[0]), max(high, old[1])
 
+    def _batch_semantics(self, batch):
+        """Validate visible rows/actors independently of complete stream numbering."""
+        events, items, snapshots = (batch[name] for name in ('events', 'items', 'snapshots'))
+        _require(events.dtype == EVENT_DTYPE and items.dtype == ITEM_DTYPE and snapshots.dtype == SNAPSHOT_DTYPE,
+                 'native array schema mismatch')
+        _require(events.ndim == items.ndim == snapshots.ndim == 1, 'native columns must be one-dimensional')
+        _require(not np.any(events['producer'] > 6) and not np.any(events['kind'] > 7) and not np.any(events['count'] > 16), 'invalid native event domain')
+        rows, kinds = np.arange(len(events)), events['kind']
+        _require(np.array_equal(items['event_index'], np.repeat(rows, events['count'])), 'native item links differ from event counts')
+        _require(not np.any(snapshots['event_index'] < 0) and not np.any(snapshots['event_index'] >= len(events)) and
+            not np.any(snapshots['event_index'][1:] < snapshots['event_index'][:-1]), 'invalid snapshot event links')
+        _require(not np.any(np.bincount(snapshots['event_index'], minlength=len(events)) > 2), 'too many snapshots')
+        _require(not np.any(_in(kinds, (0, 1, 2)) & (events['count'] != 1)), 'invalid packet count for native kind')
+        indexes = items['event_index']
+        item_kinds = kinds[indexes]
+        active = (item_kinds <= 2) | (item_kinds == 5) | (item_kinds == 6)
+        _require(not np.any((items['identity_kind'] > 2) | (items['selected_late'] > 2) |
+            (items['input_error'] > 2) | (items['handoff_queue'] > 1) |
+            (items['classified'] & (items['line'] >= len(self.lines))) |
+            ((items['identity_kind'] != 0) & (items['identity_kind'] != self.header['identity_policy']+1))), 'invalid native item identity, flags or line')
+        _require(not np.any(active & (~items['classified'] | (items['identity_kind'] == 0))),
+                 'unrepresentable native packet identity or classification')
+        packets = items[item_kinds == 0]
+        _require(not np.any((packets['ingress_port'] != self._line_ingress[packets['line']]) |
+            (packets['vlan_id'] != self._line_vlan[packets['line']]) | (packets['vlan_id'] > 4094) | packets['stripped']), 'native line or VLAN differs from raw input')
+        length = np.maximum(packets['length'].astype(np.uint64)+4, 64)
+        _require(not np.any((packets['length'] == 0) | (packets['segments'] != 1) |
+            (length < self._line_min[packets['line']]) | (length > self._line_max[packets['line']]) |
+            (packets['selection_seq'] == U64)), 'native length, segments or ordinal is unrepresentable')
+        _require(not np.any(active & (items['ingress_seq'] == U64)), 'native ingress ordinal uses uint64 sentinel')
+        self._actors(events, items, item_kinds)
+        self._snapshot(events, snapshots)
+        return packets
+
+    def validate_prefix_batch(self, batch):
+        """Validate captured semantics and arrival prefix without fabricating END."""
+        try:
+            _require(not self._failed and not self._finished, 'native projection is failed or finished')
+            packets = self._batch_semantics(batch)
+            self._ingress(batch['events'], packets)
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError) as error:
+            self._failed = True
+            raise StreamError('NATIVE_SEMANTIC', str(error), 'INCONCLUSIVE') from error
+
     def accept(self, batch):
         try:
             _require(not self._failed and not self._finished, 'native projection is failed or finished')
             events, items, snapshots = (batch[name] for name in ('events', 'items', 'snapshots'))
-            _require(events.dtype == EVENT_DTYPE and items.dtype == ITEM_DTYPE and snapshots.dtype == SNAPSHOT_DTYPE,
-                     'native array schema mismatch')
-            _require(events.ndim == items.ndim == snapshots.ndim == 1, 'native columns must be one-dimensional')
-            _require(not np.any(events['producer'] > 6) and not np.any(events['kind'] > 7) and not np.any(events['count'] > 16), 'invalid native event domain')
-            rows, kinds = np.arange(len(events)), events['kind']
-            _require(np.array_equal(items['event_index'], np.repeat(rows, events['count'])), 'native item links differ from event counts')
-            _require(not np.any(snapshots['event_index'] < 0) and not np.any(snapshots['event_index'] >= len(events)) and
-                not np.any(snapshots['event_index'][1:] < snapshots['event_index'][:-1]), 'invalid snapshot event links')
-            _require(not np.any(np.bincount(snapshots['event_index'], minlength=len(events)) > 2), 'too many snapshots')
-            _require(not np.any(_in(kinds, (0, 1, 2)) & (events['count'] != 1)), 'invalid packet count for native kind')
+            packets = self._batch_semantics(batch)
+            kinds = events['kind']
+            indexes = items['event_index']
+            item_kinds = kinds[indexes]
+            active = (item_kinds <= 2) | (item_kinds == 5) | (item_kinds == 6)
             _require(np.array_equal(events['order'], np.arange(self._order, self._order+len(events), dtype=np.uint64)), 'native global order gap')
             for producer in range(7):
                 selected = events['producer_seq'][events['producer'] == producer]
@@ -225,26 +264,7 @@ class NativeProjection:
                 _require(np.array_equal(selected, want), 'native producer sequence gap')
                 if selected.size:
                     self.seen[producer], self.counts[producer] = int(selected[-1]), self.counts[producer]+len(selected)
-            indexes = items['event_index']
-            item_kinds = kinds[indexes]
-            active = (item_kinds <= 2) | (item_kinds == 5) | (item_kinds == 6)
-            _require(not np.any((items['identity_kind'] > 2) | (items['selected_late'] > 2) |
-                (items['input_error'] > 2) | (items['handoff_queue'] > 1) |
-                (items['classified'] & (items['line'] >= len(self.lines))) |
-                ((items['identity_kind'] != 0) & (items['identity_kind'] != self.header['identity_policy']+1))), 'invalid native item identity, flags or line')
-            _require(not np.any(active & (~items['classified'] | (items['identity_kind'] == 0))),
-                     'unrepresentable native packet identity or classification')
-            packets = items[item_kinds == 0]
-            _require(not np.any((packets['ingress_port'] != self._line_ingress[packets['line']]) |
-                (packets['vlan_id'] != self._line_vlan[packets['line']]) | (packets['vlan_id'] > 4094) | packets['stripped']), 'native line or VLAN differs from raw input')
-            length = np.maximum(packets['length'].astype(np.uint64)+4, 64)
-            _require(not np.any((packets['length'] == 0) | (packets['segments'] != 1) |
-                (length < self._line_min[packets['line']]) | (length > self._line_max[packets['line']]) |
-                (packets['selection_seq'] == U64)), 'native length, segments or ordinal is unrepresentable')
-            _require(not np.any(active & (items['ingress_seq'] == U64)), 'native ingress ordinal uses uint64 sentinel')
-            self._actors(events, items, item_kinds)
             self._ingress(events, packets)
-            self._snapshot(events, snapshots)
             if len(events):
                 self.at_ns = max(self.at_ns, int(events['at_ns'].max()), int(events['submit_after_ns'].max()), int(items['arrival_ns'].max(initial=0)))
             ingress_emits = (kinds == 0) | (_in(kinds, (3, 4)) & _in(events['port'], self.input_ports))

@@ -147,6 +147,19 @@ test('g2-matrix', python, args: ['-m','unittest','tools.g2.tests.test_matrix',
   'tools.g2.tests.test_m6_x710_full','tools.g2.tests.test_judge_shards'], env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
+test('g2-raw-retention', python, args: ['-m','unittest',
+  'tools.g2.tests.test_raw_retention_budget','tools.g2.tests.test_raw_prefix','tools.g2.tests.test_raw_prune'],
+  env: g2_matrix_environment, depends: seqcheck,
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
+test('g2-prefix-inspection', python, args: ['-m','unittest','tools.g2.tests.test_prefix_report.PrefixReportTests'],
+  env: g2_matrix_environment, depends: seqcheck,
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
+test('g2-prefix-validation', python, args: ['-m','unittest','tools.g2.tests.test_prefix_report.PrefixValidationTests'],
+  env: g2_matrix_environment, depends: seqcheck,
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
 test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],
   env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)

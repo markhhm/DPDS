@@ -102,7 +102,11 @@ def main():
         if args.matrix.read_bytes()!=raw:raise ValueError('source matrix changed during job selection')
         job=select_job(matrix,args.shard,hashlib.sha256(raw).hexdigest(),args.condition)
         job['workers']=args.workers
-        for run in job['runs']:run['manifest']=str((args.matrix.parent/run['manifest']).resolve())
+        for run in job['runs']:
+            run['manifest']=str((args.matrix.parent/run['manifest']).resolve())
+            retention=run.get('extensions',{}).get('m6',{}).get('raw_retention')
+            if retention is not None:
+                retention['capture_directory']=str((args.matrix.parent/retention['capture_directory']).resolve())
         with args.out.open('x') as out:json.dump(job,out,allow_nan=False,indent=2);out.write('\n')
     except (OSError,ValueError,KeyError,TypeError,ZeroDivisionError) as error:
         print(str(error),file=sys.stderr);return 2

@@ -30,7 +30,10 @@ def write_outputs(result, destination):
     (destination / "report.json").write_text(json.dumps(result, allow_nan=False, indent=2) + "\n")
     with (destination / "results.csv").open("w", newline="") as stream:
         sampled=result.get('verification_mode')=='sampled'
+        prefix=result.get('verification_mode')=='prefix-diagnostic'
         columns=CSV_COLUMNS+('verification_mode','order_coverage','storage_coverage','timing_coverage','q_coverage','custody_mode') if sampled else CSV_COLUMNS
+        extra=('verification_mode','q_samples','q_mismatches','pending_q','pending_receiver','unobserved_due_samples','unmatched_before','metadata_mismatches') if prefix else ()
+        columns+=extra
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
         for row in result.get("rows", []):
@@ -40,10 +43,11 @@ def write_outputs(result, destination):
                 coverage=result['coverage']
                 values.update(verification_mode='sampled',order_coverage=coverage['order'],storage_coverage=coverage['storage'],
                     timing_coverage=coverage['timing'],q_coverage=coverage['q'],custody_mode=coverage['custody'])
+            if prefix:values.update({name:result['verification_mode'] if name=='verification_mode' else row.get(name) for name in extra})
             writer.writerow(values)
-    rows = [row for row in result.get("rows", []) if row.get("required", True)]
+    rows = [row for row in result.get("rows", []) if prefix or row.get("required", True)]
     lines = [f"{result.get('scope', 'unknown')}: {result['status']}",
-             f"Passed cells: {sum(row['status']=='PASS' for row in rows)}/{len(rows)}",
+             f"{'Checked diagnostic rows' if prefix else 'Passed cells'}: {sum(row['status']=='PASS' for row in rows)}/{len(rows)}",
              "Thresholds: median 100000 ns; p99 500000 ns; order 0; storage 0",
              "Report: report.json"]
     lines += [f"{row.get('direction')} {row.get('line')} {row.get('phase')}: {row['status']} "
@@ -51,6 +55,10 @@ def write_outputs(result, destination):
     if result.get('verification_mode')=='sampled':
         coverage=result['coverage']
         lines += [f"Verification sampled; timing/Q: sampled; custody: diagnostic; order: {coverage['order']}; storage: {coverage['storage']}"]
+    if result.get('verification_mode')=='prefix-diagnostic':
+        lines=[line for line in lines if not line.startswith('Thresholds:')]
+        lines += ['Diagnostic prefix only; no M6 qualification or complete counter/drain gate.',
+                  'Pending at cutoff is not missing delivery; full-run results are unchanged.']
     lines += result.get("reason_codes", [])[:3]
     (destination / "summary.txt").write_text("\n".join(lines) + "\n")
 
