@@ -8,6 +8,8 @@ import itertools
 import json
 from pathlib import Path
 
+from .judge_shards import assign_shards
+
 EXAMPLES=Path(__file__).resolve().parents[2]/'examples'
 DIRECTIONS={'forward':[0],'reverse':[1],'both':[0,1]}
 LOADS={'L0':(10_000_000_000,9_000_000_000),
@@ -116,6 +118,7 @@ def build_matrix():
                 runs.append(dict(id=f'{aid}-d{port}',family='trace' if c['input_kind']=='trace' else c['family'],
                     manifest='${CAPTURE_ROOT}/'+aid+f'/d{port}/pair.json',extensions=dict(m6=meta)))
     plan['generator']=generator_registration(plan)
+    plan['judge_shards']=assign_shards(plan)
     total=sum(seconds.values())
     plan['budget']=dict(status='ESTIMATE',acquisition_runs=sum(acquisitions.values()),
         fixed_acquisition_runs=acquisitions['fixed'],trace_episode_runs=acquisitions['trace'],
