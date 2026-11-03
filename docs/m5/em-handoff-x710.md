@@ -170,7 +170,7 @@ systemd-run --unit="$RX_UNIT" --slice=dpds.slice \
   --huge-dir="$HUGEDIR" --socket-mem="$PROBE_SOCKET_MEM" --socket-limit="$PROBE_SOCKET_MEM" -- \
   --nb-cores=1 --nb-ports=1 --portlist=0 --port-topology=loop \
   --socket-num="$DUT_NODE" --port-numa-config="$PROBE_PORT_NUMA" --ring-numa-config="$PROBE_RING_NUMA" \
-  --rxq=1 --txq=1 --rxd=1024 --txd=1024 --burst=32 --total-num-mbufs=65536 \
+  --rxq=1 --txq=1 --rxd=4096 --txd=1024 --burst=32 --total-num-mbufs=65536 \
   --forward-mode=rxonly --stats-period=10 --cmdline-file="$OUT_DIR/rx.cmd"
 
 # Inspect RX readiness before starting TX.
@@ -186,7 +186,7 @@ systemd-run --unit="$TX_UNIT" --slice=dpds.slice \
   --huge-dir="$HUGEDIR" --socket-mem="$PROBE_SOCKET_MEM" --socket-limit="$PROBE_SOCKET_MEM" -- \
   --nb-cores=1 --nb-ports=1 --portlist=0 --port-topology=loop \
   --socket-num="$DUT_NODE" --port-numa-config="$PROBE_PORT_NUMA" --ring-numa-config="$PROBE_RING_NUMA" \
-  --rxq=1 --txq=1 --rxd=1024 --txd=1024 --burst=32 --total-num-mbufs=65536 \
+  --rxq=1 --txq=1 --rxd=4096 --txd=1024 --burst=32 --total-num-mbufs=65536 \
   --forward-mode=txonly --txpkts="$TXPKTS" --eth-peer="0,$RX_MAC" \
   --stats-period=10 --cmdline-file="$OUT_DIR/tx.cmd"
 ```
@@ -275,7 +275,7 @@ systemd-run --unit="$B_UNIT" --slice=dpds.slice \
   --huge-dir="$HUGEDIR" --socket-mem="$LOAD_SOCKET_MEM" --socket-limit="$LOAD_SOCKET_MEM" -- \
   --nb-cores=6 --nb-ports=2 --portlist=0,1 --port-topology=loop \
   --socket-num="$DUT_NODE" --port-numa-config="$LOAD_PORT_NUMA" --ring-numa-config="$LOAD_RING_NUMA" \
-  --rxq=4 --txq=4 --rxd=1024 --txd=1024 --burst=32 --total-num-mbufs=262144 \
+  --rxq=4 --txq=4 --rxd=4096 --txd=1024 --burst=32 --total-num-mbufs=262144 \
   --forward-mode=flowgen --flowgen-flows=64 --txpkts="$FLOWGEN_PKTS" \
   --stats-period=10 --cmdline-file="$OUT_DIR/flowgen.cmd"
 systemctl is-active --quiet "$B_UNIT"
