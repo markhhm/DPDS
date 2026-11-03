@@ -121,17 +121,22 @@ The C source selects Darwin's `stat` nanosecond members and keeps full precision
 See [Apple's stat definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stat.h).
 The stdout failure fixture uses POSIX file-size limits instead of `/dev/full`.
 
-Filename-byte tests require a filesystem that accepts their invalid UTF-8 names.
-Report any filesystem fixture rejection separately. Do not call an unexecuted case PASS.
+The invalid UTF-8 filename fixture is skipped on macOS because APFS does not
+accept those names. Report it as not executed, never PASS. Linux still runs it
+on a filesystem that accepts invalid UTF-8 names.
 
-GNU `prlimit` is not a macOS tool. Python can request `RLIMIT_AS`, but Darwin
-[aliases it with its resident-set limit](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h).
-Do not assume GNU address-space enforcement. The platform worker must verify
-limits and observed RSS before large jobs. A failed limit request blocks execution.
+GNU `prlimit` is not a macOS tool. Do not set `RLIMIT_AS` on macOS. Darwin
+[aliases it with its resident-set limit](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/resource.h),
+and the limit request can fail. Measure each job with `/usr/bin/time -l` and
+record its maximum resident set size in bytes. If a single job exceeds
+4294967296 bytes (4 GiB), stop and report it.
 
 Retain the registered seqcheck budget and start with one reporter process.
-After platform checks, set `JUDGE_WORKERS` from the approved CPU and total RAM budget.
-Include all child processes and other workloads. Do not select the CPU count alone.
+After platform checks, require `JUDGE_WORKERS` times the largest measured job
+peak RSS to be at most 25769803776 bytes (24 GiB). On a 32 GiB judge, reserve
+8 GiB for the system and other workloads. Include all child processes in the
+memory budget. Do not increase concurrency automatically or select it from
+the CPU count alone.
 
 ## Transfer and judge one complete condition
 
@@ -153,14 +158,7 @@ cd "$DPDS_SRC"
 "$PYTHON" -m tools.g2.judge_shards "$MASTER_MATRIX" --shard "$SHARD" \
   --condition "$CONDITION_ID" --workers "$JUDGE_WORKERS" --out "$JOB_MATRIX"
 "$PYTHON" -m tools.g2.matrix "$JOB_MATRIX" --preflight
-/usr/bin/time -l "$PYTHON" - "$JOB_MATRIX" "$JOB_OUT" "$MEMORY_LIMIT_BYTES" <<'PY'
-import resource,runpy,sys
-matrix,out,limit=sys.argv[1:]
-limit=int(limit)
-resource.setrlimit(resource.RLIMIT_AS,(limit,limit))
-sys.argv=['tools.g2.matrix',matrix,'--out',out]
-runpy.run_module('tools.g2.matrix',run_name='__main__')
-PY
+/usr/bin/time -l "$PYTHON" -m tools.g2.matrix "$JOB_MATRIX" --out "$JOB_OUT"
 ```
 
 The `time -l` command above is for macOS. On Linux use the same job matrix with
