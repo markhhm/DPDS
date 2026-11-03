@@ -24,11 +24,13 @@ def exposure(rate,probability):
     return max(30,-(-need.numerator//need.denominator))
 
 
-def deployment():
+def deployment(rate_divisor=4):
+    capture_interfaces=({'0':'${CAPTURE_IF}','1':'${CAPTURE_IF}'} if rate_divisor==4 else
+                        {'0':'${CAPTURE_PORT0_IF}','1':'${CAPTURE_PORT1_IF}'})
     return dict(nic=dict(model='X710',pmd='i40e',ports=[0,1]),dut_host='${DUT_HOST}',
         vlans=dict(cable=710,leo=711),
         generator=dict(host='${GENERATOR_HOST}',interfaces={'0':'${GENERATOR_PORT0_IF}','1':'${GENERATOR_PORT1_IF}'}),
-        capture=dict(host='${CAPTURE_HOST}',interfaces={'0':'${CAPTURE_PORT0_IF}','1':'${CAPTURE_PORT1_IF}'},
+        capture=dict(host='${CAPTURE_HOST}',interfaces=capture_interfaces,
             clock_id='${CAPTURE_CLOCK_ID}',mapping_id='${CAPTURE_MAPPING_ID}',clock_source='${CAPTURE_CLOCK_SOURCE}'))
 
 
@@ -79,11 +81,23 @@ def generator_registration(plan):
         seqcheck_profiles=profiles)
 
 
-def build_matrix():
+def mirror_budget(condition):
+    """Steady L1 envelope only: model service does not pace physical TX bursts."""
+    ports=len(DIRECTIONS[condition['direction_mode']])
+    ingress=ports*sum(line['offered_bps'] for line in condition['lines'])
+    egress=ports*sum(min(line['offered_bps'],line['c_bps']) for line in condition['lines'])
+    return dict(ingress_bps=ingress,egress_bps=egress,total_bps=ingress+egress,
+                headroom_bps=10_000_000_000-ingress-egress)
+
+
+def build_matrix(rate_divisor=4):
+    if type(rate_divisor) is not int or rate_divisor not in (1,4):raise ValueError('rate divisor must be 1 or 4')
     base=json.loads((EXAMPLES/'m6-short.json').read_text())
     raw=(EXAMPLES/'m6-trace-conditions.json').read_bytes();source=json.loads(raw)
     plan=base['plan'];plan.update(inventory='360 required conditions: 300 fixed plus 60 trace; captures not acquired',
-        deployment=deployment(),conditions=fixed_conditions(),
+        deployment=deployment(rate_divisor),conditions=fixed_conditions(),
+        rate_scaling=dict(divisor=rate_divisor,scaled_fields=['offered_bps','c_bps','q_bytes'],
+            fixed_exposure='recompute with unchanged sampling threshold',trace_exposure='unchanged'),
         repeat_policy=dict(fixed_main=3,fixed_boundary=1,trace=2),
         fixed_exposure_minimum_seconds=30,fixed_exposure_maximum_seconds=70,
         fixed_exposure_formula='max(30,ceil(431*1024*8*1542/(min(C,R)*p_late))); p=0/1 uses main',
@@ -108,6 +122,21 @@ def build_matrix():
             direction_mode=mode,traffic=original['traffic'],lines=lines,
             source_condition_id=original['id'],repeats=original['repeats'],
             episodes_per_repeat=original['episodes_per_repeat'],observation_seconds=9))
+    for condition in plan['conditions']:
+        for item in condition['lines']:
+            for key in ('offered_bps','c_bps','q_bytes'):
+                if item[key]%rate_divisor:raise ValueError('rate scaling must be exact')
+                item[key]//=rate_divisor
+        if condition['input_kind']=='fixed':
+            condition['observation_seconds']=max(exposure(min(l['c_bps'],l['offered_bps']),l['p']) for l in condition['lines'])
+        condition['mirror_estimate']=mirror_budget(condition)
+    maximum=max(c['mirror_estimate']['total_bps'] for c in plan['conditions'])
+    if rate_divisor==4 and maximum>10_000_000_000:raise ValueError('quarter-rate steady mirror budget exceeds 10G')
+    plan['capture_mirror']=dict(port_bps=10_000_000_000,snaplen_bytes=128,
+        sources=['port0-rx','port0-tx','port1-rx','port1-tx'],source_labels_required=True,
+        rate_scope='steady offered plus min(offered,service); physical bursts require separate qualification',
+        maximum_estimated_bps=maximum,minimum_headroom_bps=10_000_000_000-maximum)
+    plan['fixed_exposure_maximum_seconds']=max(70,max(c['observation_seconds'] for c in plan['conditions'] if c['input_kind']=='fixed'))
     runs=[];acquisitions=Counter();seconds=Counter()
     for c in plan['conditions']:
         for repeat,episode in itertools.product(range(1,c['repeats']+1),range(1,c['episodes_per_repeat']+1)):
@@ -126,7 +155,7 @@ def build_matrix():
         directional_report_inputs=len(runs),fixed_seconds=seconds['fixed'],trace_seconds=seconds['trace'],
         acquisition_seconds=total,setup_calibration_rerun_reserve_seconds=4*3600,
         total_with_reserve_seconds=total+4*3600,
-        acquisition_seconds_if_all_fixed_70=acquisitions['fixed']*78+seconds['trace'],
+        acquisition_seconds_if_all_fixed_maximum=acquisitions['fixed']*(plan['fixed_exposure_maximum_seconds']+8)+seconds['trace'],
         simultaneous_directions_count_once=True,offline_reporting_included=False,
         observer_cost_1_in_256_shortening_applied=False)
     base.update(scope='physical',mode='pcapng',workers=1,runs=runs)
@@ -145,10 +174,11 @@ def write_matrix(path,matrix):
     Path(path).write_text(raw+'\n')
 
 
-def engine_config(condition_id,active_vlan):
+def engine_config(condition_id,active_vlan,rate_divisor=1):
     """Expand one fixed, single-line condition to both registered port directions."""
     if type(active_vlan) is not int or not 1<=active_vlan<=4094:raise ValueError('active VLAN must be 1..4094')
-    matrix=build_matrix();plan=matrix['plan']
+    # Existing B-prime engine exports remain full-rate unless explicitly scaled.
+    matrix=build_matrix(rate_divisor);plan=matrix['plan']
     condition=next((c for c in plan['conditions'] if c['id']==condition_id),None)
     if condition is None or condition['input_kind']!='fixed' or len(condition['lines'])!=1:
         raise ValueError('engine expansion requires a registered fixed single-line condition')
@@ -168,9 +198,11 @@ def main():
     parser.add_argument('--out',required=True)
     parser.add_argument('--condition',help='expand a fixed single-line condition into an engine config')
     parser.add_argument('--active-vlan',type=int,help='one approved VLAN for the engine config')
+    parser.add_argument('--rate-divisor',type=int,choices=(1,4),help='default: matrix 4, engine config 1 (full-rate B-prime)')
     args=parser.parse_args()
     if (args.condition is None)!=(args.active_vlan is None):parser.error('--condition and --active-vlan must be used together')
-    try:result=build_matrix() if args.condition is None else engine_config(args.condition,args.active_vlan)
+    divisor=args.rate_divisor if args.rate_divisor is not None else (4 if args.condition is None else 1)
+    try:result=build_matrix(divisor) if args.condition is None else engine_config(args.condition,args.active_vlan,divisor)
     except ValueError as error:parser.error(str(error))
     if args.condition is None:write_matrix(args.out,result)
     else:Path(args.out).write_text(json.dumps(result,allow_nan=False,indent=2)+'\n')

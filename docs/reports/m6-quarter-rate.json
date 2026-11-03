@@ -1,0 +1,75 @@
+{
+  "status": "ESTIMATE",
+  "rate_divisor": 4,
+  "conditions": 360,
+  "acquisitions": 1380,
+  "directional_reports": 1960,
+  "acquisition_seconds": 47808,
+  "total_with_reserve_seconds": 62208,
+  "judge_cpu_ns": 418044690495798,
+  "judge_core_hours": 116.12352513772167,
+  "unique_offers": 15094583062,
+  "processed_offers": 23245962299,
+  "populations": {
+    "fixed-U": {
+      "unique_offers": 4611543451,
+      "processed_offers": 6917315176
+    },
+    "fixed-X": {
+      "unique_offers": 5569045413,
+      "processed_offers": 8353568119
+    },
+    "trace-U": {
+      "unique_offers": 617947471,
+      "processed_offers": 1003161479
+    },
+    "trace-X": {
+      "unique_offers": 1324664041,
+      "processed_offers": 2150428638
+    },
+    "trace-stress-U": {
+      "unique_offers": 945201038,
+      "processed_offers": 1533722439
+    },
+    "trace-stress-X": {
+      "unique_offers": 2026181650,
+      "processed_offers": 3287766451
+    }
+  },
+  "expected_selected_offers": 22701136,
+  "estimated_sample_bytes": 44305918855,
+  "estimated_other_report_bytes": 138491296,
+  "sample_bytes_per_million_processed_offers": {
+    "fixed-U": 1924179,
+    "fixed-X": 1873641,
+    "trace-U": 1909777,
+    "trace-X": 1932515,
+    "trace-stress-U": 1960268,
+    "trace-stress-X": 1905890
+  },
+  "report_bytes_per_direction": {
+    "fixed-U": 61147,
+    "fixed-X": 82545,
+    "trace-U": 58120,
+    "trace-X": 79348,
+    "trace-stress-U": 61647,
+    "trace-stress-X": 83097
+  },
+  "raw_bytes_by_native_density": {
+    "188": 7263679858148,
+    "252": 8229733179032,
+    "316": 9195786480268
+  },
+  "retained_raw_bytes": 1796721738612,
+  "retained_seconds_acquisitions": {
+    "2.541436727": 162,
+    "2.823818589": 118,
+    "5.059630865": 162,
+    "5.082873454": 220,
+    "5.621812111": 138,
+    "5.647637154": 160,
+    "10.119261731": 220,
+    "11.000000000": 116,
+    "11.243624126": 84
+  }
+}
