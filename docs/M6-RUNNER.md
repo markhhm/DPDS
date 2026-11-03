@@ -404,6 +404,12 @@ paths, without capture acquisition:
 python3 -m unittest tools.g2.tests.test_m6_x710_full
 ```
 
+## Two-judge handoff
+
+Use the [judge shard procedure](m6/judge-shards.md) to assign complete conditions,
+prepare a macOS judge and transfer immutable sources/results while capture continues.
+Its cost balance is an estimate. Each job retains the existing source/output-bound seals.
+
 ## Hardware-day runbook
 
 Complete [BRING-UP](BRING-UP.md) first. Unresolved hardware decisions block this procedure.
