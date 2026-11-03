@@ -3,6 +3,7 @@
 from collections import Counter
 from fractions import Fraction
 import json
+from math import ceil
 import os
 from pathlib import Path
 
@@ -53,6 +54,10 @@ class BprimeX:
         class_pps = rate / (8*sum(wires))
         assigned = [sizes[flow % len(sizes)] for flow in range(flows)]
         counts = Counter(assigned)
+        duration = Fraction(os.environ.get('BPRIME_DURATION_S', ''))
+        if duration <= 0 or any(ceil(class_pps*duration/count) >= (1 << 32)
+                                for count in counts.values()):
+            raise ValueError('positive BPRIME_DURATION_S with fewer than 2^32 packets per flow required')
         prefix = f'BPRIME_P{direction}_'
         streams = []
         for flow, size in enumerate(assigned):
@@ -67,9 +72,10 @@ class BprimeX:
             if len(packet) != stored:
                 raise ValueError('unexpected single-tag IPv4/UDP template length')
             vm = STLScVmRaw([
-                STLVmFlowVar(name='sequence', size=8, op='inc', init_value=0,
-                             min_value=0, max_value=(1 << 64)-1, step=1, split_to_cores=False),
-                STLVmWrFlowVar(fv_name='sequence', pkt_offset=46, is_big=True),
+                # Keep the u64 high word zero; a full u64 VM range overflows TRex.
+                STLVmFlowVar(name='sequence', size=4, op='inc', init_value=0,
+                             min_value=0, max_value=(1 << 32)-1, step=1, split_to_cores=False),
+                STLVmWrFlowVar(fv_name='sequence', pkt_offset=50, is_big=True),
             ], cache_size=0)
             streams.append(STLStream(name=f'bprime-d{direction}-f{flow}',
                 packet=STLPktBuilder(pkt=packet, vm=vm), core_id=flow % cores,
