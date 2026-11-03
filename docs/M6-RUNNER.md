@@ -761,3 +761,51 @@ Stop capture and close the registered raw files before this stage.
 Do not change source paths, receipts or raw files during this stage.
 Do not copy partial prefixes over the only external backup of a complete capture.
 The confirmation flag records the operator decision. It does not create or verify a remote backup.
+
+### Inspect a retained prefix as a short run
+
+Use the diagnostic reporter after a successful raw cut:
+
+```sh
+prlimit --as=4294967296 -- python3 -m tools.g2.prefix_report "$M6_MATRIX" \
+  --reports "$REPORT_DIR" --run "$RUN_ID" --out "$PREFIX_REPORT_DIR"
+```
+
+Set `PREFIX_REPORT_DIR` to a new directory outside the complete report and capture directories.
+The tool refuses existing output directories. It does not overwrite a complete seal or scientific result.
+It writes its own `report.json`, `results.csv`, `summary.txt`, `samples.jsonl`, prefix manifest and C sequence-check results.
+It does not create a full-run `.complete.json`.
+
+The reporter verifies the original seals, raw receipts and retained hashes before calculation.
+It recomputes reference results from the prefix itself with the registered configuration, calibration and trace profiles.
+It does not copy the complete verdict or timing values.
+Native reads use bounded array batches and preserve original event and producer sequence gaps.
+Stress and trace use the exact retained arrival prefix, including the trace clamp state.
+A gap in the required arrival state causes INCONCLUSIVE evidence.
+The tool does not invent END records, final counters or a drain interval.
+
+Each diagnostic line uses the densest mask registered for that line.
+The original run ID and sample seed remain the sample hash domain.
+The report declares this selection and the retained interval.
+It combines the interval as `retained-prefix`, including warmup when present.
+It does not replace phase, repeat or episode gates from the complete run.
+
+The C checker inspects every identity in the retained capture pair for order and duplicate anomalies.
+Its raw missing count includes packets whose expected delivery follows the cut.
+That count alone cannot prove a storage drop in this short interval.
+For selected samples, the reporter separates a delivery due before the cut from a packet still pending at the cut.
+Pending packets do not become missing-delivery failures.
+A sample expected before the cut but absent at the cut remains right-censored.
+The reporter records it as `unobserved_due_samples` and returns INCONCLUSIVE instead of a storage-drop failure.
+Visible terminal drops and probe-flag errors remain failures, including when other packets are pending.
+A missing host decision remains unverified.
+
+Fixed calibration keeps the registered `t + I*delta` OWD target.
+Stress and trace use the reference release minus arrival, including Q and clamp effects.
+The short report uses the existing median 100 us and p99 500 us timing limits with confidence intervals and clock uncertainty.
+Insufficient timing evidence remains INCONCLUSIVE.
+Order covers the retained captures. Q and timing checks cover selected samples.
+The prefix alone cannot prove a missing-delivery storage drop without drain evidence.
+Complete counter, drain and custody gates remain unverified.
+Every short result uses `schema=hng-g2-prefix-report-v1` and declares `scope=diagnostic-prefix`, `diagnostic_only=true` and `g2_qualified=false`.
+A short PASS describes the stated diagnostic checks. It does not qualify M6 or reconstruct the complete run.

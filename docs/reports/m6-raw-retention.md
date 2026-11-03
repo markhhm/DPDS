@@ -89,3 +89,17 @@ Retained native and PCAPNG readers validate event bytes, packet bytes, timestamp
 Resume preserves complete report, sample, C result and seal bytes.
 Changed raw, non-raw inputs, receipts or scientific outputs cause refusal.
 No physical capture was acquired for this change.
+
+## Independent short-run inspection
+
+The [prefix reporter](../M6-RUNNER.md#inspect-a-retained-prefix-as-a-short-run) computes a separate diagnostic result from retained raw.
+It uses the same reference, calibration and timing statistics as the reporter.
+It preserves exact stress and trace arrival state within the retained prefix.
+It does not fabricate final counter or drain evidence.
+The complete sealed results remain unchanged.
+
+Synthetic cases distinguish pending tail packets from due missing samples.
+They also verify independent verdicts, real timing and Q faults, trace clamps and insufficient samples.
+An error after the retained interval can fail the complete run while the diagnostic prefix passes its own checks.
+The short result always keeps `g2_qualified=false` and declares its reduced coverage.
+Its files reside in a new directory outside the complete results and raw captures.

@@ -152,6 +152,10 @@ test('g2-raw-retention', python, args: ['-m','unittest',
   env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
 
+test('g2-prefix-inspection', python, args: ['-m','unittest','tools.g2.tests.test_prefix_report'],
+  env: g2_matrix_environment, depends: seqcheck,
+  workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
+
 test('g2-m5', python, args: ['-m','unittest','tools.g2.tests.test_m5_qualify'],
   env: g2_matrix_environment, depends: seqcheck,
   workdir: meson.project_source_root(), timeout: 60, is_parallel: false)
