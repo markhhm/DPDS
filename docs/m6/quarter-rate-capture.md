@@ -3,7 +3,8 @@
 
 Use the [quarter-rate matrix](../../examples/m6-x710.json) for independent external packet measurements.
 Its [resource estimate](../reports/m6-quarter-rate.md) records scaling, exposure and steady mirror load.
-The short full-rate campaign has a different measurement scope and topology.
+B-prime and the short full-rate C campaign use [m6-x710-fullrate.json](../../examples/m6-x710-fullrate.json), with their own measurement scope and topology.
+Do not use the quarter-rate A file to configure their traffic rates.
 Complete M5 clock and bypass qualification before A.
 
 ## Wiring and private bindings

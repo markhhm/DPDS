@@ -129,8 +129,9 @@ def build_matrix(rate_divisor=4):
                 item[key]//=rate_divisor
         if condition['input_kind']=='fixed':
             condition['observation_seconds']=max(exposure(min(l['c_bps'],l['offered_bps']),l['p']) for l in condition['lines'])
-        condition['mirror_estimate']=mirror_budget(condition)
-    maximum=max(c['mirror_estimate']['total_bps'] for c in plan['conditions'])
+        # Full-rate conditions retain the exact pre-quarter registration shape.
+        if rate_divisor==4:condition['mirror_estimate']=mirror_budget(condition)
+    maximum=max(mirror_budget(c)['total_bps'] for c in plan['conditions'])
     if rate_divisor==4 and maximum>10_000_000_000:raise ValueError('quarter-rate steady mirror budget exceeds 10G')
     plan['capture_mirror']=dict(port_bps=10_000_000_000,snaplen_bytes=128,
         sources=['port0-rx','port0-tx','port1-rx','port1-tx'],source_labels_required=True,

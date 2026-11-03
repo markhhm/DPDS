@@ -340,7 +340,9 @@ outside this UDP-probe index contract.
 The main A matrix uses quarter-rate R, C and byte Q, preserving R/C and Q/C.
 See the [scaling and resource estimate](reports/m6-quarter-rate.md) and
 [four-source, single-port mirror procedure](m6/quarter-rate-capture.md).
-The separate full-rate campaign and M5 B-prime exports retain their own rates.
+Use [m6-x710-fullrate.json](../examples/m6-x710-fullrate.json) for the separate full-rate C campaign and B-prime STL traffic.
+Its conditions retain their original rates and exposures; the B-prime condition offers 10G with C=9G per direction.
+The main `m6-x710.json` is quarter-rate A. It does not supply the full-rate traffic settings.
 
 The 72 main and 288 boundary conditions include the 60 trace conditions;
 the trace count is **not** an additional 60. Main is M-CA/M-CB fixed cable
@@ -388,6 +390,7 @@ Regenerate the committed inventory without reading profiles or captures:
 
 ```sh
 python3 -m tools.g2.expand_m6_x710 --out examples/m6-x710.json
+python3 -m tools.g2.expand_m6_x710 --rate-divisor 1 --out examples/m6-x710-fullrate.json
 ```
 
 After binding private deployment, capture-root and trace-profile-root variables,

@@ -32,8 +32,12 @@ B-prime and the separate short full-rate campaign supply capacity evidence with 
 The producer defaults to divisor four for a matrix, but divisor one for existing engine-config exports.
 Thus the committed M5 B-prime configurations remain full-rate and byte-identical.
 Use `--rate-divisor 4` with `--condition` and `--active-vlan` for an A fixed-condition engine config.
-Use `--rate-divisor 1` to obtain the original full-rate matrix basis for separate work.
-Do not dispatch that full-rate basis onto the single-port A capture topology.
+
+Use the committed [full-rate matrix](../../examples/m6-x710-fullrate.json) for B-prime STL traffic and the separate full-rate C campaign.
+Its 360 condition records match the pre-quarter registration exactly, including the original exposures.
+Its B-prime condition offers 10G with C=9G per direction.
+The main `m6-x710.json` is quarter-rate A and must not supply the B-prime or full-rate C traffic rates.
+Do not dispatch the full-rate basis onto the single-port A capture topology.
 
 ## Four-source mirror budget
 
@@ -137,6 +141,7 @@ Provision that backlog separately. This change neither deletes raw files nor dis
 
 ```sh
 python3 -m tools.g2.expand_m6_x710 --out examples/m6-x710.json
+python3 -m tools.g2.expand_m6_x710 --rate-divisor 1 --out examples/m6-x710-fullrate.json
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -149,5 +154,6 @@ python3 -m unittest tools.g2.tests.test_m6_x710_full tools.g2.tests.test_raw_ret
 ```
 
 The tests compare every original/scaled line, Q/C, R/C, timing curves, all steady mirror totals and the regenerated estimate.
+They compare the canonical digest of all full-rate conditions against the pre-quarter registration and check the B-prime 10G/9G rates explicitly.
 They also preserve full-rate B-prime exports and preflight all 1,960 future pair registrations with synthetic deployment values.
 These checks do not certify mirror hardware, clocks, actual sample populations or loss-free capture.

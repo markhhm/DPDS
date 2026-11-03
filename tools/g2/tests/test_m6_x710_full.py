@@ -2,8 +2,11 @@
 """Complete approved inventory, directional paths and acquisition-time accounting."""
 from collections import Counter
 from fractions import Fraction
+import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -25,6 +28,28 @@ def bind(value):
 
 
 class FullX710Tests(unittest.TestCase):
+    def test_fullrate_snapshot_preserves_every_pre_quarter_condition_and_bprime_rates(self):
+        from tools.g2.expand_m6_x710 import build_matrix
+        full=json.loads((EXAMPLES/'m6-x710-fullrate.json').read_text())
+        self.assertEqual(full,build_matrix(rate_divisor=1))
+        conditions=full['plan']['conditions'];self.assertEqual(len(conditions),360)
+        # Canonical complete condition list from cf8a026, before quarter scaling.
+        # Freeze the old evidence independently of the current producer, without
+        # requiring Git history or another duplicate inventory at test runtime.
+        digest=hashlib.sha256(json.dumps(conditions,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        self.assertEqual(digest,'a8df1f952edafcfb76626817ce0e9d1fc0d334d0b3219cc52a014b8f190b8c97')
+        condition=next(c for c in conditions if c['id']=='fixed-E3-142-320-1-both-L9-X')
+        self.assertEqual(condition['direction_mode'],'both')
+        self.assertEqual(condition['lines'][0]['offered_bps'],10_000_000_000)
+        self.assertEqual(condition['lines'][0]['c_bps'],9_000_000_000)
+        self.assertEqual(condition['lines'][0]['q_bytes'],8_388_608)
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'fullrate.json'
+            result=subprocess.run([sys.executable,'-B','-m','tools.g2.expand_m6_x710',
+                '--rate-divisor','1','--out',str(out)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(out.read_bytes(),(EXAMPLES/'m6-x710-fullrate.json').read_bytes())
+
     def test_quarter_rate_preserves_ratios_queue_time_and_trace_curves(self):
         from tools.g2.expand_m6_x710 import build_matrix
         full=build_matrix(rate_divisor=1);quarter=build_matrix()
