@@ -19,6 +19,8 @@ test('bringup-check', python, args: [meson.project_source_root() / 'tests/bringu
   workdir: meson.project_source_root(), timeout: 30)
 test('trex-control', python, args: [meson.project_source_root() / 'tests/trex_control_test.py'],
   workdir: meson.project_source_root(), timeout: 30)
+test('bprime-stl-profile', python, args: [meson.project_source_root() / 'tests/bprime_stl_profile.py'],
+  workdir: meson.project_source_root(), timeout: 30)
 core_pcap = executable('core-pcap-replay', 'dpds-core/scripts/pcap_trace_replay.c',
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
