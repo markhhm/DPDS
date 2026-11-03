@@ -92,6 +92,12 @@ class JudgeShardTests(unittest.TestCase):
             want_paths=[str((source.parent/r['manifest']).resolve()) for r in matrix['runs']
                         if r['extensions']['m6']['condition_id']==condition]
             self.assertEqual([r['manifest'] for r in job['runs']],want_paths)
+            want_roots=[str((source.parent/r['extensions']['m6']['raw_retention']['capture_directory']).resolve())
+                        for r in matrix['runs'] if r['extensions']['m6']['condition_id']==condition]
+            self.assertEqual([r['extensions']['m6']['raw_retention']['capture_directory'] for r in job['runs']],want_roots)
+            self.assertEqual([r['extensions']['m6']['raw_retention']['keep_ns'] for r in job['runs']],
+                [r['extensions']['m6']['raw_retention']['keep_ns'] for r in matrix['runs']
+                 if r['extensions']['m6']['condition_id']==condition])
             saved=out.read_bytes();again=subprocess.run(args,capture_output=True,text=True)
             self.assertEqual(again.returncode,2)
             self.assertEqual(out.read_bytes(),saved);self.assertEqual(source.read_bytes(),original)
