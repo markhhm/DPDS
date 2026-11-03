@@ -725,6 +725,7 @@ prlimit --as=4294967296 -- python3 -m tools.g2.matrix "$M6_MATRIX" \
 This command replaces full raw files with diagnostic prefixes.
 Before the first replacement, the stage creates all prefixes and checks their total against the acquisition quota.
 A larger total causes refusal and leaves all originals unchanged.
+Before deletion, the stage flushes complete scientific files, seals, registration and directory entries to storage.
 Each replacement requires a durable JSON record with the original filename, size, SHA256, retained range and UTC time.
 The record also contains the retained SHA256, size and replacement state.
 Atomic replacement preserves a separate hardlinked backup.
@@ -740,6 +741,7 @@ Unsupported profiles cause refusal.
 A retained PCAPNG remains readable with its original packet blocks and new prefix statistics.
 A retained native binary uses the diagnostic `hng-native-prefix-v1` envelope.
 Its event bytes, global order and producer sequences remain unchanged, including gaps.
+The stage recalculates the registered time interval and clock before it accepts a stored retention manifest.
 Read this native prefix explicitly:
 
 ```sh

@@ -66,7 +66,8 @@ class Retention:
             raise ValueError('raw deletion requires --prune-raw --apply-raw-prune --backup-scope-confirmed')
         if backup_confirmed and not enabled:
             raise ValueError('backup confirmation requires --prune-raw')
-        self.base=Path(matrix_path).resolve().parent
+        self.matrix_path=Path(matrix_path).resolve()
+        self.base=self.matrix_path.parent
         self.output=Path(output).resolve()
         self.matrix=matrix
         self.enabled,self.apply=enabled,apply
@@ -112,7 +113,7 @@ class Retention:
                     or value['policy']!=group['policy'] or not value['files']
                     or set(value['members'])!={r['id'] for r in group['members']}):
                 raise ValueError('raw manifest differs from acquisition registration')
-            expected=self.discover(aid)[0]
+            expected,pairs,registrations=self.discover(aid)
             if {item['path']:item['kind'] for item in value['files']}!=expected or len(value['files'])!=len(expected):
                 raise ValueError('raw manifest file set differs from registered captures')
             for item in value['files']:
@@ -120,6 +121,17 @@ class Retention:
                     raise ValueError('raw manifest needs every original full SHA and size')
                 if not 0<=item['start_ns']<item['end_ns']<2**64:
                     raise ValueError('invalid raw retention interval')
+            window=value['observation_range']
+            if not 0<=window['start_ns']<window['end_ns']<2**64:
+                raise ValueError('invalid raw observation interval')
+            start,end,clock,ranges=self._ranges(aid,pairs,registrations,
+                                               window=(window['start_ns'],window['end_ns']))
+            if window!=dict(start_ns=start,end_ns=end,clock_id=clock):
+                raise ValueError('raw manifest observation range differs from registered prefix')
+            for item in value['files']:
+                a,b,c=ranges[item['path']] if item['kind']=='native' else (start,end,clock)
+                if (item['start_ns'],item['end_ns'],item['clock_id'])!=(a,b,c):
+                    raise ValueError('raw manifest cut range/clock differs from registered prefix')
             for run in group['members']:
                 if value['members'][run['id']]['seal_sha256']!=_hash(self.output/run['id']/'.complete.json'):
                     raise ValueError('complete seal changed after raw registration')
@@ -191,7 +203,7 @@ class Retention:
             ready=all(run['id'] in self.done for run in self.groups[aid]['members'])
         if ready:self.prune(aid)
 
-    def _ranges(self,aid,pairs,registrations):
+    def _ranges(self,aid,pairs,registrations,window=None):
         from .pcapng import Capture
         beginnings=[];targets=set();ends=[]
         for name,pair in pairs.items():
@@ -203,8 +215,9 @@ class Retention:
                     or not mapping['valid_from_raw']<=pair['start_ns']<pair['end_ns']<=mapping['valid_to_raw']):
                 raise ValueError('raw retention requires registered same-clock ns capture pairs')
             targets.add(mapping['target_clock_id']);ends.append(pair['end_ns'])
+            capture_start,capture_end=window or (pair['start_ns'],pair['end_ns'])
             capture=Capture(Path(name).parent/pair['before']['path'],
-                {int(k):v for k,v in pair['before']['interfaces'].items()},pair['start_ns'],pair['end_ns'])
+                {int(k):v for k,v in pair['before']['interfaces'].items()},capture_start,capture_end)
             iterator=capture.packets()
             try:
                 first=next(iterator,None)
@@ -265,6 +278,32 @@ class Retention:
         _write(directory/'manifest.json',value)
         return value
 
+    def _durable_evidence(self,aid,manifest):
+        # Persist the ONLY complete scientific evidence before discarding full raw.
+        raw={item['path'] for item in manifest['files']}
+        files={self.matrix_path,self.output/'.matrix.json'}
+        root=self.groups[aid]['root']
+        directories={self.output,self.output.parent,self.directory(aid),self.directory(aid).parent,root,root.parent}
+        for run in self.groups[aid]['members']:
+            target=self.output/run['id']
+            seal=_load(target/'.complete.json')
+            files.update(Path(name) for name in seal['sources'] if name not in raw)
+            for path in target.rglob('*'):
+                if path.is_file():files.add(path)
+                elif path.is_dir() and not path.is_symlink():directories.add(path)
+            files.add(target/'.complete.json');directories.add(target)
+        files.add(self.directory(aid)/'manifest.json')
+        for path in files:
+            with path.open('rb') as stream:os.fsync(stream.fileno())
+            directories.add(path.parent)
+            if path.is_relative_to(root):
+                parent=path.parent
+                while parent!=root:
+                    directories.add(parent);parent=parent.parent
+        # Report subdirectories and newly-created retention ancestors precede parents.
+        for path in sorted(directories,key=lambda p:len(p.parts),reverse=True):
+            _sync_directory(path)
+
     def prune(self,aid):
         from .matrix import completed_run
         directory=self.directory(aid)
@@ -300,6 +339,7 @@ class Retention:
             for stage,target,_,_,identity in staged:
                 if stage is not None and raw_prefix._identity(target)!=identity:
                     raise ValueError('raw changed while staging prefixes')
+            self._durable_evidence(aid,manifest)
             for stage,target,receipt_path,receipt,identity in staged:
                 if receipt['state']=='APPLIED':continue
                 if stage is not None:

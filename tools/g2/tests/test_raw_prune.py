@@ -193,6 +193,41 @@ class RawPruneTests(unittest.TestCase):
             self.assertEqual(len(load(out/'.raw-retention/acq/manifest.json')['files']),5)
             self.assertEqual(run_matrix(path,out)['status'],'PASS')
 
+    def test_manifest_cut_bounds_and_clocks_must_match_registered_prefix(self):
+        for mutation in ('files','observation','clock'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);path,raw,out=self.setup_case(root);self.invoke(path,out)
+                manifest_path=out/'.raw-retention/acq/manifest.json';value=load(manifest_path)
+                if mutation=='clock':value['files'][0]['clock_id']='other'
+                else:
+                    for item in value['files']:item['start_ns']=item['end_ns']-1
+                    if mutation=='observation':value['observation_range']['start_ns']=199999
+                write(manifest_path,value)
+                before={p.name:digest(p) for p in raw.iterdir() if p.is_file()}
+                with self.assertRaises(ValueError):self.invoke(path,out,apply_raw_prune=True,backup_scope_confirmed=True)
+                self.assertEqual(before,{p.name:digest(p) for p in raw.iterdir() if p.is_file()})
+
+    def test_complete_evidence_and_directory_links_are_durable_before_replacement(self):
+        import os
+        from tools.g2 import raw_prune
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);path,raw,out=self.setup_case(root)
+            seal=load(out/'demo/.complete.json')
+            needed=[p for p in (out/'demo').rglob('*') if not p.is_symlink()]
+            needed += [Path(p) for p in seal['sources'] if not p.endswith(('.hngb','.pcapng'))]
+            needed += [out/'demo',out,out.parent,raw,path,out/'.matrix.json']
+            def identity(p):
+                st=p.stat();return st.st_dev,st.st_ino
+            synced=set();sync=os.fsync;replace=raw_prune.replace_prefix
+            def tracked(fd):
+                st=os.fstat(fd);sync(fd);synced.add((st.st_dev,st.st_ino))
+            def checked(stage,target):
+                required=needed+[out/'.raw-retention',out/'.raw-retention/acq',out/'.raw-retention/acq/manifest.json']
+                self.assertTrue({identity(p) for p in required}<=synced,'deletion preceded durable complete evidence/parent links')
+                replace(stage,target)
+            with patch.object(os,'fsync',tracked),patch.object(raw_prune,'replace_prefix',checked):
+                self.invoke(path,out,apply_raw_prune=True,backup_scope_confirmed=True)
+
     def test_interrupted_replace_is_recoverable_without_rejudging(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);path,raw,out=self.setup_case(root)
