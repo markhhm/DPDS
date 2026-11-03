@@ -132,6 +132,51 @@ and the limit request can fail. Measure each job with `/usr/bin/time -l` and
 record its maximum resident set size in bytes. If a single job exceeds
 4294967296 bytes (4 GiB), stop and report it.
 
+In a macOS sandbox, `/usr/bin/time -l` can fail with
+`time: sysctl kern.clockrate: Operation not permitted` and exit 1 even when
+the child succeeds. Keep that failure in the evidence; it is not a successful
+RSS measurement. In that environment, replace the `time -l` job command with
+the following `os.wait4` wrapper. Run one complete job at a time. Darwin's
+`ru_maxrss` is **bytes**, whereas Linux reports KiB. The seqcheck benchmark's
+`max_rss_kib` field converts Darwin bytes to KiB.
+
+```sh
+"$PYTHON" - "$JOB_MATRIX" "$JOB_OUT" "$JUDGE_WORKERS" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+assert sys.platform == 'darwin'
+matrix, output, workers = sys.argv[1:]
+workers = int(workers)
+assert workers > 0
+start = time.perf_counter()
+process = subprocess.Popen([sys.executable, '-m', 'tools.g2.matrix',
+                            matrix, '--out', output])
+_, status, usage = os.wait4(process.pid, 0)
+process.returncode = os.waitstatus_to_exitcode(status)
+measurement = dict(exit=process.returncode, wall_seconds=time.perf_counter() - start,
+                   cpu_seconds=usage.ru_utime + usage.ru_stime,
+                   peak_rss_bytes=usage.ru_maxrss,
+                   rss_interface='Darwin os.wait4 ru_maxrss; bytes', workers=workers)
+Path(output + '.rusage.json').write_text(json.dumps(measurement, indent=2) + '\n')
+if process.returncode:
+    raise SystemExit(process.returncode if process.returncode > 0 else 128 - process.returncode)
+if usage.ru_maxrss > 4294967296 or workers * usage.ru_maxrss > 25769803776:
+    raise SystemExit('STOP: measured RSS exceeds the judge memory budget')
+PY
+```
+
+This records the completed job's exit status, wall time, CPU time and peak RSS
+beside its output directory. The budget check runs after completion; stop a
+running job if observed RSS exceeds 4 GiB. A resumed job that only skips
+completed runs does not measure the full job's peak RSS. If `time -l` already
+completed the child, preserve its output and measure the next complete job
+with the wrapper rather than treating a resume-only measurement as its peak.
+
 Retain the registered seqcheck budget and start with one reporter process.
 After platform checks, require `JUDGE_WORKERS` times the largest measured job
 peak RSS to be at most 25769803776 bytes (24 GiB). On a 32 GiB judge, reserve

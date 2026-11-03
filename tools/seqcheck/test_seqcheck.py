@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the real C checker with independent synthetic pcapng pairs."""
+import contextlib
 import hashlib
+import io
 import json
 import os
 import resource
@@ -10,7 +12,9 @@ from pathlib import Path
 import struct
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from tools.g2.probe import encode_probe
 
@@ -253,6 +257,33 @@ class SeqcheckTests(unittest.TestCase):
         packets = [(0, False, {'options': 40})]
         code, r = self.check_pair(packets, packets, ingress_options={'caplen': 99}, receiver_options={'caplen': 99})
         self.assertEqual(code, 0)
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_max_rss_kib_has_the_same_units_on_darwin_and_linux(self):
+        from tools.seqcheck import benchmark
+
+        wait4 = os.wait4
+        for platform, raw_rss in [('darwin', 8_388_608), ('linux', 8192)]:
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / 'benchmark'
+
+                def measured_wait4(pid, options):
+                    child, status, usage = wait4(pid, options)
+                    return child, status, SimpleNamespace(
+                        ru_utime=usage.ru_utime, ru_stime=usage.ru_stime,
+                        ru_maxrss=raw_rss)
+
+                arguments = ['benchmark', '--binary', str(BINARY), '--out', str(output),
+                             '--packets', '16', '--repeats', '1']
+                with patch('sys.argv', arguments), \
+                        patch.object(benchmark, 'sys', SimpleNamespace(platform=platform)), \
+                        patch.object(benchmark.os, 'wait4', side_effect=measured_wait4), \
+                        contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    benchmark.main()
+                report = json.loads((output / 'benchmark.json').read_text())
+                self.assertEqual(report['runs'][0]['max_rss_kib'], 8192)
+                self.assertEqual(json.loads(stdout.getvalue()), report)
 
 
 if __name__ == '__main__':
