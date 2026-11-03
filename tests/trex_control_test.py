@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import Mock
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
@@ -28,7 +29,7 @@ class Client:
     def get_stats(self,ports,sync_now):
         self.calls.append(('stats',ports,sync_now));counts=self.counts[0]
         if len(self.counts)>1:self.counts.pop(0)
-        return {p:dict(opackets=n) for p,n in zip(ports,counts)}
+        return {p:dict(opackets=n,ipackets=100*sum(c[0]=='stats' for c in self.calls)) for p,n in zip(ports,counts)}
     def remove_all_streams(self,ports):self.calls.append(('remove',ports))
     def add_streams(self,streams,ports):self.calls.append(('add',streams,ports))
     def start(self,**kwargs):self.calls.append(('start',kwargs));self.active=True
@@ -42,7 +43,7 @@ class Clock:
 
 
 class ControlTests(unittest.TestCase):
-    def invoke(self,command,client,extra=(),loader=None):
+    def invoke(self,command,client,extra=(),loader=None,ports=(2,5)):
         from scripts import trex_control
         calls=[];clock=Clock();out=io.StringIO();err=io.StringIO()
         def load(path,**kwargs):
@@ -51,17 +52,17 @@ class ControlTests(unittest.TestCase):
                 def get_streams(self):return [kwargs['direction']]
             return Profile()
         with redirect_stdout(out),redirect_stderr(err):
-            code=trex_control.main([command,'--server','${GEN_SERVER}','--ports','2','5',
+            code=trex_control.main([command,'--server','${GEN_SERVER}','--ports',*map(str,ports),
                 '--profile','${GEN_STL_PROFILE}',*extra],api=(lambda **kw:client,loader or load),
                 clock=clock.read,sleep=clock.sleep)
         self.assertEqual(len(out.getvalue().splitlines()),1,out.getvalue())
         result=json.loads(out.getvalue())
         self.assertEqual(set(result),{'schema','command','status','server','ports','profile',
             'opackets','tx_active','stable_samples','error'})
-        self.assertEqual(result['ports'],[2,5]);self.assertEqual(result['command'],command)
+        self.assertEqual(result['ports'],list(ports));self.assertEqual(result['command'],command)
         self.assertEqual(result['schema'],'hng-trex-control-v1')
         self.assertIn(('disconnect',dict(stop_traffic=False,release_ports=False)),client.calls)
-        self.assertNotIn(('acquire',[2,5],True),client.calls)
+        self.assertIn(('acquire',list(ports),False),client.calls)
         return code,result,calls
 
     def test_start_both_directions_indefinitely_without_total_or_forcing(self):
@@ -72,6 +73,38 @@ class ControlTests(unittest.TestCase):
         self.assertIn(('start',dict(ports=[2,5],mult='1',force=False,duration=-1,total=False)),client.calls)
         self.assertEqual(result['tx_active'],[True,True])
         self.assertNotIn(('stop',[2,5]),client.calls)
+
+    def test_one_port_start_loads_only_direction_zero_on_that_port(self):
+        client=Client(counts=[[7]])
+        code,result,profiles=self.invoke('start',client,ports=(5,))
+        self.assertEqual((code,result['status']),(0,'RUNNING'))
+        self.assertEqual(profiles,[('${GEN_STL_PROFILE}',dict(direction=0,port_id=5))])
+        self.assertIn(('start',dict(ports=[5],mult='1',force=False,duration=-1,total=False)),client.calls)
+        self.assertIn(('release',[5]),client.calls)
+        self.assertEqual(result['opackets'],[7]);self.assertEqual(result['tx_active'],[True])
+        self.assertNotIn(('stop',[5]),client.calls)
+
+    def test_one_port_status_preserves_tx_and_reports_one_counter(self):
+        client=Client(counts=[[7]],active=True)
+        code,result,profiles=self.invoke('status',client,ports=(5,))
+        self.assertEqual((code,result['status']),(0,'RUNNING'))
+        self.assertEqual(result['opackets'],[7]);self.assertEqual(result['tx_active'],[True])
+        self.assertFalse(profiles)
+        self.assertFalse(any(c[0] in ('remove','add','start','stop') for c in client.calls))
+
+    def test_one_port_stop_proves_tx_settled_while_rx_counters_increase(self):
+        client=Client(counts=[[7],[8],[8],[8]],active=True)
+        code,result,profiles=self.invoke('stop',client,ports=(5,))
+        self.assertEqual((code,result['status']),(0,'STOPPED'))
+        self.assertEqual(result['opackets'],[8]);self.assertEqual(result['tx_active'],[False])
+        self.assertEqual(result['stable_samples'],2);self.assertFalse(profiles)
+        self.assertEqual(sum(c[0]=='stats' for c in client.calls),4)
+        self.assertIn(('stop',[5]),client.calls)
+
+    def test_one_port_reset_or_timeout_fails_closed(self):
+        for client in (Client(counts=[[7],[6]]),Client(counts=[[i] for i in range(20)])):
+            code,result,_=self.invoke('stop',client,ports=(5,),extra=('--timeout','1','--poll-interval','.1'))
+            self.assertEqual((code,result['status']),(2,'ERROR'));self.assertTrue(result['error'])
 
     def test_status_preserves_traffic_and_streams(self):
         client=Client(active=True);code,result,profiles=self.invoke('status',client)
@@ -117,12 +150,14 @@ class ControlTests(unittest.TestCase):
 
     def test_invalid_args_never_connect_and_emit_one_error_json(self):
         from scripts import trex_control
-        for extra in (['--ports','2','2'],['--timeout','nan'],['--poll-interval','0']):
-            out=io.StringIO()
+        for extra in (['--ports','2','2'],['--ports','2','5','7'],['--ports','-1'],['--ports'],
+                      ['--timeout','nan'],['--poll-interval','0']):
+            out=io.StringIO();factory=Mock()
             with redirect_stdout(out):
                 code=trex_control.main(['stop','--server','${GEN_SERVER}','--ports','2','5',
-                    '--profile','${GEN_STL_PROFILE}',*extra],api=(None,None))
+                    '--profile','${GEN_STL_PROFILE}',*extra],api=(factory,None))
             self.assertEqual(code,2);self.assertEqual(json.loads(out.getvalue())['status'],'ERROR')
+            factory.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

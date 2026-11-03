@@ -175,6 +175,9 @@ The unmodified MTU/100G example does not meet that input.
 The client loads a local profile, not a path on the remote server.
 Configure `GEN_PYTHON` and private `PYTHONPATH` for both the STL API and the profile's imports.
 
+The tool accepts one or two selected ports. The full B-prime commands below require two.
+The [single-port candidate](#single-port-reduced-variant-pending-decision) has a separate scope.
+
 ```sh
 # On the approved generator-control host, through its approved system-manager wrapper.
 "$GEN_PYTHON" "$GEN_CONTROL" start --server "$GEN_SERVER" \
@@ -311,3 +314,135 @@ with highest required symbol GLIBC_2.39, below the 2.41 ceiling.
 Both null and ring smokes confirmed RX=4096, TX=1024, seven lcores, telemetry and normal drain.
 Those smokes are zero-packet software evidence.
 No full 36 GiB allocation, physical NIC, rate or concurrency test ran for this input package.
+
+## Single-port reduced variant (pending decision)
+
+**Prepared for review only. The variant decision and operator handoff remain pending.**
+This is one active traffic direction, not a replacement for the bidirectional B-prime condition.
+Even if every active-direction check succeeds, **do not report B-prime PASS**.
+Keep its attempt and evidence separate from full B-prime results.
+
+One external 10G **full-duplex** port sends direction 0 and receives the return frames.
+The DUT still uses two physical ports and the existing seven-lcore layout:
+
+```text
+GEN selected port TX -> approved switch path -> DUT port0 RX
+GEN same port RX    <- approved switch path <- DUT port1 TX
+```
+
+The topology owner must verify this route, with no output recirculation to DUT port0.
+DPDS preserves the Ethernet headers. Ordinary MAC learning alone does not establish this path.
+Register the required ingress-specific forwarding, selected VLAN, TX/RX capture separation and clock scope privately.
+This preparation supplies no switch commands or hardware evidence.
+
+### One-direction configuration
+
+The existing expander selects `fixed-E3-142-320-1-forward-L9-X`.
+Each candidate file is exactly the original full condition's direction-0 line:
+
+| ACTIVE_VLAN | CONFIG_FILE relative to DPDS_SRC | SHA256 |
+| --- | --- | --- |
+| 710 | `examples/m5/bprime-1port-710.json` | `db5859cee60c04e28bea10f3578925dbfd94faf281e61571f09afadc84ada038` |
+| 711 | `examples/m5/bprime-1port-711.json` | `810406cd8afd0672087690b1fbff88af7d373ac53e5879a92148bac59169fdde` |
+
+The only line is 0 to 1. C=9G, Q=8388608 bytes, t=142 ms, delta=320 ms, p=1 and seed=1 remain unchanged.
+It retains 6318588 storage packets and 9591616584 storage frame bytes.
+The generator sends the same equal-packet X mix, 64 flows and per-flow dense sequences at 10G L1.
+Only profile direction 0 is loaded, independent of the selected generator port's numeric ID.
+
+Regenerate a candidate without a device or generator operation:
+
+```sh
+cd "$DPDS_SRC"
+python3 -m tools.g2.expand_m6_x710 \
+  --condition fixed-E3-142-320-1-forward-L9-X --active-vlan "$ACTIVE_VLAN" --out "$CONFIG_FILE"
+sha256sum "$CONFIG_FILE"
+```
+
+### Direction-specific checks
+
+| Check | Reduced-variant scope |
+| --- | --- |
+| DUT port0 RX | Keep >=9.9G L1 after warm-up and two stable 10 s intervals |
+| DUT port1 TX | Keep 8.91 to 9.09G L1 for the active C=9G direction |
+| Q/storage | Keep Q drop >0, Q peak <=8388608, all final Q/storage counters zero |
+| Drain and conservation | Keep verified TX stop, DRAINED, packet/byte conservation PASS and normal exit |
+| Pool ownership | Keep **both** pools owned=0, including the idle-ingress pool |
+| Non-model errors/drops | Keep zero-new-missed/error/nombuf and the existing zero non-model-drop gates |
+| DUT port1 RX / port0 TX | No positive reverse-direction rate requirement. Record both counters and unexpected traffic |
+| Reverse-direction coverage | Not exercised. No reverse-path timing, capacity or pollution conclusion |
+| Overall B-prime verdict | Not eligible for B-prime PASS |
+
+Use actual monotonic intervals and the existing L1 byte formula.
+Preserve the global counters and error evidence for both physical DUT ports.
+Without unexpected ingress, require port0 RX = port1 TX + Q drops in packets and wire bytes after drain.
+Unexpected traffic or unexplained conservation differences still block a successful reduced check.
+
+The original two-port monitor applies both rate gates to each port.
+It therefore reports the inactive leg. Do not relabel its output as a full B-prime PASS.
+A later approved orchestrator must apply the directional gates above before this candidate can run.
+The per-direction model and queue bounds are unchanged: warm-up 2 s, drain wait 2 s and stop timeout 10 s.
+
+### Optional smaller memory registration
+
+The [host pool algorithm](../../common/common.c) creates both ingress pools even with one configured line.
+Port1 TX uses buffers from the active **port0 ingress pool**.
+The port1 ingress pool retains fixed RX/handoff/cache/pending reserves but has no storage or egress-TX reservation.
+For seven lcores, RX4096 and TX1024, the fixed reserve is:
+
+```text
+4096 RX + 1024 RX handoff + 1024 TX handoff + 7*32 cache + 4*1024 pending + 4*16 burst = 10528
+pool0 objects = 10528 + 1024 egress TX + 6318588 storage = 6330140
+pool1 objects = 10528
+```
+
+Use the same verified 2624-byte stride, 409200 objects/page and 1056960-byte pool header as the full registration.
+Do not halve the two-pool calculator total: its `--lines-per-port 1` models a line on each ingress.
+
+| Allocation | One-direction conservative budget |
+| --- | ---: |
+| Active port0 pool | 16 object pages + ring/header = 17248035392 bytes |
+| Idle-ingress port1 pool | 1 object page + `rte_ring_get_memsize(16384)` 131456 + header = 1074930240 bytes |
+| Four handoff rings / statistics | 34304 / 4800 bytes, unchanged |
+| EAL base | 18323004736 bytes = 17.0646279454 GiB |
+| Optional EAL reservation | **`LOAD_SOCKET_MEM=0,18432`**, 18 GiB on the approved node1 |
+| EAL reserve beyond base | 1004348096 bytes = 0.9353720546 GiB |
+| Ordinary Core metadata | 6318588*144 = 909876672 bytes |
+| Ordinary RAM required, with 256 MiB reserve | **1178312128 bytes**, outside reserved hugepages |
+| EAL18GiB + Core + 256MiB reserve | 20505664960 bytes = 19.0973886847 GiB |
+| Headroom within 36 GiB accounting | 18149040704 bytes = 16.9026113153 GiB |
+
+The 1 GiB rounding is conservative for each pool. Confirm allocator/PMD values before any later hardware approval.
+This optional vector uses 18 of the 36 hugepages. The unused reserved pages are not ordinary RAM.
+
+The original `0,33792` reservation can remain if the owner wants that reservation for comparison.
+Record which vector the candidate uses. Neither choice restores bidirectional workload equivalence.
+The 18 GiB vector is for this one-line configuration only, not for the full two-line condition.
+Use the selected vector for both socket-mem and socket-limit, with the existing CPU/node bind.
+
+### One-port control reply and receive continuity
+
+For this candidate, pass exactly one approved generator port:
+
+```sh
+"$GEN_PYTHON" "$GEN_CONTROL" start --server "$GEN_SERVER" \
+  --ports "$GEN_PORT0" --profile "$GEN_STL_PROFILE"
+"$GEN_PYTHON" "$GEN_CONTROL" status --server "$GEN_SERVER" \
+  --ports "$GEN_PORT0" --profile "$GEN_STL_PROFILE"
+"$GEN_PYTHON" "$GEN_CONTROL" stop --server "$GEN_SERVER" \
+  --ports "$GEN_PORT0" --profile "$GEN_STL_PROFILE" --timeout 5 --poll-interval 0.25
+```
+
+These are interface examples for review, not an instruction to start this candidate.
+The existing JSON schema remains unchanged. `ports`, `opackets` and `tx_active` have one element in argv order.
+Start must return RUNNING with one true TX flag. Stop must return STOPPED with one false TX flag and `stable_samples=2`.
+The two-port form keeps its existing direction-0/direction-1 behavior and two-element vectors.
+
+Stop proves only that the selected port's TX counters stay unchanged over two intervals.
+Its RX counters can still increase while DUT port1 drains to the same generator port.
+Keep capture and receive active through drain and the two later unchanged DUT counter snapshots.
+Do not stop the shared server, close capture or wait for RX silence as the TX-stop criterion.
+Do not accept a one-port reply as completion of the original bidirectional B-prime procedure.
+
+The SDK's TX stop can remove profile RX filters. Use a capture object or independent RX capture for drain evidence.
+Validate actual receive/capture continuity on the approved platform before any later handoff.

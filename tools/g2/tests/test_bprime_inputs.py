@@ -12,6 +12,17 @@ CONDITION='fixed-E3-142-320-1-both-L9-X'
 
 
 class BprimeInputsTests(unittest.TestCase):
+    def test_single_port_candidate_is_exact_forward_line_with_full_capacity(self):
+        from tools.g2.expand_m6_x710 import engine_config
+        from tools.g2.reference import Reference
+        for vlan in (710,711):
+            reduced=json.loads((ROOT/f'examples/m5/bprime-1port-{vlan}.json').read_text())
+            expanded=engine_config('fixed-E3-142-320-1-forward-L9-X',vlan)
+            full=engine_config(CONDITION,vlan)
+            self.assertEqual(reduced,expanded)
+            self.assertEqual(reduced,dict(schema='hng-v1',lines=full['lines'][:1]))
+            Reference(reduced,'single-direction-candidate')
+
     def test_committed_configs_are_expanded_and_have_full_capacity(self):
         from tools.g2.expand_m6_x710 import engine_config
         from tools.g2.reference import Reference

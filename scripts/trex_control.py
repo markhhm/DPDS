@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Non-interactive STL control for one reserved port pair; stdout is one JSON reply."""
+"""Non-interactive STL control for one or two reserved ports; stdout is one JSON reply."""
 import argparse
 from contextlib import redirect_stdout
 import json
@@ -17,7 +17,7 @@ def snapshot(client,ports,result):
     stats=client.get_stats(ports=ports,sync_now=True)
     counts=[stats[port]['opackets'] for port in ports]
     if any(type(value) is not int or value<0 for value in counts):
-        raise ValueError('opackets must be non-negative integers for both ports')
+        raise ValueError('opackets must be non-negative integers for all selected ports')
     result['opackets']=counts
     result['tx_active']=[bool(client.is_traffic_active(ports=[port])) for port in ports]
     return counts
@@ -29,16 +29,16 @@ def control(args,client,load_profile,result,clock,sleep):
         client.connect();connected=True
         client.acquire(ports=args.ports,force=False)
         if args.command=='start':
-            if client.is_traffic_active(ports=args.ports):raise ValueError('reserved pair already has active traffic')
+            if client.is_traffic_active(ports=args.ports):raise ValueError('selected ports already have active traffic')
             streams=[load_profile(args.profile,direction=direction,port_id=port).get_streams()
                      for direction,port in enumerate(args.ports)]
-            if not all(streams):raise ValueError('profile must provide streams for both directions')
+            if not all(streams):raise ValueError('profile must provide streams for each selected direction')
             client.remove_all_streams(ports=args.ports)
             for port,stream in zip(args.ports,streams):client.add_streams(stream,ports=[port])
             try:
                 client.start(ports=args.ports,mult='1',force=False,duration=-1,total=False)
                 snapshot(client,args.ports,result)
-                if not all(result['tx_active']):raise ValueError('both ports must have active traffic after start')
+                if not all(result['tx_active']):raise ValueError('all selected ports must have active traffic after start')
             except Exception:
                 client.stop(ports=args.ports)
                 raise
@@ -47,13 +47,13 @@ def control(args,client,load_profile,result,clock,sleep):
             client.stop(ports=args.ports)
             deadline=clock()+args.timeout;previous=None
             while True:
-                if clock()>=deadline:raise TimeoutError('timeout waiting for both TX counters to settle')
+                if clock()>=deadline:raise TimeoutError('timeout waiting for selected TX counters to settle')
                 counts=snapshot(client,args.ports,result)
                 if previous is not None and any(now<old for now,old in zip(counts,previous)):
                     raise ValueError('opackets counter reset during stop')
                 result['stable_samples']=(result['stable_samples']+1 if counts==previous
                     and not any(result['tx_active']) else 0)
-                if clock()>=deadline:raise TimeoutError('timeout waiting for both TX counters to settle')
+                if clock()>=deadline:raise TimeoutError('timeout waiting for selected TX counters to settle')
                 if result['stable_samples']>=2:break
                 previous=counts;sleep(min(args.poll_interval,max(0,deadline-clock())))
             result['status']='STOPPED'
@@ -77,13 +77,14 @@ def main(argv=None,api=None,clock=time.monotonic,sleep=time.sleep):
         parser=Parser(description=__doc__)
         parser.add_argument('command',choices=('start','stop','status'))
         parser.add_argument('--server',required=True)
-        parser.add_argument('--ports',required=True,type=int,nargs=2)
+        parser.add_argument('--ports',required=True,type=int,nargs='+')
         parser.add_argument('--profile',required=True)
         parser.add_argument('--timeout',type=float,default=5)
         parser.add_argument('--poll-interval',type=float,default=.25)
         args=parser.parse_args(argv)
         result.update(command=args.command,server=args.server,ports=args.ports,profile=args.profile)
-        if len(set(args.ports))!=2 or min(args.ports)<0:raise ValueError('two distinct non-negative ports are required')
+        if not 1<=len(args.ports)<=2 or len(set(args.ports))!=len(args.ports) or min(args.ports)<0:
+            raise ValueError('one or two distinct non-negative ports are required')
         if (not math.isfinite(args.timeout) or not math.isfinite(args.poll_interval)
                 or args.poll_interval<=0 or args.timeout<2*args.poll_interval):
             raise ValueError('finite timeout >= two positive poll intervals is required')
