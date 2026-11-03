@@ -780,6 +780,9 @@ The reporter verifies the original seals, raw receipts and retained hashes befor
 It recomputes reference results from the prefix itself with the registered configuration, calibration and trace profiles.
 It does not copy the complete verdict or timing values.
 Native reads use bounded array batches and preserve original event and producer sequence gaps.
+They validate classification, identities, actor ownership and the visible arrival prefix.
+Capture and host metadata must agree with the reference sample.
+C order faults apply to their registered direction and line/VLAN.
 Stress and trace use the exact retained arrival prefix, including the trace clamp state.
 A gap in the required arrival state causes INCONCLUSIVE evidence.
 The tool does not invent END records, final counters or a drain interval.

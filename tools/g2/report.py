@@ -32,7 +32,7 @@ def write_outputs(result, destination):
         sampled=result.get('verification_mode')=='sampled'
         prefix=result.get('verification_mode')=='prefix-diagnostic'
         columns=CSV_COLUMNS+('verification_mode','order_coverage','storage_coverage','timing_coverage','q_coverage','custody_mode') if sampled else CSV_COLUMNS
-        extra=('verification_mode','q_samples','q_mismatches','pending_q','pending_receiver','unobserved_due_samples','unmatched_before') if prefix else ()
+        extra=('verification_mode','q_samples','q_mismatches','pending_q','pending_receiver','unobserved_due_samples','unmatched_before','metadata_mismatches') if prefix else ()
         columns+=extra
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()

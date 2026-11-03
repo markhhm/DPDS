@@ -73,14 +73,17 @@ def _capture_samples(pairs,window,manifest,clock,selected):
                     if key not in selected:continue
                     stamp=int(row['raw']);ordinal=int(row['ordinal'])
                     item=dict(ingress_port=line['ingress_port'],egress_port=line['egress_port'],line=line['name'],
-                        external_identity=key[1],flow_id=flow,length=int(row['length']),vlan_id=int(row['vlan_id']),
+                        external_identity=key[1],flow_id=flow,length=int(row['length']),vlan_id=int(row['vlan_id']),app=None,
                         selected_late=int(row['selected_late']),timestamp=dict(raw=stamp,clock_id=pair['clock_id'],
                         mapping_id=pair['mapping_id'],point='external_rx',uncertainty_ns=pair['uncertainty_ns']))
                     item.update(dict(before_seq=ordinal,ingress_ts_ns=stamp) if role=='before' else dict(receive_seq=ordinal,receive_ns=stamp))
                     clock.map_timestamp(item['timestamp'],stamp,order_key=(role,line[side]))
                     field='before' if role=='before' else 'receive'
                     if selected[key][field] is not None:raise ValueError('duplicate selected prefix observation')
-                    selected[key][field]=item
+                    state=selected[key]
+                    if any(item[name]!=state['expected'][name] for name in ('egress_port','line','length','vlan_id','flow_id','app')):
+                        state.setdefault('metadata_mismatches',[]).append(role)
+                    state[field]=item
     return counts,uncertainty
 
 
@@ -100,6 +103,7 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
     cap=registration['capacity']['timing_sample_capacity']*max(1,len(registration['required_cells']))
     selected={};host=[];packets_count=0
     for batch in reader.batches():
+        projection.validate_prefix_batch(batch)
         events,items=batch['events'],batch['items'];kinds=events['kind'][items['event_index']]
         packets=items[kinds==0];packets_count+=len(packets)
         def make_event(index):
@@ -125,6 +129,8 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
         if state is None:continue
         field='offer' if row['kind']=='offer' else 'terminal'
         if state[field] is not None:raise ValueError('duplicate selected prefix host decision')
+        if any(row[name]!=state['expected'][name] for name in ('ingress_seq','line')):
+            state.setdefault('metadata_mismatches',[]).append('host')
         state[field]=row
     seqchecks=_seqchecks(pairs,raw_manifest,output)
     observed,capture_uncertainty=_capture_samples(pairs,raw_manifest['observation_range'],registration,clock,selected)
@@ -138,7 +144,7 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
         and c['direction']==str(line['ingress_port'])),'diagnostic'),
         direction=str(line['ingress_port']),line=line['name'],phase='retained-prefix',required=False,
         g2_pass=False,g2_qualified=False,timing_samples=0,q_samples=0,q_mismatches=0,pending_q=0,
-        pending_receiver=0,unobserved_due_samples=0,unmatched_before=0,max_clamp_ns=0,reason_codes=[],errors=[],uncertainty=0)
+        pending_receiver=0,unobserved_due_samples=0,unmatched_before=0,metadata_mismatches=0,max_clamp_ns=0,reason_codes=[],errors=[],uncertainty=0)
         for line in config['lines']}
     errors_map=dict(q_drop='q_drop',trace_loss='trace_loss_drop',trace_outage='trace_outage_drop')
     line_models={line['name']:line for line in config['lines']}
@@ -146,9 +152,11 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
     for state in selected.values():
         expected=state['expected'];row=rows[expected['line']]
         row['max_clamp_ns']=max(row['max_clamp_ns'],expected['clamp_extra_ns'])
-        actual=state['terminal']['reason'] if state['terminal'] else None
+        metadata=state.get('metadata_mismatches',[])
+        row['metadata_mismatches']+=len(metadata)
+        actual=state['terminal']['reason'] if state['terminal'] and 'host' not in metadata else None
         expect_drop=errors_map.get(expected['outcome']);reason=None;error=None
-        if state['offer'] is None:
+        if state['offer'] is None or 'host' in metadata:
             row['pending_q']+=1
         else:
             row['q_samples']+=1
@@ -156,7 +164,8 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
             if mismatch:row['q_mismatches']+=1
             if expect_drop and actual is None:row['pending_q']+=1
         if actual is not None and actual!=expect_drop:row['q_mismatches']+=1
-        before,receive=state['before'],state['receive']
+        before=state['before'] if 'before' not in metadata else None
+        receive=state['receive'] if 'receiver' not in metadata else None
         if any(item is not None and item['selected_late']!=int(expected['late']) for item in (before,receive)):
             row['reason_codes'].append('prefix_probe_flag_mismatch')
         if before is None:row['unmatched_before']+=1
@@ -175,7 +184,16 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
             error=pair['owd_ns']-target_owd
             row['errors'].append(abs(error));row['uncertainty']=max(row['uncertainty'],pair['uncertainty_ns'])
         samples.append(dict(expected=expected,actual=state,error_ns=error,boundary_reason=reason))
-    order_failed=any(any(check['totals'][name] for name in ORDER) for check in seqchecks)
+    order_failed=set()
+    for pair,check in zip(pairs.values(),seqchecks):
+        ports=set(pair['before']['interfaces'].values())
+        if len(ports)!=1:raise ValueError('prefix seqcheck requires a directional capture pair')
+        ingress=next(iter(ports))
+        for flow in check['flows']:
+            if not any(flow[name] for name in ORDER):continue
+            names=[line['name'] for line in config['lines'] if line['ingress_port']==ingress and line['vlan_id']==flow['vlan_id']]
+            if len(names)!=1:raise ValueError('prefix order failure has no unique registered line')
+            order_failed.add((str(ingress),names[0]))
     for row in rows.values():
         stats=timing_stats(row.pop('errors'));uncertainty=row.pop('uncertainty');row['timing_samples']=stats['n']
         row['error_median_ms']=None if stats['median_abs_error_ns'] is None else stats['median_abs_error_ns']/1e6
@@ -183,11 +201,12 @@ def _build(registration,config,traces,calibration,reader,pairs,raw_manifest,outp
         row['reason_codes']=sorted(set(row['reason_codes']))
         row['timing']=dict(stats=stats,median=timing_gate(stats,'median',100000,uncertainty),p99=timing_gate(stats,'p99',500000,uncertainty))
         if row['q_mismatches']:row['reason_codes'].append('prefix_sample_q_mismatch')
-        if order_failed:row['reason_codes'].append('prefix_order_failure')
+        if (row['direction'],row['line']) in order_failed:row['reason_codes'].append('prefix_order_failure')
         failed=bool(row['reason_codes']) or any(row['timing'][name]['status']=='FAIL' for name in ('median','p99'))
         row['status']=row['measurement_status']='FAIL' if failed else 'INCONCLUSIVE' if (
-            row['unobserved_due_samples'] or row['unmatched_before'] or row['pending_q'] or not row['q_samples'] or
+            row['metadata_mismatches'] or row['unobserved_due_samples'] or row['unmatched_before'] or row['pending_q'] or not row['q_samples'] or
             any(row['timing'][name]['status']!='PASS' for name in ('median','p99'))) else 'PASS'
+        if row['metadata_mismatches']:row['reason_codes'].append('prefix_sample_metadata_mismatch')
         if row['unobserved_due_samples']:row['reason_codes'].append('prefix_right_censored_due_sample')
         if row['pending_q']:row['reason_codes'].append('prefix_host_decision_unverified')
         if row['unmatched_before']:row['reason_codes'].append('prefix_before_sample_unavailable')
@@ -218,8 +237,9 @@ def run_prefix(matrix_path,reports,run_id,output):
     matrix_path=Path(matrix_path).resolve();reports=Path(reports).resolve();output=Path(output).resolve()
     matrix=read_matrix(matrix_path);retention=Retention(matrix_path,matrix,reports)
     if run_id not in retention.by_run:raise ValueError('run has no registered raw prefix')
-    aid=retention.by_run[run_id];root=retention.groups[aid]['root']
-    if any(output==base or output in base.parents or base in output.parents for base in (reports,root)):
+    aid=retention.by_run[run_id]
+    protected=(reports,*(group['root'] for group in retention.groups.values()))
+    if any(output==base or output in base.parents or base in output.parents for base in protected):
         raise ValueError('prefix report output must not overlap complete results or captures')
     raw_manifest=retention.manifest(aid);replacements=retention.replacements(run_id)
     if len(replacements)!=len(raw_manifest['files']):raise ValueError('prefix report requires a receipt for every retained raw')

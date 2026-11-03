@@ -17,8 +17,8 @@ except ImportError:
     run_prefix=None
 
 
-class PrefixReportTests(unittest.TestCase):
-    def setup_case(self,root,*,stress=False,trace=False,timing_fault=False,q_fault=False,keep_ns=None,flag_fault=False):
+class PrefixFixture(unittest.TestCase):
+    def setup_case(self,root,*,stress=False,trace=False,timing_fault=False,q_fault=False,keep_ns=None,flag_fault=False,capture_length_fault=False,native_fault=None):
         raw=root/'capture';make_case(raw,count=800,stress=stress,trace=trace,mask_bits=0,
                                    q_bytes=2000 if stress else 8*1024*1024)
         pair=load(raw/'pair.json');pair['manifest']='binary.json';write(raw/'pair.json',pair)
@@ -33,6 +33,13 @@ class PrefixReportTests(unittest.TestCase):
                 if kind==6:packet+=1
                 cursor+=size
             path.write_bytes(data)
+        if capture_length_fault:
+            path=raw/'before.pcapng';data=bytearray(path.read_bytes());cursor=0
+            while cursor<len(data):
+                kind,size=struct.unpack_from('<II',data,cursor)
+                if kind==6:struct.pack_into('<I',data,cursor+24,1519)
+                cursor+=size
+            path.write_bytes(data)
         if flag_fault:
             for role in ('before','receiver'):
                 path=raw/(role+'.pcapng');data=bytearray(path.read_bytes());cursor=0
@@ -41,20 +48,27 @@ class PrefixReportTests(unittest.TestCase):
                     if kind==6:data[cursor+28+46+12]=1
                     cursor+=size
                 path.write_bytes(data)
-        if q_fault:
+        if q_fault or native_fault:
             from tools.g2.tests.test_native_binary import MAGIC,entry,frame,line
             records=[json.loads(value) for value in (raw/'native.jsonl').read_text().splitlines()]
-            encoded=[]
+            encoded=[];counts=[0]*7
             for row in records[1:-1]:
                 common=[row['at_ns'],row['gate_ns'],row['submit_before_ns'],row['submit_after_ns'],
                     *row['resources'],row['actual_selection_seq'],row['attempt_id'],*row['consumed_dispatch'],
                     row['first_handoff_seq'],row['handoff_queue'],row['port'],row['accepted_count']]
+                if native_fault=='classification' and row['kind']==0:
+                    for item in row['items']:item[19]=False
+                if native_fault=='host_seq' and row['kind']==1:
+                    for item in row['items']:item[1]+=1
+                if native_fault=='actor' and row['kind']==0:row['producer']=5
+                counts[row['producer']]+=1
                 kind=2 if q_fault=='accepted' and row['kind']==1 else row['kind']
-                encoded.append(entry(producer=row['producer'],kind=kind,seq=row['producer_seq'],order=row['order'],
+                encoded.append(entry(producer=row['producer'],kind=kind,seq=counts[row['producer']],order=row['order'],
                     common=common,items=row['items'],snapshot=row['snapshot'],reason=3 if kind==2 else row['reason']))
             # One record per bounded frame keeps the test mutation independent of production packing.
             data=MAGIC+frame(1,line(records[0]),0)
             data+=b''.join(frame(2,row,i+1) for i,row in enumerate(encoded))
+            for i,state in enumerate(records[-1]['producers']):state.update(attempted=counts[i],emitted=counts[i])
             data+=frame(3,line(records[-1]),len(encoded)+1)
             (raw/'native.hngb').write_bytes(data)
             manifest['verification']['native_binary']['sha256']=digest(raw/'native.hngb')
@@ -71,6 +85,8 @@ class PrefixReportTests(unittest.TestCase):
         self.assertIsNotNone(run_prefix,'retained prefix reporter is missing')
         return run_prefix(path,complete,'demo',target)
 
+
+class PrefixReportTests(PrefixFixture):
     def test_retained_window_is_a_separate_short_run_with_pending_tail(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);path,raw,complete=self.setup_case(root)
@@ -153,20 +169,57 @@ class PrefixReportTests(unittest.TestCase):
             self.assertGreater(report['rows'][0]['unobserved_due_samples'],0)
             self.assertTrue(all(row['g2_qualified'] is False for row in report['rows']))
 
+
+class PrefixValidationTests(PrefixFixture):
+    def test_selected_metadata_and_native_semantics_cannot_false_pass(self):
+        for options in (dict(capture_length_fault=True),dict(native_fault='host_seq'),
+                        dict(native_fault='classification'),dict(native_fault='actor')):
+            with self.subTest(options=options),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);path,raw,complete=self.setup_case(root,**options)
+                report=self.invoke(path,complete,root/'short')
+                self.assertNotEqual(report['status'],'PASS',report.get('reason',report.get('rows')))
+                if options.get('native_fault') in ('classification','actor'):
+                    self.assertIn('NATIVE_SEMANTIC',report['reason_codes'])
+                else:self.assertGreater(report['rows'][0]['metadata_mismatches'],0)
+
+    def test_other_registered_capture_root_is_also_protected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);path,raw,complete=self.setup_case(root)
+            matrix=load(path);other=json.loads(json.dumps(matrix['runs'][0]))
+            other.update(id='other',manifest='other-capture/pair.json')
+            other['extensions']['m6']['acquisition_id']='other'
+            other['extensions']['m6']['raw_retention']['capture_directory']='other-capture'
+            matrix['runs'].append(other);write(path,matrix)
+            target=root/'other-capture/diagnostic'
+            with self.assertRaisesRegex(ValueError,'overlap'):self.invoke(path,complete,target)
+            self.assertFalse(target.exists())
+
     def test_bidirectional_seven_writer_prefix_uses_both_capture_pairs(self):
         from tools.g2.tests.binary_split_fixture import make_case as make_split
-        with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp);raw=root/'capture';make_split(raw,count=400)
-            policy=dict(keep_ns=66_000_000,byte_budget=2_000_000,capture_directory='capture')
-            matrix=dict(schema='hng-m6-matrix-v1',scope='software-only',mode='pcapng',plan={},runs=[
-                dict(id='demo',manifest='capture/pair-forward.json',extensions=dict(m6=dict(acquisition_id='acq',raw_retention=policy)))])
-            path=root/'matrix.json';write(path,matrix);complete=root/'complete'
-            run_matrix(path,complete,prune_raw=True,apply_raw_prune=True,backup_scope_confirmed=True)
-            report=self.invoke(path,complete,root/'short')
-            self.assertNotIn(report['status'],('FAIL','INVALID'),report.get('reason',report.get('rows')))
-            self.assertEqual(report['inputs']['native_packets'],800)
-            self.assertEqual(len(report['rows']),2);self.assertEqual(len(report['seqchecks']),2)
-            self.assertTrue(all(row['q_mismatches']==0 and row['timing_samples']==400 for row in report['rows']))
+        for reorder in (False,True):
+            with self.subTest(reorder=reorder),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);raw=root/'capture';make_split(raw,count=500)
+                if reorder:
+                    path=raw/'forward/receiver.pcapng';data=bytearray(path.read_bytes());cursor=0;locations=[]
+                    while cursor<len(data):
+                        kind,size=struct.unpack_from('<II',data,cursor)
+                        if kind==6:locations.append(cursor+28+46)
+                        cursor+=size
+                    a,b=locations[:2];data[a:a+8],data[b:b+8]=data[b:b+8],data[a:a+8];path.write_bytes(data)
+                policy=dict(keep_ns=66_000_000,byte_budget=2_000_000,capture_directory='capture')
+                matrix=dict(schema='hng-m6-matrix-v1',scope='software-only',mode='pcapng',plan={},runs=[
+                    dict(id='demo',manifest='capture/pair-forward.json',extensions=dict(m6=dict(acquisition_id='acq',raw_retention=policy)))])
+                path=root/'matrix.json';write(path,matrix);complete=root/'complete'
+                run_matrix(path,complete,prune_raw=True,apply_raw_prune=True,backup_scope_confirmed=True)
+                report=self.invoke(path,complete,root/'short')
+                self.assertEqual(report['inputs']['native_packets'],1000)
+                self.assertEqual(len(report['rows']),2);self.assertEqual(len(report['seqchecks']),2)
+                rows={row['direction']:row for row in report['rows']}
+                if reorder:
+                    self.assertEqual(rows['0']['status'],'FAIL');self.assertEqual(rows['1']['status'],'PASS')
+                    self.assertEqual(report['status'],'FAIL')
+                else:self.assertEqual(report['status'],'PASS',report.get('reason',report.get('rows')))
+                self.assertTrue(all(row['q_mismatches']==0 and row['timing_samples']==500 for row in report['rows']))
 
     def test_refuses_output_overlap_existing_output_and_bad_prefix_hash(self):
         with tempfile.TemporaryDirectory() as temp:
