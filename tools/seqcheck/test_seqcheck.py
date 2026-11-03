@@ -3,6 +3,8 @@
 import hashlib
 import json
 import os
+import resource
+import signal
 from pathlib import Path
 import struct
 import subprocess
@@ -79,11 +81,14 @@ class SeqcheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'capture.pcapng'
             capture(path, [(0, False)])
-            with open('/dev/full', 'wb') as full:
+            def no_output():
+                signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
+                resource.setrlimit(resource.RLIMIT_FSIZE,(0,0))
+            with (Path(temp)/'stdout').open('wb') as full:
                 result = subprocess.run([str(BINARY), '--ingress', str(path), '--receiver', str(path)],
-                                        stdout=full, stderr=subprocess.PIPE)
+                                        stdout=full, stderr=subprocess.PIPE, preexec_fn=no_output)
             self.assertEqual(result.returncode, 2)
-            self.assertTrue(result.stderr)
+            self.assertIn(b'JSON output write failed',result.stderr)
 
     def test_filename_bytes_cannot_break_json_and_utf8_is_preserved(self):
         self.assertTrue(BINARY.is_file())

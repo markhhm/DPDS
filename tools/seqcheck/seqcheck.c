@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -12,6 +15,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Darwin exposes nanosecond timestamps under different stat member names. */
+#ifdef __APPLE__
+#define STAT_MTIME(st) ((st).st_mtimespec)
+#define STAT_CTIME(st) ((st).st_ctimespec)
+#else
+#define STAT_MTIME(st) ((st).st_mtim)
+#define STAT_CTIME(st) ((st).st_ctim)
+#endif
 
 #define CHUNK (1024u * 1024u)
 #define PAGE_BITS 12u
@@ -342,8 +354,8 @@ static void finish_capture(Capture *c) {
     struct stat after;
     if (fstat(c->fd,&after) || c->hash_bytes!=(uint64_t)c->initial.st_size ||
         (c->complete && c->bytes!=c->hash_bytes) || after.st_size!=c->initial.st_size ||
-        after.st_mtim.tv_sec!=c->initial.st_mtim.tv_sec || after.st_mtim.tv_nsec!=c->initial.st_mtim.tv_nsec ||
-        after.st_ctim.tv_sec!=c->initial.st_ctim.tv_sec || after.st_ctim.tv_nsec!=c->initial.st_ctim.tv_nsec) {
+        STAT_MTIME(after).tv_sec!=STAT_MTIME(c->initial).tv_sec || STAT_MTIME(after).tv_nsec!=STAT_MTIME(c->initial).tv_nsec ||
+        STAT_CTIME(after).tv_sec!=STAT_CTIME(c->initial).tv_sec || STAT_CTIME(after).tv_nsec!=STAT_CTIME(c->initial).tv_nsec) {
         c->complete=false; c->error="input_changed";
     }
     c->bytes=c->hash_bytes; close(c->fd); c->fd=-1;
