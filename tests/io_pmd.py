@@ -78,7 +78,8 @@ def smoke(binary, directory):
         sock.bind((f"peer{port}", 0)); sock.settimeout(0.1)
         sock.setsockopt(263, 8, 1)  # SOL_PACKET/PACKET_AUXDATA retains stripped VLAN evidence.
         receivers.append(sock)
-    command = eal(binary)+[f"--vdev=net_af_packet{p},iface=hng{p}" for p in range(2)]
+    # RX4096 pools need about 94 MiB with 4 KiB pages; no-huge defaults to 64 MiB.
+    command = eal(binary)+["-m","128"]+[f"--vdev=net_af_packet{p},iface=hng{p}" for p in range(2)]
     process = subprocess.Popen(command, cwd=directory, env=dict(os.environ, RUNTIME_DIRECTORY=str(directory)),
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     observed = [[], []]
