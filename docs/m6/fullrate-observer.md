@@ -11,13 +11,15 @@ are estimates; no physical run is certified by this plan or its software tests.
 Regenerate the explicit plan with:
 
 ```sh
-python3 -m tools.g2.fullrate_plan --matrix "$M6_MATRIX" --out "$C_PLAN"
+python3 -m tools.g2.fullrate_plan --matrix examples/m6-x710-fullrate.json --out "$C_PLAN"
 ```
 
 The committed result is [m6-fullrate-observer.json](../../examples/m6-fullrate-observer.json).
-The generator accepts the original full-rate matrix or its quarter-rate form.
-For C it restores offered rate, C and Q together; delay, late probability,
-seed, trace windows and trace hashes retain their original values.
+The source is the explicit [full-rate snapshot](../../examples/m6-x710-fullrate.json).
+C copies its original 10G offered rate, C, Q, delay, late probability, seed and
+trace registration without scaling. The generator rejects quarter-rate inputs;
+`examples/m6-x710.json` is the quarter-rate main matrix after its rollout. The
+CLI defaults to `examples/m6-x710-fullrate.json`.
 
 | Condition | Purpose | ON acquisitions | Exposure each |
 |---|---|---:|---:|
@@ -28,13 +30,13 @@ seed, trace windows and trace hashes retain their original values.
 | trace-single-A-forward-L9-U | corridor A, complete clamp prefix | 36 | 9 s |
 | trace-single-B-both-L9-U | corridor B, asymmetric bidirectional prefixes | 36 | 9 s |
 | outage-hold-forward-U | registered synthetic hold/recovery | 10 | 1 s |
-| outage-drop-reverse-U | registered synthetic outage drop | 10 | 1 s |
 
 The first six are original inventory members. The registered trace profiles
-have no outage intervals. The last two therefore use the pinned Core's existing
-`tests/fixtures/outage-hold.json` and `outage-drop.json`, with source hashes in
-the plan. They are explicit companion conditions outside the 360, not new trace
-measurements. Translate the registered trace epoch to the acquisition's engine
+have no outage intervals. The last condition therefore uses the pinned Core's
+existing `tests/fixtures/outage-hold.json`, with its source hash in the plan.
+This single synthetic companion is listed outside the 360. It covers outage
+hold, recovery and the resulting output burst; Q drop is covered by the fixed
+and recorded-trace stress conditions. Translate the registered trace epoch to the acquisition's engine
 clock before starting; preserve the profile's delay curve, outage intervals,
 action and terminal horizon. Bind that derived configuration and trace digest
 in the run registration. Stop if actual offers/service/drain exceed coverage.
@@ -47,11 +49,11 @@ requires the complete 100-byte probe payload, which cannot fit its smallest
 frames. C is not a mixed-frame capacity claim.
 
 Fixed and recorded-trace acquisitions include 2 s warmup, the exposure above,
-1 s drain and 5 s reset. Synthetic outage companions have no warmup, 1 s
+1 s drain and 5 s reset. The synthetic outage companion has no warmup, 1 s
 exposure, 1 s drain and 5 s reset. Keep warmup arrivals in the exact Q/trace
 prefix; only registered exposure samples contribute timing statistics.
-There are 120 ON acquisitions: 3,268 s (54.47 min). Identical OFF comparisons
-add 3,268 s. Total is 108.93 min, or 118.93 min with 10 min reserve. These are
+There are 110 ON acquisitions: 3,198 s (53.30 min). Identical OFF comparisons
+add 3,198 s. Total is 106.60 min, or 116.60 min with 10 min reserve. These are
 schedule estimates, not a change to the full-matrix repeat/acceptance rules.
 A failed drain, insufficient samples or any missing gate needs explicit review.
 
@@ -210,12 +212,12 @@ Allow at least 800 MB/s sustained local disk throughput, preferably 1 GB/s;
 qualify the actual filesystem/controller at load. Do not use tmpfs or treat a
 virtual development disk as physical capture qualification.
 
-For the complete ON/OFF schedule, estimated native raw is 1.020 TB; receiver
-raw is 0.313 TB per arm; total raw is 1.646 TB. Derived identity projections
-add 0.330 TB if all are retained. The largest acquisition raw is 39.64 GB and
+For the complete ON/OFF schedule, estimated native raw is 1.015 TB; receiver
+raw is 0.311 TB per arm; total raw is 1.636 TB. Derived identity projections
+add 0.329 TB if all are retained. The largest acquisition raw is 39.64 GB and
 its largest derived projection is 8.04 GB. Serial judging and removal of
 recreatable projections after preserving their hashes avoids accumulating
-0.330 TB of temporary data. Do not delete original raw under that instruction.
+0.329 TB of temporary data. Do not delete original raw under that instruction.
 
 These are **additional** C costs. They do not fit in the main matrix's 1.8 TB
 retained-raw allowance. Until a combined retention allocation is approved,

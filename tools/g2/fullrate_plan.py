@@ -22,23 +22,21 @@ def build_plan(matrix):
     source={row['id']:row for row in matrix['plan']['conditions']}
     selected=[dict(copy.deepcopy(source[key]),selection_reason=reason) for key,reason in SELECTION]
     root=Path(__file__).resolve().parents[2]
-    for action,mode in (('hold','forward'),('drop','reverse')):
-        profile=root/f'dpds-core/tests/fixtures/outage-{action}.json'
-        selected.append(dict(id=f'outage-{action}-{mode}-U',input_kind='outage',traffic='U',direction_mode=mode,
-            selection_reason='registered synthetic outage companion; no outage exists in the 360-condition inventory',
-            outage_action=action,source_profile=dict(path='${CORE_ROOT}/tests/fixtures/'+profile.name,
-                sha256=hashlib.sha256(profile.read_bytes()).hexdigest()),
-            lines=[dict(family='leo',vlan_id=711,t_ns=0,delta_ns=0,p='0',c_bps=9_000_000_000,
-                        offered_bps=10_000_000_000,q_bytes=8_388_608,seed=1)]))
+    action,mode='hold','forward'
+    profile=root/f'dpds-core/tests/fixtures/outage-{action}.json'
+    selected.append(dict(id=f'outage-{action}-{mode}-U',input_kind='outage',traffic='U',direction_mode=mode,
+        selection_reason='registered synthetic outage companion; no outage exists in the 360-condition inventory',
+        outage_action=action,source_profile=dict(path='${CORE_ROOT}/tests/fixtures/'+profile.name,
+            sha256=hashlib.sha256(profile.read_bytes()).hexdigest()),
+        lines=[dict(family='leo',vlan_id=711,t_ns=0,delta_ns=0,p='0',c_bps=9_000_000_000,
+                    offered_bps=10_000_000_000,q_bytes=8_388_608,seed=1)]))
     conditions=[];acquisitions=[];windows={};on_seconds=0;native_bytes=0;receiver_bytes=0;proxy_bytes=0
     max_acquisition_raw=0;max_projection=0
     for condition in selected:
         condition_id=condition['id'];lines=condition['lines']
         offered=sum(line['offered_bps'] for line in lines)
-        if offered not in (10_000_000_000,2_500_000_000):raise ValueError('unrecognized full/quarter-rate source')
-        scale=10_000_000_000//offered
+        if offered!=10_000_000_000:raise ValueError('C requires the explicit full-rate X710 inventory')
         for line in lines:
-            for field in ('c_bps','q_bytes','offered_bps'):line[field]*=scale
             if line['c_bps']!=9_000_000_000 or line['q_bytes']!=8_388_608:
                 raise ValueError('supplement requires the original full-rate L9 envelope')
             for key in line.get('trace_windows',{}).values():windows[key]=copy.deepcopy(matrix['plan']['trace_windows'][key])
@@ -70,7 +68,7 @@ def build_plan(matrix):
     return dict(schema='hng-fullrate-observer-plan-v1',scope='supplemental-native-timing',
         status='ESTIMATE',conditions=conditions,acquisitions=acquisitions,
         traffic=copy.deepcopy(matrix['plan']['traffic']['U']),trace_windows=windows,
-        coverage=dict(os4_independent_owd=False,outage='registered synthetic hold and drop companions; outside the 360 conditions',
+        coverage=dict(os4_independent_owd=False,outage='registered synthetic hold companion; outside the 360 conditions',
             native='all RX and accepted-PMD-submit records; sampled timing and Q verdicts',
             external='one egress per acquisition; alternate captured side across bidirectional repeats',
             exclusions=['mixed small-frame profile','full 360-condition full-rate correctness','independent wire OWD']),
@@ -93,7 +91,7 @@ def build_plan(matrix):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--matrix',default='examples/m6-x710.json')
+    parser.add_argument('--matrix',default='examples/m6-x710-fullrate.json')
     parser.add_argument('--out',required=True)
     args=parser.parse_args()
     plan=build_plan(json.loads(Path(args.matrix).read_text()))
