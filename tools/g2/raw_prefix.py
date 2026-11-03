@@ -10,7 +10,7 @@ import struct
 
 import numpy as np
 from .native_arrays import NativeArrays
-from .native_binary import MAGIC, FRAME, _read, _event, _header, _json
+from .native_binary import MAGIC, FRAME, _read, _event, _header, _health, _json
 from .protocol import StreamError
 from .reference import uint
 
@@ -81,6 +81,64 @@ def native(source, destination, *, start_ns, end_ns, source_sha256, clock_id='en
         raise
 
 
+def _prefix_header(payload):
+    try:
+        value=_json(payload)
+        if value['schema']!='hng-native-prefix-v1' or value['complete'] is not False:
+            raise ValueError('not a diagnostic native prefix')
+        _bounds(value['start_ns'],value['end_ns'])
+        if (not isinstance(value['source_sha256'],str) or len(value['source_sha256'])!=64
+                or any(c not in '0123456789abcdef' for c in value['source_sha256'])
+                or type(value['source_bytes']) is not int or value['source_bytes']<=0
+                or not isinstance(value['clock_id'],str) or not value['clock_id']):
+            raise ValueError('invalid native prefix provenance')
+        _header(_line(value['capture_header']))
+        return value
+    except (KeyError,TypeError) as error:
+        raise ValueError('invalid diagnostic prefix header') from error
+
+
+def _prefix_health(payload,header,counts,seen):
+    try:
+        value=_json(payload)
+        if value['kind']!='retained-health' or value['complete'] is not False or value['producers']!=counts:
+            raise ValueError('invalid retained health counts')
+        original=value['source_health']
+        original_counts=[p['emitted'] for p in original['producers']]
+        _health(_line(original),header,original_counts,seen)
+        if any(counts[p]>original_counts[p] for p in range(7)):
+            raise ValueError('retained counts exceed original health')
+        return value
+    except (KeyError,TypeError,IndexError) as error:
+        raise ValueError('invalid diagnostic prefix health') from error
+
+
+class NativePrefixArrays(NativeArrays):
+    """Explicit bounded diagnostic columns. Full NativeArrays remains strict."""
+    def __init__(self,*args,**kwargs):
+        self.prefix_header=None
+        self._previous_order=-1
+        super().__init__(*args,**kwargs)
+
+    def _capture_header(self,payload):
+        value=_prefix_header(payload)
+        if self.prefix_header is not None and value!=self.prefix_header:
+            raise ValueError('native prefix metadata changed')
+        self.prefix_header=value
+        return value['capture_header']
+
+    def _capture_health(self,payload):
+        return _prefix_health(payload,self.header,self.counts,self.seen)
+
+    def _validate_order(self,events):
+        if len(events) and (int(events['order'][0])<=self._previous_order
+                or np.any(events['order'][1:]<=events['order'][:-1])
+                or np.any(events['at_ns']<self.prefix_header['start_ns'])
+                or np.any(events['at_ns']>=self.prefix_header['end_ns'])):
+            raise ValueError('invalid diagnostic event order/time range')
+        if len(events):self._previous_order=int(events['order'][-1])
+
+
 def decode_native(source, destination):
     """Explicit diagnostic reader; never returns a complete-capture health seal."""
     try:
@@ -98,7 +156,7 @@ def decode_native(source, destination):
                 raise ValueError('prefix CRC mismatch')
             sequence += 1
             if header is None:
-                header = _json(payload)
+                header = _prefix_header(payload)
                 if kind != 1 or header.get('schema') != 'hng-native-prefix-v1' or header.get('complete') is not False:
                     raise ValueError('not a diagnostic native prefix')
                 _header(_line(header['capture_header']))
@@ -116,7 +174,7 @@ def decode_native(source, destination):
                     last, seen[producer] = row['order'], row['producer_seq']; counts[producer] += 1
                     destination.write(_line(row).decode())
             elif kind == 3:
-                value = _json(payload)
+                value = _prefix_health(payload,header['capture_header'],counts,seen)
                 if (value.get('kind') != 'retained-health' or value.get('complete') is not False
                         or value.get('producers') != counts or source.read(1)):
                     raise ValueError('invalid retained health/EOF')

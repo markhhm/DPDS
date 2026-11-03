@@ -230,10 +230,20 @@ class NativeArrays:
                 kind, payload = _frame(source, 0)
                 if kind != 1:
                     raise ValueError('native binary header must be first')
-                self.header = _header(payload.tobytes())
+                self.header = self._capture_header(payload.tobytes())
                 self._unchanged(source)
         except ERRORS as error:
             raise StreamError('NATIVE_BINARY_FORMAT', str(error), 'INCONCLUSIVE') from error
+
+    def _capture_header(self, payload):
+        return _header(payload)
+
+    def _capture_health(self, payload):
+        return _health(payload, self.header, self.counts, self.seen)
+
+    def _validate_order(self, events):
+        if np.any(events['order'] != np.arange(self._order, self._order+len(events), dtype=np.uint64)):
+            raise ValueError('invalid native binary event order')
 
     def _unchanged(self, source):
         if _identity(os.fstat(source.fileno())) != self._identity or _identity(self.path.stat()) != self._identity:
@@ -247,8 +257,7 @@ class NativeArrays:
         if self.keep_wire:
             batch['wire'] = dict(data=data, starts=wire_starts, ends=ends)
         events = batch['events']
-        if np.any(events['order'] != np.arange(self._order, self._order+len(events), dtype=np.uint64)):
-            raise ValueError('invalid native binary event order')
+        self._validate_order(events)
         for producer in range(7):
             sequences = events['producer_seq'][events['producer'] == producer]
             if sequences.size:
@@ -272,7 +281,7 @@ class NativeArrays:
                     raise ValueError('unknown native binary magic or version')
                 digest = hashlib.sha256(magic)
                 kind, payload = _frame(source, 0, digest)
-                if kind != 1 or _header(payload.tobytes()) != self.header:
+                if kind != 1 or self._capture_header(payload.tobytes()) != self.header:
                     raise ValueError('native binary header changed')
                 expected = 1
                 buffers, starts, ends, buffered, pending = [], [], [], 0, 0
@@ -298,7 +307,7 @@ class NativeArrays:
                         if pending:
                             yield self._batch(buffers, np.concatenate(starts), np.concatenate(ends))
                             self._unchanged(source)
-                        health = _health(payload.tobytes(), self.header, self.counts, self.seen)
+                        health = self._capture_health(payload.tobytes())
                         if source.read(1):
                             raise ValueError('data after native binary health seal')
                         self._unchanged(source)

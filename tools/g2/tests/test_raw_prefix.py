@@ -94,6 +94,24 @@ class RawPrefixTests(unittest.TestCase):
             raw=bytearray(target.read_bytes());raw[-1]^=1
             with self.assertRaises(StreamError):module.decode_native(io.BytesIO(raw),io.StringIO())
 
+    def test_prefix_columns_preserve_gaps_and_publish_only_diagnostic_integrity(self):
+        module=self.module()
+        self.assertTrue(hasattr(module,'NativePrefixArrays'),'bounded diagnostic prefix arrays are missing')
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source=root/'full.hngb';self.source(source);target=root/'prefix.hngb'
+            module.native(source,target,start_ns=2,end_ns=5,source_sha256=sha(source))
+            reader=module.NativePrefixArrays(target,chunk_records=1)
+            events=np.concatenate([b['events'] for b in reader.batches()])
+            self.assertEqual(events['order'].tolist(),[0,2]);self.assertEqual(events['producer_seq'].tolist(),[1,3])
+            self.assertEqual(reader.prefix_header['start_ns'],2)
+            self.assertEqual(reader.header,json.loads(HEADER))
+            self.assertFalse(reader.health['complete']);self.assertEqual(reader.counts,[2,0,0,0,0,0,0])
+            self.assertEqual(reader.integrity['sha256'],sha(target))
+            data=bytearray(target.read_bytes());data[-1]^=1;target.write_bytes(data)
+            reader=module.NativePrefixArrays(target)
+            with self.assertRaises(StreamError):list(reader.batches())
+            self.assertIsNone(reader.integrity)
+
     def test_wrong_full_hash_leaves_source_unchanged_and_no_usable_prefix(self):
         module=self.module()
         with tempfile.TemporaryDirectory() as temp:
