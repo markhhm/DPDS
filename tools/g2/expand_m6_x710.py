@@ -8,6 +8,8 @@ import itertools
 import json
 from pathlib import Path
 
+from .raw_budget import register_retention
+
 EXAMPLES=Path(__file__).resolve().parents[2]/'examples'
 DIRECTIONS={'forward':[0],'reverse':[1],'both':[0,1]}
 LOADS={'L0':(10_000_000_000,9_000_000_000),
@@ -126,7 +128,7 @@ def build_matrix():
         simultaneous_directions_count_once=True,offline_reporting_included=False,
         observer_cost_1_in_256_shortening_applied=False)
     base.update(scope='physical',mode='pcapng',workers=1,runs=runs)
-    return base
+    return register_retention(base)
 
 
 def write_matrix(path,matrix):
