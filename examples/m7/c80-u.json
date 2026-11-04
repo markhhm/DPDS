@@ -1,0 +1,49 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "fixed-d0",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 710,
+      "model": {
+        "c_bps": 80000000000,
+        "q_bytes": 74565410,
+        "t_ns": 142000000,
+        "delta_ns": 320000000,
+        "p": "1",
+        "seed": 1,
+        "storage_capacity_packets": 3045116,
+        "storage_capacity_bytes": 4622486088
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 16
+      },
+      "trace": null
+    },
+    {
+      "name": "fixed-d1",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 710,
+      "model": {
+        "c_bps": 80000000000,
+        "q_bytes": 74565410,
+        "t_ns": 142000000,
+        "delta_ns": 320000000,
+        "p": "1",
+        "seed": 1,
+        "storage_capacity_packets": 3045116,
+        "storage_capacity_bytes": 4622486088
+      },
+      "envelope": {
+        "min_q_bytes": 1522,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 16
+      },
+      "trace": null
+    }
+  ]
+}
