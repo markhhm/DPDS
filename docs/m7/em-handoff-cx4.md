@@ -2,6 +2,8 @@
 
 # CX-4 100G operator handoff
 
+Use the [DPDS input sizing and formula-derived engine files](inputs.md) before allocating M7 pools.
+
 The equipment operator executes this procedure during the authorized M7 session.
 Run DUT commands locally as root. Do not start traffic before owner approval.
 Keep deployment values, inventories, captures and logs outside this public repository.
@@ -309,8 +311,11 @@ Set `BPRIME_CONFIG_FILE` to the matching M7 engine JSON, not the X710 engine fil
 Register C, Q, t, delta, p, seed, VLAN and the full storage envelope before use.
 For the same overload ratio, C is 90G with a 100G offer.
 
-Keeping the old Q/C residence time requires Q=83,886,080 bytes, ten times the 10G Q.
-Keeping Q unchanged instead reduces Q/C tenfold. The owner must freeze that choice and recalculate the complete pools.
+Exact scaling of the old Q/C residence time gives Q=83,886,080 bytes at C=90G.
+The [derived M7 inputs](inputs.md#stress-q-and-storage-envelope) use the calculator-compatible
+7,456,541 ns allowance and Q=83,886,086 bytes instead, with the sub-nanosecond rounding stated explicitly.
+Use that same integer Q in the matching traffic registration and engine JSON.
+Keeping the original 8,388,608-byte Q would reduce Q/C tenfold; it is not the derived M7 input.
 Do not scale only a rate label or reuse the 10G memory allocation.
 Recalculate duration, dense-sequence bounds and capture/judge storage budgets. The old 10G bounds do not describe 100G.
 
