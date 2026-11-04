@@ -28,15 +28,15 @@ test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/cor
   env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
   workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
-common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'core/worker.c', 'core/transmit.c']
+common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'common/diagnostics.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
+foreach name: ['handoff', 'worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
-    link_args: name == 'tx_trace' ? ['-Wl,--wrap=host_now_ns'] : [],
+    link_args: name in ['tx_trace', 'handoff'] ? ['-Wl,--wrap=host_now_ns'] : [],
     # LTO can resolve the clock internally before the linker applies --wrap.
-    override_options: name == 'tx_trace' ? ['b_lto=false'] : [],
+    override_options: name in ['tx_trace', 'handoff'] ? ['b_lto=false'] : [],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-' + name]
   if name == 'rings'
@@ -54,6 +54,15 @@ endforeach
 
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
+pool_cleanup = executable('pool-cleanup-fixture', ['dpds.c', 'tests/pool_cleanup.c', 'core/receive.c', 'core/combined.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
+  link_args: ['-Wl,--wrap=initialize_port', '-Wl,--wrap=close_port', '-Wl,--wrap=rte_mempool_free'],
+  override_options: ['b_lto=false'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('pool-cleanup', python, args: [meson.project_source_root() / 'tests/pool_cleanup.py', pool_cleanup],
+  workdir: meson.project_build_root(), timeout: 30, is_parallel: false)
+test('diagnostics', python, args: [meson.project_source_root() / 'tests/diagnostics.py', dpds_exe],
+  workdir: meson.project_build_root(), timeout: 30, is_parallel: false)
 
 # Separate the long event checks; overlap CLI fixtures after differential replay.
 test('g2-software', python,
@@ -96,7 +105,7 @@ test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/
 test('perf-ring-rate-io-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--io-split', ring_rate,
   '--', '-d', '0.2', '-w', '0.05', '-n', '2046'],
   timeout: 60, is_parallel: false)
-pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/observer.c', 'common/observer_binary.c'],
+pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/diagnostics.c', 'common/observer.c', 'common/observer_binary.c'],
   dependencies: [dpdk, core, threads], link_args: ['-lm'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],

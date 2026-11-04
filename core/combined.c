@@ -6,12 +6,17 @@
 
 int lcore_worker_transmit(struct lcore_parameters *parameters)
 {
+    host_diagnostics_bind(HOST_COMBINED, 0);
+    uint64_t previous[2] = {0};
     struct worker_state wk;
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE], *output[MAX_BURST_SIZE];
     worker_state_init(&wk, parameters->stats, parameters->num_ports);
     tx_state_init(&tx, parameters->stats);
     while (!wk.ended || worker_has_backlog(&wk) || tx_has_backlog(&tx)) {
+        uint64_t now = host_now_ns();
+        host_loop_gap(&host.diagnostics.scheduler[0], &previous[0], now);
+        host_loop_gap(&host.diagnostics.tx[0], &previous[1], now);
         uint16_t count = rte_ring_dequeue_burst(parameters->receive_worker_ring,
             (void **)batch, MAX_BURST_SIZE, NULL);
         if (quit_signal_worker && rte_ring_empty(parameters->receive_worker_ring) && !count) worker_end_input(&wk);
@@ -30,6 +35,8 @@ int lcore_worker_transmit(struct lcore_parameters *parameters)
 
 int lcore_receive_worker_transmit(struct lcore_parameters *parameters)
 {
+    host_diagnostics_bind(HOST_COMBINED, 0);
+    uint64_t previous[3] = {0};
     struct rx_state rx;
     struct worker_state wk;
     struct tx_state tx;
@@ -38,12 +45,17 @@ int lcore_receive_worker_transmit(struct lcore_parameters *parameters)
     worker_state_init(&wk, parameters->stats, parameters->num_ports);
     tx_state_init(&tx, parameters->stats);
     while (!wk.ended || worker_has_backlog(&wk) || tx_has_backlog(&tx)) {
+        uint64_t now = host_now_ns();
+        if (!quit_signal_receive) host_loop_gap(&host.diagnostics.rx[0], &previous[0], now);
+        host_loop_gap(&host.diagnostics.scheduler[0], &previous[1], now);
+        host_loop_gap(&host.diagnostics.tx[0], &previous[2], now);
         uint16_t count = 0;
         if (!quit_signal_receive) {
             count = rx_step(&rx, batch, MAX_BURST_SIZE);
             rx_publish(&rx, count);
             rx.stats->enqueued += count;
         } else {
+            if (!wk.ended) host_diagnostics_rx_stopped(0);
             if (!wk.ended) for (unsigned p = 0; p < host.port_count; ++p)
                 observer_input_end(rx.producer, host.ports[p], rx.sequence[host.ports[p]]);
             worker_end_input(&wk);

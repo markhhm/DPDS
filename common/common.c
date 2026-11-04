@@ -27,13 +27,17 @@ uint64_t host_now_ns(void)
 
 void host_invalidate(const char *reason)
 {
-    if (!atomic_exchange(&host.invalid, true)) fprintf(stderr, "INVALID RUN: %s\n", reason);
+    if (!atomic_exchange(&host.invalid, true)) {
+        host_diagnostics_invalid(reason);
+        fprintf(stderr, "INVALID RUN: %s\n", reason);
+    }
     quit_signal_receive = 1;
 }
 
 bool host_load(const char *path)
 {
     memset(&host, 0, sizeof(host));
+    host_diagnostics_bind(HOST_MAIN, 0);
     host.epoch_cycles = rte_get_timer_cycles();
     host.cycles_hz = rte_get_timer_hz();
     host.engine = hng_engine_load(path);

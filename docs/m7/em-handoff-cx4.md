@@ -511,3 +511,10 @@ Both cards remain on `mlx5_core`. No vfio rebind is part of restoration.
 Restore only owner-approved cable, interface or isolation changes from the private change log.
 This procedure creates no page reservation or mount. Leave shared hugepages and mounts unchanged.
 Keep all failed attempts, raw captures, manifests, version records and hashes for owner review.
+
+## TX handoff and shutdown diagnostics
+
+Read [TX handoff backpressure and owner diagnostics](../TX-HANDOFF.md) for the
+unchanged 1024-slot ring budget, terminal gate, `/dpds/diagnostics` telemetry,
+final-statistics fields and engine-exit interpretation. Keep the registered
+load and packet composition unchanged when diagnosing a pause.

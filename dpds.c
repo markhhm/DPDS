@@ -21,7 +21,7 @@
 #include "core/transmit.h"
 #include "core/combined.h"
 
-static void report(FILE *out, struct pipeline_stats *s)
+static void report(FILE *out, struct pipeline_stats *s, const struct rte_eth_stats nic[2], const bool nic_valid[2])
 {
     uint64_t drops = s->rx.rx_ring_drops + s->worker.emulator_drops + s->worker.invalid_drops +
         s->worker.storage_drops + s->worker.tx_ring_drops + s->worker.shutdown_drops +
@@ -64,14 +64,10 @@ static void report(FILE *out, struct pipeline_stats *s)
         s->tx.tx_drop_bytes + s->tx.trace_outage_bytes;
     bool bytes_conserved = s->rx.received_bytes == drop_bytes + s->tx.transmitted_bytes;
     if (!bytes_conserved) host_invalidate("software byte conservation failed");
-    /* Check NIC loss before the status line, so it is reported as INVALID. */
-    for (uint16_t i = 0; i < host.port_count; ++i) {
-        struct rte_eth_stats n;
-        if (rte_eth_stats_get(host.ports[i], &n) == 0) host_check_nic_loss(host.ports[i], &n);
-    }
     fprintf(out, "rx_ring_full_skips=%"PRIu64",%"PRIu64"\n", s->rx.ring_full_skips[0], s->rx.ring_full_skips[1]);
     fprintf(out, "submit_late_packets=%"PRIu64" submit_late_total_ns=%"PRIu64" submit_late_max_ns=%"PRIu64"\n",
         s->tx.late_submit_packets, s->tx.late_submit_total_ns, s->tx.late_submit_max_ns);
+    host_diagnostics_report(out);
     fprintf(out, "rx=%"PRIu64" rx_bytes=%"PRIu64" tx_accepted=%"PRIu64" tx_bytes=%"PRIu64
         " software_drops=%"PRIu64" drop_bytes=%"PRIu64" invalid_input=%"PRIu64
         " rx_handoff_drop=%"PRIu64" tx_handoff_drop=%"PRIu64" terminal_tx_drop=%"PRIu64
@@ -83,11 +79,11 @@ static void report(FILE *out, struct pipeline_stats *s)
         conserved ? "PASS" : "FAIL", bytes_conserved ? "PASS" : "FAIL", host.invalid ? "INVALID" : "DRAINED");
     for (uint16_t i = 0; i < host.port_count; ++i) {
         uint16_t port = host.ports[i];
-        struct rte_eth_stats n;
-        if (rte_eth_stats_get(port, &n) == 0)
+        const struct rte_eth_stats *n = &nic[i];
+        if (nic_valid[i])
             fprintf(out, "nic=%u raw_ipackets=%"PRIu64" raw_opackets=%"PRIu64
                 " imissed=%"PRIu64" ierrors=%"PRIu64" oerrors=%"PRIu64" rx_nombuf=%"PRIu64"\n",
-                port, n.ipackets, n.opackets, n.imissed, n.ierrors, n.oerrors, n.rx_nombuf);
+                port, n->ipackets, n->opackets, n->imissed, n->ierrors, n->oerrors, n->rx_nombuf);
         else fprintf(out, "nic=%u raw_counters=UNAVAILABLE\n", port);
     }
 }
@@ -251,6 +247,7 @@ int main(int argc, char **argv)
         host.schedulers_running = host.receivers_running = 2;
     }
     host.epoch_cycles = rte_get_timer_cycles();
+    if (host_diagnostics_register() < 0) rte_exit(EXIT_FAILURE, "Cannot register pipeline diagnostics\n");
     if (observer_enabled()) for (unsigned p = 0; p < host.port_count; ++p) {
         port = host.ports[p]; struct rte_eth_stats nic;
         observer_resources(port, false, pools[port]->size, rte_mempool_avail_count(pools[port]),
@@ -297,21 +294,23 @@ int main(int argc, char **argv)
         rx_stats_merge(&stats->rx, &stats->rx_owners[k]);
         tx_stats_merge(&stats->tx, &stats->tx_owners[k]);
     }
-    report(stdout, stats);
-    if (stats_path) {
-        FILE *out = fopen(stats_path, "wx");
-        if (!out) host_invalidate("cannot create statistics file");
-        else { report(out, stats); fclose(out); }
+    struct rte_eth_stats nic[2];
+    bool nic_valid[2] = {0};
+    /* A TX descriptor on either egress may still hold a peer ingress-pool mbuf.
+     * Close EVERY port before inspecting or freeing ANY pool. */
+    for (uint16_t i = 0; i < host.port_count; ++i) {
+        port = host.ports[i];
+        nic_valid[i] = rte_eth_stats_get(port, &nic[i]) == 0;
+        if (nic_valid[i]) host_check_nic_loss(port, &nic[i]);
+        if (close_port(port) != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
     }
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];
-        struct rte_eth_stats nic; bool nic_valid = rte_eth_stats_get(port, &nic) == 0;
-        if (close_port(port) != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
         unsigned free_count = rte_mempool_avail_count(pools[port]);
         printf("pool port=%u free=%u total=%u owned=%u\n", port, free_count,
             pools[port]->size, pools[port]->size - free_count);
         if (free_count != pools[port]->size) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("mbuf ownership not fully reclaimed"); }
-        observer_resources(port, true, pools[port]->size, free_count, nic_valid ? &nic : NULL);
+        observer_resources(port, true, pools[port]->size, free_count, nic_valid[i] ? &nic[i] : NULL);
         rte_mempool_free(pools[port]);
     }
     host_cleanup();
@@ -321,6 +320,11 @@ int main(int argc, char **argv)
         printf("observer_io high_water=%"PRIu64" capacity=%"PRIu64" pending=%"PRIu64" cpu=%d\n",
             storage.blocks_high_water, storage.blocks_capacity, storage.blocks_pending, storage.cpu);
     }
+    /* Include cleanup/observer failures in the final status and first INVALID record. */
+    FILE *out = stats_path ? fopen(stats_path, "wx") : NULL;
+    if (stats_path && !out) host_invalidate("cannot create statistics file");
+    report(stdout, stats, nic, nic_valid);
+    if (out) { report(out, stats, nic, nic_valid); fclose(out); }
     rte_ring_free(rx_ring); rte_ring_free(tx_ring); rte_free(stats);
     rte_ring_free(owner_rings[0]); rte_ring_free(owner_rings[1]);
     rte_ring_free(tx_owner_rings[0]); rte_ring_free(tx_owner_rings[1]);

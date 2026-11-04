@@ -6,6 +6,7 @@
 void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats, int ingress_port)
 {
     memset(s, 0, sizeof(*s));
+    s->output_limit = MAX_BURST_SIZE;
     s->engine = host.engine;
     s->handoff_queue = ingress_port >= 0 && host.port_count == 2 && ingress_port == host.ports[1] ? 1 : 0;
     s->producer = s->handoff_queue ? OBS_WORKER1 : OBS_WORKER0;
@@ -203,7 +204,8 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
     }
     unsigned open = s->group_count;
     uint16_t emitted = 0;
-    for (size_t attempt = 0; open && attempt < (size_t)MAX_BURST_SIZE * s->owned_count; ++attempt) {
+    for (size_t attempt = 0; open && emitted < s->output_limit &&
+        attempt < (size_t)MAX_BURST_SIZE * s->owned_count; ++attempt) {
         /* Alternate physical outputs; within an output merge by release, physical seq. */
         uint16_t g = s->next_line++ % s->group_count;
         if (blocked[g]) continue;
@@ -300,20 +302,41 @@ void worker_dispatch_done(struct worker_state *s, struct observer_record **reser
 int lcore_worker(struct lcore_parameters *parameters)
 {
     struct worker_state wk;
+    uint64_t full_since = 0;
+    bool full = false;
+    uint64_t previous = 0;
+    unsigned owner = parameters->split ? parameters->owner_index : 0;
+    struct owner_diagnostics *diagnostics = &host.diagnostics.scheduler[owner];
+    host_diagnostics_bind(HOST_SCHEDULER, owner);
     struct rte_mbuf *batch[MAX_BURST_SIZE], *output[MAX_BURST_SIZE];
     if (parameters->split)
         worker_state_init_owner(&wk, &parameters->stats->owners[parameters->owner_index],
             host.ports[parameters->owner_index]);
     else worker_state_init(&wk, parameters->stats, parameters->num_ports);
     while (!wk.ended || worker_has_backlog(&wk)) {
+        host_loop_gap(diagnostics, &previous, host_now_ns());
         uint16_t count = rte_ring_dequeue_burst(parameters->receive_worker_ring,
             (void **)batch, MAX_BURST_SIZE, NULL);
         if (quit_signal_worker && rte_ring_empty(parameters->receive_worker_ring) && !count) worker_end_input(&wk);
+        /* Single producer: the consumer can only increase this free-slot budget.
+         * Leave the suffix in the model, with its original release/deadline/order. */
+        unsigned free = rte_ring_free_count(parameters->worker_transmit_ring);
+        wk.output_limit = free < MAX_BURST_SIZE ? (uint16_t)free : MAX_BURST_SIZE;
+        if (!free && worker_has_backlog(&wk)) {
+            uint64_t now = host_now_ns();
+            if (!full) { full = true; full_since = now; }
+            else if (now - full_since > TERMINAL_TIMEOUT_NS)
+                host_invalidate("TX handoff terminal timeout");
+        } else full = false;
         uint16_t out = worker_step(&wk, batch, count, output);
         struct observer_record *reservations[MAX_BURST_SIZE];
         worker_dispatch_prepare(&wk, output, out, reservations, host_now_ns());
+        unsigned remaining;
         uint16_t sent = rte_ring_enqueue_burst(parameters->worker_transmit_ring,
-            (void **)output, out, NULL);
+            (void **)output, out, &remaining);
+        unsigned used = rte_ring_get_capacity(parameters->worker_transmit_ring) - remaining;
+        if (used > atomic_load_explicit(&diagnostics->ring_high_water, memory_order_relaxed))
+            atomic_store_explicit(&diagnostics->ring_high_water, used, memory_order_relaxed);
         worker_dispatch_done(&wk, reservations, out, sent);
         if (sent != out) {
             host_invalidate("TX handoff ring exhausted");
@@ -324,6 +347,7 @@ int lcore_worker(struct lcore_parameters *parameters)
                 rte_pktmbuf_free(output[i]);
             }
         }
+        if (!count && !out) rte_pause();
     }
     worker_state_cleanup(&wk);
     if (atomic_fetch_sub(&host.schedulers_running, 1) <= 1) quit_signal_transmit = 1;
