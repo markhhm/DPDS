@@ -2,6 +2,7 @@
 #define COMMON_H
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <rte_ring.h>
 #include <rte_mempool.h>
@@ -27,6 +28,18 @@ struct ingress_frontier {
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
 struct port_resources { uint16_t rx_descriptors, tx_descriptors; bool prepared; };
+enum host_role { HOST_MAIN, HOST_RX, HOST_SCHEDULER, HOST_TX, HOST_COMBINED };
+/* Each hot owner writes its own cache line; telemetry reads only atomics. */
+struct owner_diagnostics {
+    _Atomic uint64_t loop_gap_max_ns, ring_high_water, stopped_mono_ns;
+} __attribute__((aligned(64)));
+struct host_diagnostics {
+    struct owner_diagnostics rx[2], scheduler[2], tx[2];
+    _Atomic bool invalid_recorded;
+    uint64_t invalid_mono_ns, invalid_at_ns;
+    unsigned invalid_lcore;
+    char invalid_reason[128], invalid_owner[32];
+};
 struct host_context {
     struct Engine *engine;
     struct LineInfo lines[HNG_MAX_LINES];
@@ -40,6 +53,7 @@ struct host_context {
     struct port_resources resources[RTE_MAX_ETHPORTS];
     uint64_t epoch_cycles, cycles_hz;
     _Atomic bool invalid;
+    struct host_diagnostics diagnostics;
     /* The last scheduler to finish releases TX; 0 or 1 means a single scheduler. */
     _Atomic int schedulers_running;
     /* The last RX lcore to finish releases the schedulers; 0 or 1 means a single RX lcore. */
@@ -56,6 +70,17 @@ bool host_take_line_handles(void);
 void host_mark_launched(void);
 void host_cleanup(void);
 void host_invalidate(const char *reason);
+void host_diagnostics_bind(enum host_role role, unsigned owner);
+void host_diagnostics_invalid(const char *reason);
+void host_diagnostics_rx_stopped(unsigned owner);
+void host_diagnostics_report(FILE *out);
+int host_diagnostics_register(void);
+static inline void host_loop_gap(struct owner_diagnostics *d, uint64_t *previous, uint64_t now)
+{
+    if (*previous && now - *previous > atomic_load_explicit(&d->loop_gap_max_ns, memory_order_relaxed))
+        atomic_store_explicit(&d->loop_gap_max_ns, now - *previous, memory_order_relaxed);
+    *previous = now;
+}
 void host_publish(uint16_t port, uint64_t enqueued, uint64_t watermark);
 bool host_frontier(uint16_t port, uint64_t consumed, uint64_t *watermark);
 

@@ -11,6 +11,8 @@ struct worker_state {
     struct worker_stats *stats;
     uint64_t consumed, admitted_frontier[RTE_MAX_ETHPORTS], shutdown_start, min_delay[HNG_MAX_LINES];
     bool ended, aborted, owned[HNG_MAX_LINES];
+    /* Maximum model outputs this step; the ring producer samples free slots first. */
+    uint16_t output_limit;
     uint16_t next_line, owned_count, owned_lines[HNG_MAX_LINES];
     /* Owned lines grouped by egress port; each group merges into one physical output. */
     struct Line *group_handle[HNG_MAX_LINES][HNG_MAX_LINES];

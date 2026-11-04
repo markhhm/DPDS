@@ -245,6 +245,9 @@ void tx_stats_merge(struct tx_stats *dst, const struct tx_stats *src)
 
 int lcore_transmit(struct lcore_parameters *parameters)
 {
+    unsigned owner = parameters->io_split ? parameters->owner_index : 0;
+    uint64_t previous = 0;
+    host_diagnostics_bind(HOST_TX, owner);
     struct tx_state tx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     bool owner_queues = parameters->tx_owner_rings[0] && parameters->tx_owner_rings[1];
@@ -260,6 +263,7 @@ int lcore_transmit(struct lcore_parameters *parameters)
     while (!quit_signal_transmit ||
         (owner_queues ? (!rte_ring_empty(parameters->tx_owner_rings[0]) || !rte_ring_empty(parameters->tx_owner_rings[1])) :
             !rte_ring_empty(parameters->worker_transmit_ring)) || tx_has_backlog(&tx)) {
+        host_loop_gap(&host.diagnostics.tx[owner], &previous, host_now_ns());
         uint16_t count = 0;
         if (owner_queues) {
             for (unsigned q = 0; q < 2 && count < MAX_BURST_SIZE; ++q)

@@ -81,6 +81,9 @@ void rx_stats_merge(struct rx_stats *dst, const struct rx_stats *src)
 
 int lcore_receive(struct lcore_parameters *parameters)
 {
+    unsigned owner = parameters->io_split ? parameters->owner_index : 0;
+    uint64_t previous = 0;
+    host_diagnostics_bind(HOST_RX, owner);
     struct rx_state rx;
     struct rte_mbuf *batch[MAX_BURST_SIZE];
     rx_state_init(&rx, parameters->stats);
@@ -91,8 +94,11 @@ int lcore_receive(struct lcore_parameters *parameters)
         rx.producer = parameters->owner_index ? OBS_RX1 : OBS_RX;
         rx.stats = &parameters->stats->rx_owners[parameters->owner_index];
     }
-    while (!quit_signal_receive)
+    while (!quit_signal_receive) {
+        host_loop_gap(&host.diagnostics.rx[owner], &previous, host_now_ns());
         if (!rx_iteration(&rx, parameters, batch)) rte_pause();
+    }
+    host_diagnostics_rx_stopped(owner);
     for (unsigned p = 0; p < host.port_count; ++p)
         if (!parameters->io_split || p == parameters->owner_index) observer_input_end(rx.producer, host.ports[p], rx.sequence[host.ports[p]]);
     /* Completion follows the final enqueue and frontier publication of every RX lcore:

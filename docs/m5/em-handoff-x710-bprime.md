@@ -386,3 +386,10 @@ traffic server. Generator control uses transient units that finish after each co
 Leave port bindings, hugepage reservations,
 mounts and switch configuration exactly as the operator handed them over.
 Do not start A2 until the measurement owner confirms DPDS-off.
+
+## TX handoff and shutdown diagnostics
+
+Read [TX handoff backpressure and owner diagnostics](../TX-HANDOFF.md) for the
+unchanged 1024-slot ring budget, terminal gate, `/dpds/diagnostics` telemetry,
+final-statistics fields and engine-exit interpretation. Keep the registered
+load and packet composition unchanged when diagnosing a pause.
