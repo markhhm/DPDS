@@ -68,6 +68,13 @@ whole value after the first `=`, rather than splitting that line on spaces.
 
 | Field | Meaning |
 | --- | --- |
+| `native_observer_epoch_monotonic_ns` | Startup native-zero anchor: the second `CLOCK_MONOTONIC` read, immediately after the timer epoch sample. This is the upper endpoint of the startup association interval, not an exact simultaneous read. |
+| `native_observer_epoch_read_gap_ns` | Second minus first monotonic read around that epoch sample; startup association uncertainty is at most this bracket width. |
+| `native_observer_epoch_read_order` | Fixed sequence `monotonic_before,timer_epoch,monotonic_after`. The timer read is fenced between the monotonic reads. |
+| `native_observer_timer_hz` | Existing `rte_get_timer_hz()` conversion frequency used by `host_now_ns`; reported for interpreting timer ticks and conversion error. |
+| `portP_close_ns` | Native timestamp sampled immediately after main's `close_port(P)` call returns. `P` is the actual ethdev port ID, not an owner index. Zero until its close-return sample is published. |
+| `portP_close_monotonic_ns` | `CLOCK_MONOTONIC` upper endpoint paired with that port's native close-return sample. |
+| `portP_close_read_gap_ns` | Width of the monotonic bracket around the port's native sample. The order is monotonic-before, fenced `host_now_ns`, monotonic-after. |
 | `tx_owner0_ring_high_water`, `tx_owner1_ring_high_water` | Maximum producer-observed ring occupancy, in packets, using the enqueue operation's returned remaining space; at most 1023 for the current allocation. Scheduler owner index identifies the ring, not the egress port number. |
 | `rx0_loop_gap_max_ns`, `rx1_loop_gap_max_ns` | Maximum elapsed time between consecutive RX owner loop starts. |
 | `scheduler0_loop_gap_max_ns`, `scheduler1_loop_gap_max_ns` | Maximum elapsed time between consecutive scheduler owner loop starts. |
@@ -101,6 +108,74 @@ not a transaction over all owners. Final output is taken after owner joins,
 port/pool cleanup and native observer close, so cleanup failures are included.
 A zero publication flag during a live INVALID transition means the first
 record is still being published; it does not establish a valid run.
+
+## Clock domains and association error
+
+`host_now_ns()` is unchanged:
+
+```text
+native_ns = floor((timer_cycles - epoch_cycles) * 1,000,000,000 / timer_hz)
+```
+
+The default DPDK EAL timer is TSC; these are converted timer ticks, not
+`clock_gettime` timestamps. Native observer record times use this engine
+clock. The anchor is taken at the existing final pre-launch epoch reset in
+`dpds.c`, before observer startup, owner launches and diagnostics registration.
+The earlier temporary epoch used while loading the model is not the runtime
+native zero. There is no periodic re-anchoring or packet-path clock change.
+
+Startup sampling in `common/diagnostics.c:host_diagnostics_epoch_anchor` is:
+
+```text
+M_before = clock_gettime(CLOCK_MONOTONIC)
+rte_rmb(); epoch_cycles = rte_get_timer_cycles(); rte_rmb()
+A = clock_gettime(CLOCK_MONOTONIC)
+G = A - M_before
+```
+
+`A` is `native_observer_epoch_monotonic_ns`; `G` is its `read_gap_ns`.
+`rte_rmb()` provides LFENCE on the supported x86 target. The native-zero
+sample occurred in the monotonic interval **[A - G, A]**. Thus `A + native_ns`
+is an association estimate with up to `G` startup offset, even if the thread
+was preempted between reads. This bracket measures the entire read span;
+it is not just a typical syscall cost. Both monotonic reads are necessary
+to measure that span instead of assuming an unmeasured simultaneous read.
+
+Integer division rounds down by less than 1 ns. Timer sampling granularity
+is `1,000,000,000 / native_observer_timer_hz` ns per tick. The bracket bounds
+**startup read association error only**. It does not bound accumulated timer
+frequency/calibration error, cross-core TSC skew or differences from the
+kernel's adjusted monotonic clock over the run. A relative frequency error
+`epsilon` can contribute about `abs(epsilon) * elapsed_ns` additional error.
+No measured frequency/drift bound is claimed by this diagnostic.
+
+Each port's close-return sample uses the same bracket pattern, with the
+unchanged `host_now_ns()` between the monotonic reads. If `Mp` is that port's
+`close_monotonic_ns` and `Gp` its `close_read_gap_ns`, the native sample took
+place in **[Mp - Gp, Mp]**. Compare `A + portP_close_ns` with this interval
+while allowing the startup bracket and the clock-rate limitations above;
+a discrepancy is evidence to investigate, not a reason to adjust recorded
+packet deadlines. Both timestamps describe the sample after `close_port`
+returns; they do not identify an internal PMD descriptor-release instant.
+A failed close also records its return time and retains the existing
+`port cleanup failed` INVALID gate; the timestamp alone does not prove a
+successful close. Port sample tuples use release/acquire publication, so
+telemetry sees either all zeros or a complete immutable tuple.
+
+`first_invalid_mono_ns`, `rxK_stopped_mono_ns`, the epoch anchor and port
+monotonic samples all use `CLOCK_MONOTONIC` on the same boot. They are not
+UTC, `CLOCK_REALTIME` or `CLOCK_MONOTONIC_RAW`, and must not be compared
+across machines or boots. Existing INVALID sampling reads monotonic first
+and then native time; it is not an atomic dual-clock read.
+
+For a runtime INVALID that requests RX stop, the causal order is
+`first_invalid <= rx_stop <= port_close`. Tests inject that runtime event,
+check the direct monotonic order, and check native conversion with the
+recorded association interval rather than demanding an exact simultaneous
+clock match. An INVALID first discovered during cleanup can instead follow
+RX stop or a close; diagnostics preserve that actual order. Tests also cover
+that late-failure path, monotonic anchors across repeated starts, exact
+controlled bracket widths/read order, and live/final field agreement.
 
 ## Pool reclamation
 

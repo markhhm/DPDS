@@ -246,7 +246,7 @@ int main(int argc, char **argv)
         functions[4] = functions[5] = (lcore_function_t *)lcore_receive;
         host.schedulers_running = host.receivers_running = 2;
     }
-    host.epoch_cycles = rte_get_timer_cycles();
+    host_diagnostics_epoch_anchor();
     if (host_diagnostics_register() < 0) rte_exit(EXIT_FAILURE, "Cannot register pipeline diagnostics\n");
     if (observer_enabled()) for (unsigned p = 0; p < host.port_count; ++p) {
         port = host.ports[p]; struct rte_eth_stats nic;
@@ -302,7 +302,9 @@ int main(int argc, char **argv)
         port = host.ports[i];
         nic_valid[i] = rte_eth_stats_get(port, &nic[i]) == 0;
         if (nic_valid[i]) host_check_nic_loss(port, &nic[i]);
-        if (close_port(port) != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
+        int close_result = close_port(port);
+        host_diagnostics_port_closed(i);
+        if (close_result != 0) { observer_abort(OBS_ABORT_DRAIN); host_invalidate("port cleanup failed"); }
     }
     for (uint16_t i = 0; i < host.port_count; ++i) {
         port = host.ports[i];

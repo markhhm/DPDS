@@ -33,3 +33,10 @@ void __wrap_rte_mempool_free(struct rte_mempool *pool)
         assert(rte_mempool_avail_count(pool) == pool->size);
     __real_rte_mempool_free(pool);
 }
+
+void __real_host_mark_launched(void);
+void __wrap_host_mark_launched(void)
+{
+    __real_host_mark_launched();
+    if (getenv("HNG_TEST_START_INVALID")) host_invalidate("fixture runtime invalid");
+}

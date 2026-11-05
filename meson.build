@@ -31,12 +31,19 @@ threads = dependency('threads')
 common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'common/diagnostics.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
-foreach name: ['handoff', 'worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
+foreach name: ['epoch_anchor', 'handoff', 'worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
+  clock_wrap_args = []
+  if name in ['epoch_anchor', 'tx_trace', 'handoff']
+    clock_wrap_args += ['-Wl,--wrap=host_now_ns']
+  endif
+  if name == 'epoch_anchor'
+    clock_wrap_args += ['-Wl,--wrap=clock_gettime']
+  endif
   runner = executable(name + '-test', ['tests/' + name + '.c', 'core/receive.c'] + common_sources,
     dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
-    link_args: name in ['tx_trace', 'handoff'] ? ['-Wl,--wrap=host_now_ns'] : [],
+    link_args: clock_wrap_args,
     # LTO can resolve the clock internally before the linker applies --wrap.
-    override_options: name in ['tx_trace', 'handoff'] ? ['b_lto=false'] : [],
+    override_options: name in ['epoch_anchor', 'tx_trace', 'handoff'] ? ['b_lto=false'] : [],
     build_rpath: meson.project_source_root() / 'dpds-core/target/release')
   args = [meson.project_source_root() / 'tests/eal_args.py', runner.full_path(), '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-' + name]
   if name == 'rings'
@@ -56,7 +63,7 @@ test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_sm
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
 pool_cleanup = executable('pool-cleanup-fixture', ['dpds.c', 'tests/pool_cleanup.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
-  link_args: ['-Wl,--wrap=initialize_port', '-Wl,--wrap=close_port', '-Wl,--wrap=rte_mempool_free'],
+  link_args: ['-Wl,--wrap=initialize_port', '-Wl,--wrap=close_port', '-Wl,--wrap=rte_mempool_free', '-Wl,--wrap=host_mark_launched'],
   override_options: ['b_lto=false'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('pool-cleanup', python, args: [meson.project_source_root() / 'tests/pool_cleanup.py', pool_cleanup],

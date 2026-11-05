@@ -2,6 +2,8 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <time.h>
+#include <rte_atomic.h>
+#include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_telemetry.h>
 #include "common.h"
@@ -15,6 +17,30 @@ static uint64_t monotonic_ns(void)
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * UINT64_C(1000000000) + t.tv_nsec;
+}
+
+void host_diagnostics_epoch_anchor(void)
+{
+    uint64_t before = monotonic_ns();
+    /* Fence the timer sample inside the monotonic bracket (LFENCE on x86). */
+    rte_rmb();
+    host.epoch_cycles = rte_get_timer_cycles();
+    rte_rmb();
+    uint64_t after = monotonic_ns();
+    host.diagnostics.epoch_monotonic_ns = after;
+    host.diagnostics.epoch_read_gap_ns = after - before;
+}
+
+void host_diagnostics_port_closed(unsigned index)
+{
+    struct port_close_diagnostics *d = &host.diagnostics.ports[index];
+    uint64_t before = monotonic_ns();
+    rte_rmb();
+    d->native_ns = host_now_ns();
+    rte_rmb();
+    d->monotonic_ns = monotonic_ns();
+    d->read_gap_ns = d->monotonic_ns - before;
+    atomic_store_explicit(&d->recorded, true, memory_order_release);
 }
 
 void host_diagnostics_bind(enum host_role role, unsigned owner)
@@ -55,6 +81,21 @@ static void string(FILE *out, struct rte_tel_data *tel, const char *name, const 
 
 static void snapshot(FILE *out, struct rte_tel_data *tel)
 {
+    number(out, tel, "native_observer_epoch_monotonic_ns", host.diagnostics.epoch_monotonic_ns);
+    number(out, tel, "native_observer_epoch_read_gap_ns", host.diagnostics.epoch_read_gap_ns);
+    number(out, tel, "native_observer_timer_hz", host.cycles_hz);
+    string(out, tel, "native_observer_epoch_read_order", "monotonic_before,timer_epoch,monotonic_after");
+    for (unsigned i = 0; i < host.port_count; ++i) {
+        struct port_close_diagnostics *d = &host.diagnostics.ports[i];
+        bool recorded = atomic_load_explicit(&d->recorded, memory_order_acquire);
+        char key[64];
+        snprintf(key, sizeof(key), "port%u_close_ns", host.ports[i]);
+        number(out, tel, key, recorded ? d->native_ns : 0);
+        snprintf(key, sizeof(key), "port%u_close_monotonic_ns", host.ports[i]);
+        number(out, tel, key, recorded ? d->monotonic_ns : 0);
+        snprintf(key, sizeof(key), "port%u_close_read_gap_ns", host.ports[i]);
+        number(out, tel, key, recorded ? d->read_gap_ns : 0);
+    }
     const char *names[] = {"rx", "scheduler", "tx"};
     struct owner_diagnostics *owners[] = {host.diagnostics.rx, host.diagnostics.scheduler, host.diagnostics.tx};
     for (unsigned role = 0; role < 3; ++role)
