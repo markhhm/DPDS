@@ -14,6 +14,7 @@ from eal_args import eal_arguments
 from startup import wait_for_output
 
 binary = str(Path(sys.argv[1]).resolve())
+previous_anchor = 0
 for cores in (2, 3, 4, 5, 7):
     with tempfile.TemporaryDirectory(prefix="hng-diag-") as directory:
         root = Path(directory)
@@ -44,6 +45,15 @@ for cores in (2, 3, 4, 5, 7):
                     break
                 time.sleep(.001)
             assert live is not None and all(live[key] > 0 for key in active), live
+            anchor = live["native_observer_epoch_monotonic_ns"]
+            assert previous_anchor < anchor <= time.monotonic_ns(), live
+            previous_anchor = anchor
+            assert live["native_observer_epoch_read_order"] == "monotonic_before,timer_epoch,monotonic_after", live
+            assert 0 <= live["native_observer_epoch_read_gap_ns"] < anchor, live
+            assert live["native_observer_timer_hz"] > 0, live
+            for port in (0, 1):
+                for suffix in ("close_ns", "close_monotonic_ns", "close_read_gap_ns"):
+                    assert live[f"port{port}_{suffix}"] == 0, live
             assert live["rx0_stopped_mono_ns"] == 0, live
             assert live["first_invalid_recorded"] == 0 and live["first_invalid_reason"] == "none", live
             # An unknown parameter must not silently return a seemingly valid snapshot.
@@ -60,6 +70,20 @@ for cores in (2, 3, 4, 5, 7):
             fields = dict(token.split("=", 1) for token in stats.split() if "=" in token)
             assert set(live) <= fields.keys(), (set(live)-fields.keys(), stats)
             assert before <= int(fields["rx0_stopped_mono_ns"]) <= after, stats
+            assert int(fields["native_observer_epoch_monotonic_ns"]) == anchor, stats
+            assert int(fields["native_observer_epoch_read_gap_ns"]) == live["native_observer_epoch_read_gap_ns"], stats
+            assert fields["native_observer_epoch_read_order"] == live["native_observer_epoch_read_order"], stats
+            closed = []
+            for port in (0, 1):
+                native = int(fields[f"port{port}_close_ns"])
+                mono = int(fields[f"port{port}_close_monotonic_ns"])
+                gap = int(fields[f"port{port}_close_read_gap_ns"])
+                assert native > 0 and anchor <= mono <= after and 0 <= gap < mono, stats
+                assert int(fields["rx0_stopped_mono_ns"]) <= mono, stats
+                if cores == 7:
+                    assert int(fields["rx1_stopped_mono_ns"]) <= mono, stats
+                closed.append((native, mono))
+            assert closed[0][0] <= closed[1][0] and closed[0][1] <= closed[1][1], stats
             assert fields["first_invalid_recorded"] == "0" and fields["first_invalid_reason"] == "none", stats
             assert "status=DRAINED" in stats and output.count("owned=0") == 2, output
             for key in live:

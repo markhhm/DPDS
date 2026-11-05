@@ -33,8 +33,15 @@ enum host_role { HOST_MAIN, HOST_RX, HOST_SCHEDULER, HOST_TX, HOST_COMBINED };
 struct owner_diagnostics {
     _Atomic uint64_t loop_gap_max_ns, ring_high_water, stopped_mono_ns;
 } __attribute__((aligned(64)));
+struct port_close_diagnostics {
+    _Atomic bool recorded;
+    uint64_t native_ns, monotonic_ns, read_gap_ns;
+};
 struct host_diagnostics {
     struct owner_diagnostics rx[2], scheduler[2], tx[2];
+    /* Immutable before telemetry registration; port pairs publish after close. */
+    uint64_t epoch_monotonic_ns, epoch_read_gap_ns;
+    struct port_close_diagnostics ports[2];
     _Atomic bool invalid_recorded;
     uint64_t invalid_mono_ns, invalid_at_ns;
     unsigned invalid_lcore;
@@ -71,6 +78,10 @@ void host_mark_launched(void);
 void host_cleanup(void);
 void host_invalidate(const char *reason);
 void host_diagnostics_bind(enum host_role role, unsigned owner);
+/* Main only: at the existing pre-launch epoch reset, before telemetry registration. */
+void host_diagnostics_epoch_anchor(void);
+/* Main only: index into host.ports, immediately after close_port returns. */
+void host_diagnostics_port_closed(unsigned index);
 void host_diagnostics_invalid(const char *reason);
 void host_diagnostics_rx_stopped(unsigned owner);
 void host_diagnostics_report(FILE *out);
