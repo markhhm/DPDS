@@ -168,7 +168,7 @@ pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
   timeout: 60, is_parallel: false)
-test('perf-pool-calc-m7', python, args: [meson.project_source_root() / 'perf/pool_calc_m7_test.py', pool_calc],
+test('perf-pool-calc-m7', python, args: ['-E', meson.project_source_root() / 'perf/pool_calc_m7_test.py', pool_calc],
   workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
 configure_file(input: 'perf/sched_bench.json', output: 'sched_bench.json', copy: true)
 configure_file(input: 'perf/sched_bench_prod.json', output: 'sched_bench_prod.json', copy: true)

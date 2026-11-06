@@ -6,6 +6,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+
+# Direct script execution puts perf/, not the repository root, on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.g2.m7_storage import plan
 
 registration={'mode':'m7-hybrid-v1','composition':[{'l2_bytes':l,'weight':1} for l in (64,512,1522)]}
