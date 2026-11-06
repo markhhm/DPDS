@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <rte_eal.h>
 #include "../core/worker.h"
+#include "../core/transmit.h"
 #include "m7_oracle.h"
 static uint64_t storage_reads;
 struct m7_storage_stats __real_m7_storage_stats(const struct m7_storage*);
@@ -24,6 +25,63 @@ bool __wrap_hng_head_pop(struct HngHead *head)
 }
 static uint64_t clock_ns=1000000;
 uint64_t __wrap_host_now_ns(void){return clock_ns;}
+static unsigned mixed_calls, mixed_delivered;
+static const unsigned mixed_sizes[]={60,1518,508,1518};
+static struct packet_meta mixed_meta[4];
+static uint16_t mixed_prefix(uint16_t port,uint16_t queue,struct rte_mbuf **batch,uint16_t count)
+{
+    assert(port==1 && queue==0 && count==4-mixed_delivered);
+    for(unsigned i=0;i<count;++i) {
+        unsigned seq=mixed_delivered+i;struct rte_mbuf *m=batch[i];
+        assert(packet_meta(m)->ingress_seq==seq && m->pkt_len==mixed_sizes[seq]);
+        assert(packet_meta(m)->deadline_ns==mixed_meta[seq].deadline_ns);
+        assert(packet_meta(m)->release_ns==mixed_meta[seq].release_ns && rte_mbuf_refcnt_read(m)==1);
+        unsigned char *b=rte_pktmbuf_mtod(m,unsigned char *);
+        for(unsigned j=18;j<m->pkt_len;++j)assert(b[j]==(unsigned char)(seq+j));
+    }
+    /* Transfer one prefix frame, then refuse both compact and retained suffixes. */
+    if(mixed_calls++==0){rte_pktmbuf_free(batch[0]);mixed_delivered++;return 1;}
+    return 0;
+}
+static void mixed_materialize_refused_terminal(struct rte_mempool *pool)
+{
+    assert(host_load("m7-mixed.json"));host.port_count=2;host.ports[0]=0;host.ports[1]=1;
+    assert(host_storage_bind_pool(0,pool,rte_socket_id()));
+    struct pipeline_stats stats={0};struct worker_state w;worker_state_init_owner(&w,&stats.worker,0);w.output_limit=0;
+    struct rte_mbuf *out[MAX_BURST_SIZE],*original[4];
+    for(unsigned seq=0;seq<4;++seq) {
+        struct rte_mbuf *m=rte_pktmbuf_alloc(pool);assert(m);original[seq]=m;
+        unsigned char *b=(unsigned char *)rte_pktmbuf_append(m,mixed_sizes[seq]);assert(b);
+        for(unsigned j=0;j<m->pkt_len;++j)b[j]=(unsigned char)(seq+j);
+        b[12]=0x81;b[13]=0;b[14]=0;b[15]=100;b[16]=0x88;b[17]=0xb5;
+        *packet_meta(m)=(struct packet_meta){.ingress_seq=seq,.arrival_ns=seq*20000000};
+        assert(worker_step_at(&w,&m,1,out,0)==0 && !host.invalid);
+    }
+    worker_end_input(&w);clock_ns=100000000;w.output_limit=MAX_BURST_SIZE;
+    assert(worker_step_at(&w,NULL,0,out,clock_ns)==4 && !host.invalid);
+    for(unsigned seq=0;seq<4;++seq) {
+        assert(packet_meta(out[seq])->ingress_seq==seq);mixed_meta[seq]=*packet_meta(out[seq]);
+        if(mixed_sizes[seq]>1020)assert(out[seq]==original[seq]);
+    }
+    struct m7_storage_stats used=m7_storage_stats(host.m7[0]);
+    assert(used.copied_in==2 && used.normal_retained==2 && used.materialized==2 && used.normal_returned==2);
+    assert(m7_storage_drained(host.m7[0]));
+    struct tx_state tx;tx_state_init(&tx,&stats);tx.burst=mixed_prefix;mixed_calls=mixed_delivered=0;
+    tx_step_at(&tx,out,4,clock_ns);
+    assert(mixed_calls==1 && mixed_delivered==1 && tx.pending[0].len==3 && !host.invalid);
+    assert(rte_mempool_avail_count(pool)==pool->size-3);
+    /* The exact timeout boundary keeps the refused suffix; one ns later it must
+     * terminate without offering expired materialized frames to the PMD again. */
+    tx_step_at(&tx,NULL,0,clock_ns+TERMINAL_TIMEOUT_NS);
+    assert(mixed_calls==2 && tx.pending[0].len==3 && !host.invalid);
+    tx_step_at(&tx,NULL,0,clock_ns+TERMINAL_TIMEOUT_NS+1);
+    assert(host.invalid && !strcmp(host.diagnostics.invalid_reason,"TX retry timeout"));
+    assert(mixed_calls==2 && mixed_delivered==1 && !tx_has_backlog(&tx));
+    assert(stats.worker.sent==4 && !stats.worker.emulator_drops && !stats.worker.shutdown_drops);
+    assert(stats.tx.transmitted==1 && stats.tx.tx_drops==3 && stats.tx.line_invalid_drops[0]==3);
+    assert(m7_storage_drained(host.m7[0]) && rte_mempool_avail_count(pool)==pool->size);
+    tx_state_cleanup(&tx);worker_state_cleanup(&w);host_cleanup();clock_ns=1000000;
+}
 static void exhausted_output_pool(struct rte_mempool *pool)
 {
     assert(host_load("m7-engine.json"));host.port_count=2;host.ports[0]=0;host.ports[1]=1;
@@ -150,6 +208,7 @@ int main(int argc,char **argv)
     assert(strstr(report,"m7_line0_materialized=1\n"));
     assert(strstr(report,"m7_line0_normal_reserve=17\n"));free(report);
     exhausted_output_pool(pool);core_limit(pool);m7_oracle_close();rejected_head_after_materialize(pool);publication_boundaries(pool);
+    mixed_materialize_refused_terminal(pool);
     rte_mempool_free(pool);assert(rte_eal_cleanup()==0);m7_oracle_close();
     puts("M7 production pool quota, accepted copy custody and original deadlines: PASS");
 }

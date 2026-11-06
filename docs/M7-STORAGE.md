@@ -154,6 +154,9 @@ class membership while applying the original exact model decisions.
 
 ## Software rate comparison
 
+The table below records the initial integration. See [integration performance](M7-STORAGE-PERFORMANCE.md)
+for the later profile and matched baseline/optimized comparison.
+
 The `perf/ring_rate.py --io-split` harness supports `-b X` (equal fresh-packet
 counts of stored 60/508/1518 bytes) and the existing fixed stored-byte arguments
 64/512/1518. Closed-loop recycling retains the chosen frame length. M7 needs
