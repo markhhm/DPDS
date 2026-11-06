@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #ifndef HNG_STORAGE_HYBRID_H
 #define HNG_STORAGE_HYBRID_H
-/* Independent experiment only; neither this nor storage.c is linked into dpds. */
+/* Hybrid custody primitive shared by the standalone experiment and M7 backend. */
 #include "storage.h"
 #define HYBRID_DEFAULT_HOLD_NS UINT64_C(10000000)
 enum hybrid_kind { HYBRID_EMPTY, HYBRID_RECORD, HYBRID_MBUF };
@@ -26,6 +26,6 @@ bool hybrid_put(struct hybrid *s, struct rte_mbuf *source, struct hybrid_item *i
 bool hybrid_get(struct hybrid *s, struct hybrid_item *item, struct rte_mempool *pool, struct rte_mbuf **out);
 bool hybrid_discard(struct hybrid *s, struct hybrid_item *item);
 bool hybrid_drained(const struct hybrid *s);
-/* Explicit clock, no engine connection: models registered full-ring failure threshold. */
+/* Explicit clock: enforce the registered full-ring failure threshold. */
 bool hybrid_handoff(struct hybrid *s, bool full, bool model_backlog, uint64_t now_ns);
 #endif

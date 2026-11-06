@@ -45,6 +45,7 @@ bool host_load(const char *path)
     host.line_count = hng_engine_line_count(host.engine);
     for (size_t i = 0; i < host.line_count; ++i) {
         if (!hng_engine_line_info(host.engine, i, &host.lines[i])) return false;
+        if (hng_engine_m7_storage_info(host.engine, i, &host.m7_plan[i])) host.m7_enabled = true;
         host.policies[i] = hng_tx_policy_new(host.engine, i);
         if (!host.policies[i]) return false;
     }
@@ -88,6 +89,14 @@ void host_cleanup(void)
         if (!hng_engine_abort_destroy(host.engine)) host_invalidate("payload remains at forced destroy");
     }
     host.engine = NULL;
+    for (size_t i = 0; i < host.line_count; ++i) {
+        if (!host.m7[i]) continue;
+        host_storage_publish(i);
+        if (!m7_storage_destroy(host.m7[i])) {
+            observer_abort(OBS_ABORT_DRAIN);
+            host_invalidate("M7 storage ownership not fully reclaimed");
+        } else host.m7[i] = NULL;
+    }
 }
 
 /* All fields are atomic: a seqlock alone would leave C data races. */
@@ -152,8 +161,10 @@ unsigned host_pool_objects(uint16_t port, unsigned lcores)
             count += host.resources[egress].tx_descriptors;
             reserved_egress[egress] = true;
         }
-        if (host.lines[line].storage_capacity_packets > UINT_MAX - count) return 0;
-        count += host.lines[line].storage_capacity_packets;
+        uint64_t retained = host.m7_plan[line].slots ? host.m7_plan[line].normal_mbufs :
+            host.lines[line].storage_capacity_packets;
+        if (retained > UINT_MAX - count) return 0;
+        count += retained;
     }
     return (unsigned)count;
 }
@@ -174,8 +185,12 @@ struct rte_mempool *host_create_pool(uint16_t port, unsigned lcores, int *socket
     snprintf(name, sizeof(name), "ingress_pool_%u", port);
     *socket = rte_eth_dev_socket_id(port);
     if (*socket < 0) *socket = rte_socket_id();
-    return rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
+    struct rte_mempool *pool = rte_pktmbuf_pool_create(name, count, MBUF_CACHE_SIZE,
         RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, *socket);
+    if (pool && !host_storage_bind_pool(port, pool, *socket)) {
+        rte_mempool_free(pool); return NULL;
+    }
+    return pool;
 }
 
 // -------------------------------------------

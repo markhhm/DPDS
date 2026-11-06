@@ -7,6 +7,9 @@ struct worker_state {
     enum observer_producer producer;
     uint16_t handoff_queue;
     struct Engine *engine;
+    bool has_storage;
+    uint64_t model_drops[RTE_MAX_ETHPORTS];
+    struct m7_storage *storage[HNG_MAX_LINES];
     struct Line *line[HNG_MAX_LINES];
     struct worker_stats *stats;
     uint64_t consumed, admitted_frontier[RTE_MAX_ETHPORTS], shutdown_start, min_delay[HNG_MAX_LINES];

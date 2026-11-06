@@ -16,11 +16,11 @@ from tools.g2.protocol import StreamReader
 from tools.g2.protocol import StreamError
 
 
-def main(binary):
+def main(binary, config_path="config.json"):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         result = subprocess.run([str(Path(binary).resolve()), *eal_arguments(1), '--no-pci', '--no-huge',
-            '--no-telemetry', '--in-memory', '--file-prefix=hng-binary', '--', str(root)],
+            '--no-telemetry', '--in-memory', '--file-prefix=hng-binary', '--', str(root), config_path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
         assert result.returncode == 0, result.stdout
         from tools.g2.native_binary import decode
@@ -35,7 +35,7 @@ def main(binary):
         assert any(row['items'] and row['items'][0][0] == 2**64-1 for row in events)
         assert any(row['at_ns'] > 2**53 for row in events)
         assert {row['accepted_count'] for row in events if row['kind'] == 6} == {0,1}
-        config = json.loads(Path('config.json').read_text())
+        config = json.loads(Path(config_path).read_text())
         bundles = []
         for text in (golden, decoded.getvalue()):
             streams = [io.StringIO() for _ in range(3)]
@@ -67,4 +67,4 @@ def main(binary):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    main(*sys.argv[1:])

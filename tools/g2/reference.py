@@ -78,7 +78,7 @@ def load_config(path, *, contents=None):
         raise ValueError("lines must be an array")
     traces = {}
     for line in config["lines"]:
-        fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"))
+        fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"), ("m7_storage",))
         if line["trace"] is None:
             continue
         trace_reference(line["trace"])
@@ -201,7 +201,7 @@ class Reference:
         if not isinstance(config["lines"], list) or not 1 <= len(config["lines"]) <= 4:
             raise ValueError("hng-v1 requires 1..4 lines")
         for line in config["lines"]:
-            fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"))
+            fields(line, ("name", "ingress_port", "egress_port", "vlan_id", "model", "envelope", "trace"), ("m7_storage",))
             name, model = line["name"], line["model"]
             fields(model, ("c_bps", "q_bytes", "t_ns", "delta_ns", "p", "seed",
                            "storage_capacity_packets", "storage_capacity_bytes"))
@@ -248,10 +248,16 @@ class Reference:
             uint(delay, "delay/hold bound")
             duration_packets = Fraction(model["c_bps"] * delay, 8 * (low + 20) * 10**9)
             required = model["q_bytes"] // low + envelope["burst_bound_packets"] - (-duration_packets.numerator // duration_packets.denominator)
+            if 'm7_storage' in line:
+                if trace: raise ValueError("M7 storage supports fixed lines only")
+                from .m7_storage import plan
+                required = plan(line['m7_storage'], model, envelope)['slots']
             if (required > model["storage_capacity_packets"]
                     or required * (high - 4) > model["storage_capacity_bytes"]):
                 raise ValueError("storage is below the declared envelope")
-            self.lines[name] = dict(config=line, chance=chance, trace=trace,
+            registered_lengths = (frozenset(c['l2_bytes'] for c in line['m7_storage']['composition'])
+                                  if 'm7_storage' in line else None)
+            self.lines[name] = dict(config=line, chance=chance, trace=trace, registered_lengths=registered_lengths,
                                     tail=Fraction(0), ledger=deque(), used=0, seq=0, floor=0,
                                     counts=dict(offers=0, accepted=0, q_drop=0, trace_loss=0,
                                                 trace_outage=0, invalid_input=0))
@@ -326,6 +332,8 @@ class Reference:
             raise ValueError("invalid/gapped packet identity, sequence or event time")
         q = max(length + 4, 64)
         envelope = line["envelope"]
+        if state['registered_lengths'] is not None and q not in state['registered_lengths']:
+            raise ValueError("frame outside registered M7 composition")
         if not envelope["min_q_bytes"] <= q <= envelope["max_q_bytes"]:
             raise ValueError("frame outside registered envelope")
         port.update(next_seq=seq + 1, arrival=arrival)

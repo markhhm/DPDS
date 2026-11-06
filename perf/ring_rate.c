@@ -37,9 +37,18 @@ static const char usage[] =
 static struct rte_ring *source[2], *sink[2];
 static uint64_t pace_start, pace_hz, paced_sent[2];
 static unsigned pace_pps;
+static unsigned population_share[2], perf_bound;
+static uint64_t made_by_port[2], retired[2];
+/* This target alone wraps the production loader. The original model's S/C/Q/
+ * t/delta remain unchanged; external storage is bounded by enforced live credit. */
+struct Engine *__wrap_hng_engine_load(const char *path)
+{
+    return hng_engine_load_for_perf(path,perf_bound);
+}
 
 static void frame(struct rte_mbuf *m, unsigned port, uint16_t bytes, uint64_t n)
 {
+    if (!bytes) bytes=(uint16_t[]){60,508,1518}[(n/2)%3];
     uint8_t *d = (uint8_t *)rte_pktmbuf_append(m, bytes);
     if (!d) rte_exit(EXIT_FAILURE, "mbuf too small for %u bytes\n", bytes);
     memset(d, 0, bytes);
@@ -57,6 +66,14 @@ static uint64_t top_up(struct rte_mempool *pool[2], uint16_t bytes, uint64_t *se
         struct rte_mbuf *m[BURST];
         unsigned n = rte_ring_free_count(source[p]);
         if (n > BURST) n = BURST;
+        if (host.m7_enabled) {
+            uint64_t drops=atomic_load_explicit(&host.model_progress[p].drops,memory_order_relaxed);
+            assert(drops+retired[p]<=made_by_port[p]);
+            uint64_t active=made_by_port[p]-drops-retired[p];
+            assert(active<=population_share[p]);
+            uint64_t credit=population_share[p]-active;
+            if(n>credit)n=(unsigned)credit;
+        }
         if (pace_pps) {
             uint64_t elapsed = rte_get_timer_cycles() - pace_start;
             uint64_t allowance = (elapsed / pace_hz) * pace_pps + (elapsed % pace_hz) * pace_pps / pace_hz;
@@ -69,7 +86,7 @@ static uint64_t top_up(struct rte_mempool *pool[2], uint16_t bytes, uint64_t *se
         for (unsigned i = 0; i < n; ++i) frame(m[i], p, bytes, (*serial)++);
         unsigned sent = rte_ring_enqueue_burst(source[p], (void **)m, n, NULL);
         for (unsigned i = sent; i < n; ++i) rte_pktmbuf_free(m[i]);
-        made += sent; paced_sent[p] += sent;
+        made += sent; paced_sent[p] += sent; made_by_port[p] += sent;
     }
     return made;
 }
@@ -96,7 +113,7 @@ int main(int argc, char **argv)
         else if (option == 'a') observer_cpu = (int)strtol(optarg, NULL, 10);
         else if (option == 'g') generator_cpu = (int)strtol(optarg, NULL, 10);
         else if (option == 'c') config = optarg;
-        else if (option == 'b') bytes = (unsigned)strtoul(optarg, NULL, 10);
+        else if (option == 'b') bytes = !strcmp(optarg, "X") ? 0 : (unsigned)strtoul(optarg, NULL, 10);
         else if (option == 'd') seconds = strtod(optarg, NULL);
         else if (option == 'w') warmup = strtod(optarg, NULL);
         else if (option == 'n') population = (unsigned)strtoul(optarg, NULL, 10);
@@ -104,10 +121,12 @@ int main(int argc, char **argv)
     }
     if (observer_cpu >= CPU_SETSIZE || observer_cpu < -1 || generator_cpu >= CPU_SETSIZE || generator_cpu < -1 || pace_pps > 1000000000U)
         rte_exit(EXIT_FAILURE, "%s", usage);
-    if (bytes < 60 || bytes > 1518 || seconds <= 0 || warmup < 0 || population < 64 ||
+    if ((bytes && bytes < 60) || bytes > 1518 || seconds <= 0 || warmup < 0 || population < 64 ||
         population > limit)
         rte_exit(EXIT_FAILURE, "%s(population: 64 to %u for this layout)\n", usage, limit);
     if (rte_lcore_count() != 4 && !split) rte_exit(EXIT_FAILURE, "hng-ring-rate needs 4, 5 or 7 lcores\n");
+    perf_bound=population-population/2;
+    population_share[0]=perf_bound;population_share[1]=population/2;
     if (!host_load(config)) rte_exit(EXIT_FAILURE, "configuration rejected\n");
     for (unsigned p = 0; p < 2; ++p) {
         char a[32], b[32], name[32];
@@ -133,6 +152,9 @@ int main(int argc, char **argv)
             RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
         if (!pool[p]) rte_exit(EXIT_FAILURE, "cannot allocate %u mbufs: %s\n", share[p], rte_strerror(rte_errno));
     }
+    for (unsigned p=0;p<2;++p)
+        if (!host_storage_bind_pool(p,pool[p],rte_socket_id())) rte_exit(EXIT_FAILURE,"M7 backend allocation failed\n");
+    if (host.m7_enabled) printf("m7_population_bound=%u software-only external backing; model parameters unchanged\n",perf_bound);
     for (uint16_t p = 0; p < 2; ++p)
         if (host_prepare_port(p) != 0 || initialize_port(p, pool[p]) != 0) rte_exit(EXIT_FAILURE, "port %u setup failed\n", p);
     struct pipeline_stats *stats = rte_zmalloc("rate_stats", sizeof(*stats), 64);
@@ -228,14 +250,14 @@ int main(int argc, char **argv)
             unsigned n = rte_ring_dequeue_burst(sink[p], (void **)m, BURST, NULL);
             sunk[p] += n;
             if (now >= window_start) window[p] += n;
-            if (pace_pps) { rte_pktmbuf_free_bulk(m, n); continue; }
+            if (pace_pps) { retired[1-p]+=n; rte_pktmbuf_free_bulk(m, n); continue; }
             /* A frame that left egress p came from ingress 1-p and re-enters there; RX rewrites its metadata. */
             for (unsigned j = 0; j < n; ++j) {
                 uint64_t identity = serial++;
                 memcpy(rte_pktmbuf_mtod(m[j], uint8_t *) + 18, &identity, sizeof(identity));
             }
             unsigned back = rte_ring_enqueue_burst(source[1 - p], (void **)m, n, NULL);
-            recycled += back;
+            recycled += back; retired[1-p]+=n-back;
             for (unsigned i = back; i < n; ++i) rte_pktmbuf_free(m[i]);
         }
     }

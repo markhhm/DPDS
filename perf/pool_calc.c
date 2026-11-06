@@ -24,6 +24,7 @@
 #include <rte_malloc.h>
 #include <rte_mempool.h>
 #include "../common/common.h"
+#include "../common/storage.h"
 
 struct params {
     uint64_t c_bps, t_ns, delta_ns, q_ns, min_q, max_q, burst, page;
@@ -33,10 +34,12 @@ struct params {
     /* Trace mode: storage covers the largest trace delay plus the longest outage hold. */
     bool trace;
     uint64_t trace_delay_ns, trace_hold_ns;
+    const char *m7_registration;
 };
 
 struct plan {
     uint64_t q_bytes, slots_per_line, objects, stride, mempool_bytes, metadata_bytes;
+    struct M7StorageInfo m7;
 };
 
 static const double GIB = 1024.0 * 1024.0 * 1024.0;
@@ -109,8 +112,19 @@ static struct plan make_plan(const struct params *x)
     __uint128_t n = (__uint128_t)x->c_bps * delay;
     __uint128_t d = (__uint128_t)8000000000u * (x->min_q + 20);
     r.slots_per_line = (uint64_t)(r.q_bytes / x->min_q + x->burst + n / d + (n % d != 0));
+    if (x->m7_registration) {
+        if (x->trace || UINT64_MAX-x->t_ns<x->delta_ns ||
+            !hng_m7_storage_plan(x->m7_registration,x->c_bps,r.q_bytes,delay,x->burst,&r.m7)) {
+            fputs("invalid M7 registration or overflowing sizing inputs\n",stderr);exit(2);
+        }
+        for (unsigned i=0;i<r.m7.class_count;++i)
+            if (r.m7.lengths[i]<x->min_q || r.m7.lengths[i]>x->max_q) {
+                fputs("M7 class outside frame envelope\n",stderr);exit(2);
+            }
+        r.slots_per_line=r.m7.slots;
+    }
     r.objects = x->rx_desc + SCHED_RX_RING_SZ + SCHED_TX_RING_SZ + MBUF_CACHE_SIZE * x->lcores +
-        HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE + x->tx_desc + x->lines * r.slots_per_line;
+        HNG_MAX_LINES * TX_PENDING_PER_LINE + 4 * MAX_BURST_SIZE + x->tx_desc + x->lines * (r.m7.slots?r.m7.normal_mbufs:r.slots_per_line);
     struct rte_mempool_objsz size;
     r.stride = rte_mempool_calc_obj_size((uint32_t)mbuf_element_bytes(), 0, &size);
     r.mempool_bytes = object_bytes(r.objects, r.stride, x->page) + rte_ring_get_memsize((unsigned)rte_align64pow2(r.objects + 1)) +
@@ -121,6 +135,26 @@ static struct plan make_plan(const struct params *x)
 
 static void print_plan(const struct params *x, const struct plan *r)
 {
+    if (r->m7.slots) {
+        const struct M7StorageInfo *m=&r->m7;struct storage_layout a={0};
+        if (m->records) storage_layout(m->records,m->cells,&a);
+        uint64_t arena=a.total_bytes,arena_pages=arena?(arena+4096+x->page-1)/x->page*x->page:0;
+        uint64_t all_pools=2*r->mempool_bytes;
+        uint64_t eal=((all_pools+39104+(UINT64_C(1)<<30)-1)>>30)+1;
+        uint64_t eal_bytes=eal*(UINT64_C(1)<<30)+2*x->lines*arena_pages;
+        uint64_t core_bytes=2*r->metadata_bytes,tags=2*x->lines*m->slots*16;
+        printf("mode=m7-hybrid-v1 threshold_l2=%u hold_ns=%"PRIu64" window_ns=%"PRIu64"\n",m->threshold_l2,m->hold_ns,m->window_ns);
+        printf("inputs c_bps=%"PRIu64" q_l2_bytes=%"PRIu64" rx_desc=%u tx_desc=%u lcores=%u page_bytes=%"PRIu64"\n",
+            x->c_bps,r->q_bytes,x->rx_desc,x->tx_desc,x->lcores,x->page);
+        printf("per_line slots=%"PRIu64" records=%"PRIu64" cells=%"PRIu64" normal_mbufs=%"PRIu64"\n",m->slots,m->records,m->cells,m->normal_mbufs);
+        printf("live_limits slot_limit=%"PRIu64" record_limit=%"PRIu64" cell_limit=%"PRIu64" normal_limit=%"PRIu64"\n",
+            m->slot_limit,m->record_limit,m->cell_limit,m->normal_limit);
+        printf("per_ingress pool_objects=%"PRIu64" mbuf_stride_bytes=%"PRIu64" mempool_bytes=%"PRIu64" compact_bytes_per_line=%"PRIu64"\n",
+            r->objects,r->stride,r->mempool_bytes,arena);
+        printf("two_directions eal_reserve_gib=%.0f core_gib=%.6f tags_gib=%.6f observer_gib=1 os_margin_gib=0.25 total_gib=%.3f (estimate)\n",
+            eal_bytes/GIB,core_bytes/GIB,tags/GIB,(eal_bytes+core_bytes+tags)/GIB+1.25);
+        return;
+    }
     uint64_t wire = x->min_q + 20;
     double pps = (double)x->c_bps / (8.0 * (double)wire);
     if (x->trace) printf("mode=trace max_trace_delay_ns=%"PRIu64" max_outage_hold_ns=%"PRIu64"\n",
@@ -233,14 +267,14 @@ static int verify(const struct params *given)
 int main(int argc, char **argv)
 {
     struct params x = {100000000000ull, 142000000, 320000000, 50000000, 1522, 1522, 1024,
-        2097152, 1, 7, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2, false, 0, 0};
+        2097152, 1, 7, RX_RING_SIZE, TX_RING_SIZE, {0.01, 0.10}, 2, false, 0, 0, NULL};
     bool do_verify = false, p_given = false;
     static const struct option options[] = {
         {"c-bps", 1, 0, 'c'}, {"t-ms", 1, 0, 't'}, {"delta-ms", 1, 0, 'd'}, {"q-ms", 1, 0, 'q'},
         {"p", 1, 0, 'p'}, {"min-frame", 1, 0, 'm'}, {"max-frame", 1, 0, 'M'}, {"burst", 1, 0, 'b'},
         {"lines-per-port", 1, 0, 'k'}, {"lcores", 1, 0, 'l'}, {"rx-desc", 1, 0, 'r'},
         {"tx-desc", 1, 0, 'x'}, {"page-bytes", 1, 0, 'g'},
-        {"trace-max-delay-ms", 1, 0, 'T'}, {"trace-max-hold-ms", 1, 0, 'H'}, {"verify", 0, 0, 'v'}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
+        {"m7-registration", 1, 0, 'J'}, {"trace-max-delay-ms", 1, 0, 'T'}, {"trace-max-hold-ms", 1, 0, 'H'}, {"verify", 0, 0, 'v'}, {"help", 0, 0, 'h'}, {0, 0, 0, 0}};
     /* EAL arguments, if any, come first and end with "--". */
     int split = 0;
     for (int i = 1; i < argc; ++i) if (!strcmp(argv[i], "--")) { split = i; break; }
@@ -252,6 +286,12 @@ int main(int argc, char **argv)
         uint64_t v = 0;
         bool ok = true;
         switch (option) {
+        case 'J': {
+            FILE *f=fopen(optarg,"rb");char *text=calloc(65537,1);
+            if(!f || !text) { if(f)fclose(f);free(text);return 2; }
+            size_t n=fread(text,1,65536,f);bool valid=!ferror(f) && feof(f) && !memchr(text,0,n);
+            fclose(f);if(!valid){free(text);return 2;}x.m7_registration=text;break;
+        }
         case 'c': ok = parse_u64(optarg, UINT64_MAX, &x.c_bps); break;
         case 't': ok = parse_ms(optarg, &x.t_ns); break;
         case 'd': ok = parse_ms(optarg, &x.delta_ns); break;
@@ -276,7 +316,7 @@ int main(int argc, char **argv)
         default:
             fprintf(stderr, "usage: hng-pool-calc [EAL_ARGS --] [--c-bps C] [--t-ms T] [--delta-ms D]"
                 " [--q-ms Q] [--p P]... [--min-frame L2] [--max-frame L2] [--burst N]"
-                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--trace-max-delay-ms D --trace-max-hold-ms H] [--verify]\n"
+                " [--lines-per-port 1|2] [--lcores N] [--rx-desc N] [--tx-desc N] [--page-bytes B] [--trace-max-delay-ms D --trace-max-hold-ms H] [--m7-registration JSON_FILE] [--verify]\n"
                 "integers: decimal digits, optionally with an exponent (100e9 = 100000000000); no sign, space or fraction.\n"
                 "-ms options: non-negative decimal; --p: 0 to 1, at most 8 values. Any invalid value exits with status 2.\n");
             return 2;
@@ -291,6 +331,7 @@ int main(int argc, char **argv)
         fputs("invalid parameters: need C > 0, 64 <= min <= max <= 1522, burst > 0, 1-2 lines, 1-7 lcores\n", stderr);
         return 2;
     }
+    if (do_verify && x.m7_registration) return fputs("M7 sizing is calculation-only; use engine fixtures for allocation verification\n",stderr), 2;
     struct plan r = make_plan(&x);
     print_plan(&x, &r);
     if (!do_verify) return 0;

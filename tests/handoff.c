@@ -17,6 +17,7 @@ struct expected { uint64_t seq, release, deadline; };
 static struct expected reference[2][N];
 static unsigned delivered[2];
 static struct rte_mempool *pool;
+static bool m7;
 
 static struct rte_mbuf *packet(unsigned owner, unsigned seq)
 {
@@ -77,7 +78,9 @@ static void *scheduler(void *p) { assert(lcore_worker(p) == 0); return NULL; }
 
 static void paused_pair(bool terminal)
 {
-    assert(host_load("handoff.json"));
+    assert(host_load(m7 ? "handoff-m7.json" : "handoff.json"));
+    assert(host_storage_bind_pool(7, pool, rte_socket_id()));
+    assert(host_storage_bind_pool(13, pool, rte_socket_id()));
     clock_ns = 500000000;
     memset(delivered, 0, sizeof(delivered));
     host.port_count = 2; host.ports[0] = 7; host.ports[1] = 13;
@@ -112,13 +115,13 @@ static void paused_pair(bool terminal)
     quit_signal_worker = 1; /* END while both queues remain full. */
     if (terminal) {
         /* No TX progress for the existing terminal budget must invalidate, not spin forever. */
-        clock_ns = 500000000 + TERMINAL_TIMEOUT_NS;
+        clock_ns = 500000000 + (m7 ? 100000 : TERMINAL_TIMEOUT_NS);
         usleep(10000);
         assert(!host.invalid); /* Existing gates use strictly greater than the budget. */
         clock_ns += 1;
         for (unsigned tries = 0; !host.invalid || !quit_signal_receive ||
             !atomic_load(&host.diagnostics.invalid_recorded); ++tries) {
-            assert(tries < 10000); usleep(10);
+            assert(tries < 1000); usleep(10);
         }
         assert(quit_signal_receive);
         /* Preserve the independent shutdown gate: it aborts model-owned suffixes. */
@@ -154,7 +157,7 @@ static void paused_pair(bool terminal)
     assert(host.invalid == terminal);
     if (terminal) {
         assert(atomic_load(&host.diagnostics.invalid_recorded));
-        assert(strcmp(host.diagnostics.invalid_reason, "TX handoff terminal timeout") == 0);
+        assert(strcmp(host.diagnostics.invalid_reason, m7 ? "TX handoff hold exceeded" : "TX handoff terminal timeout") == 0);
         assert(strncmp(host.diagnostics.invalid_owner, "scheduler:", 10) == 0);
         assert(host.diagnostics.invalid_at_ns < clock_ns && host.diagnostics.invalid_mono_ns > 0);
     }
@@ -164,7 +167,8 @@ static void paused_pair(bool terminal)
 
 int main(int argc, char **argv)
 {
-    assert(rte_eal_init(argc, argv) >= 0);
+    int eal = rte_eal_init(argc, argv); assert(eal >= 0);
+    m7 = argc-eal > 1;
     pool = rte_pktmbuf_pool_create("handoff_test", 8191, 0,
         RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     assert(pool);

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <rte_memcpy.h>
+#include <rte_malloc.h>
 #include "storage.h"
 #define NONE UINT32_MAX
 #define FREE_GUARD UINT16_C(0x59a3)
@@ -21,6 +22,7 @@ struct storage {
     uint32_t *next;
     uint32_t record_count, cell_count, free_record, free_cell;
     struct storage_stats stats;
+    void (*release_memory)(void *);
 };
 static uint64_t round64(uint64_t bytes) { return (bytes + 63) & ~UINT64_C(63); }
 bool storage_layout(uint32_t records, uint32_t cells, struct storage_layout *out)
@@ -39,17 +41,17 @@ static void *allocate(size_t bytes)
     void *p = NULL;
     return posix_memalign(&p, 64, bytes) ? NULL : p;
 }
-struct storage *storage_create(uint32_t records, uint32_t cells)
+static struct storage *initialize(void *memory, uint32_t records, uint32_t cells,
+    struct storage_layout layout, void (*release_memory)(void *))
 {
-    struct storage_layout layout;
-    if (!storage_layout(records, cells, &layout)) return NULL;
-    struct storage *s = allocate(layout.total_bytes);
+    struct storage *s=memory;
     if (!s) return NULL;
     memset(s, 0, layout.control_allocation);
     s->records = (struct descriptor *)((unsigned char *)s + layout.control_allocation);
     s->payload = (void *)((unsigned char *)s->records + layout.descriptor_allocation);
     s->next = (void *)((unsigned char *)s->payload + layout.payload_allocation);
     s->record_count = records; s->cell_count = cells;
+    s->release_memory=release_memory;
     memset(s->records, 0, layout.descriptor_allocation);
     /* Commit the whole bounded working set at startup, before any timing. */
     memset(s->payload, 0, layout.payload_allocation);
@@ -60,10 +62,22 @@ struct storage *storage_create(uint32_t records, uint32_t cells)
     for (uint32_t i = 0; i < cells; ++i) s->next[i] = i+1 < cells ? i+1 : NONE;
     return s;
 }
+struct storage *storage_create(uint32_t records, uint32_t cells)
+{
+    struct storage_layout layout;
+    if (!storage_layout(records,cells,&layout)) return NULL;
+    return initialize(allocate(layout.total_bytes),records,cells,layout,free);
+}
+struct storage *storage_create_socket(uint32_t records, uint32_t cells, int socket)
+{
+    struct storage_layout layout;
+    if (!storage_layout(records,cells,&layout)) return NULL;
+    return initialize(rte_malloc_socket("m7_compact",layout.total_bytes,64,socket),records,cells,layout,rte_free);
+}
 bool storage_destroy(struct storage *s)
 {
     if (!s || s->stats.records_live || s->stats.cells_live) return false;
-    free(s); return true;
+    s->release_memory(s); return true;
 }
 static struct descriptor *lookup(struct storage *s, struct storage_handle h)
 {
@@ -156,3 +170,12 @@ bool storage_discard(struct storage *s, struct storage_handle h)
     return true;
 }
 struct storage_stats storage_stats(const struct storage *s) { return s->stats; }
+
+bool storage_observation(struct storage *s, struct storage_handle handle, struct observer_packet *out)
+{
+    if (!s || !out) return false;
+    struct descriptor *record=lookup(s,handle);
+    if (!record) return false;
+    rte_memcpy(out,&record->meta.observation,sizeof(*out));
+    return true;
+}

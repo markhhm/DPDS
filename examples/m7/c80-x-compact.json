@@ -1,0 +1,95 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "fixed-d0",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 710,
+      "model": {
+        "c_bps": 80000000000,
+        "q_bytes": 74565410,
+        "t_ns": 142000000,
+        "delta_ns": 320000000,
+        "p": "1",
+        "seed": 1,
+        "storage_capacity_packets": 8335335,
+        "storage_capacity_bytes": 12653038530
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 16
+      },
+      "trace": null,
+      "m7_storage": {
+        "mode": "m7-hybrid-v1",
+        "threshold_l2": 1024,
+        "hold_ns": 10000000,
+        "window_ns": 10000000,
+        "offered_bps": 100000000000,
+        "margin_numerator": 5,
+        "margin_denominator": 4,
+        "composition": [
+          {
+            "l2_bytes": 64,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 512,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 1522,
+            "weight": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "fixed-d1",
+      "ingress_port": 1,
+      "egress_port": 0,
+      "vlan_id": 710,
+      "model": {
+        "c_bps": 80000000000,
+        "q_bytes": 74565410,
+        "t_ns": 142000000,
+        "delta_ns": 320000000,
+        "p": "1",
+        "seed": 1,
+        "storage_capacity_packets": 8335335,
+        "storage_capacity_bytes": 12653038530
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 16
+      },
+      "trace": null,
+      "m7_storage": {
+        "mode": "m7-hybrid-v1",
+        "threshold_l2": 1024,
+        "hold_ns": 10000000,
+        "window_ns": 10000000,
+        "offered_bps": 100000000000,
+        "margin_numerator": 5,
+        "margin_denominator": 4,
+        "composition": [
+          {
+            "l2_bytes": 64,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 512,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 1522,
+            "weight": 1
+          }
+        ]
+      }
+    }
+  ]
+}
