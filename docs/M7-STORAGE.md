@@ -117,9 +117,15 @@ See [M7 inputs](m7/inputs.md) for the page-rounded node ledger.
 
 For registered line index L, final-stats and `/dpds/diagnostics` add the same
 flat `m7_lineL_FIELD` unsigned fields. They are absent on classic lines.
-Owner-local counters are copied into atomics once per scheduler step;
-telemetry never reads the mutable allocator. Values are independent atomic
-snapshots, not a transaction across fields. Final values follow owner joins.
+Owner-local counters are copied into atomics at most every 64 active scheduler
+steps (new input or output). The next idle step flushes pending changes; unchanged
+idle steps do not read the backend. END flushes pending values, INVALID flushes
+after abort in the same step, and final owner cleanup always flushes. Generator
+model-drop credit remains published every step and is not batched with diagnostics.
+Telemetry never reads the mutable allocator. Live values can lag by up to that
+step budget; a preempted owner has no wall-time freshness guarantee. Values are
+independent atomic snapshots, not a transaction across fields. Final values
+follow owner joins and include all pending counts.
 
 | FIELD | Meaning |
 | --- | --- |

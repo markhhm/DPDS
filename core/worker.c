@@ -305,10 +305,20 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         if (emitted == MAX_BURST_SIZE) break;
     }
     if (s->has_storage && host.invalid && !s->aborted) abort_model(s, now);
-    for (unsigned k=0; s->has_storage && k<s->owned_count; ++k) {
-        size_t line=s->owned_lines[k];host_storage_publish(line);
-        uint16_t port=host.lines[line].ingress_port;
-        atomic_store_explicit(&host.model_progress[port].drops,s->model_drops[port],memory_order_relaxed);
+    if (s->has_storage) {
+        if (count || emitted) s->storage_publication_pending=true;
+        /* No aggregation on unchanged idle loops. Flush the last changed
+         * prefix on idle/END and every failure; final cleanup flushes too. */
+        if (host.invalid || s->aborted || (s->storage_publication_pending &&
+            (s->ended || (!count && !emitted) || ++s->storage_publication_steps>=64))) {
+            for (unsigned k=0;k<s->owned_count;++k) host_storage_publish(s->owned_lines[k]);
+            s->storage_publication_pending=false;s->storage_publication_steps=0;
+        }
+        /* Generator population credit cannot wait for diagnostic batching. */
+        for (unsigned k=0;k<s->owned_count;++k) {
+            uint16_t port=host.lines[s->owned_lines[k]].ingress_port;
+            atomic_store_explicit(&host.model_progress[port].drops,s->model_drops[port],memory_order_relaxed);
+        }
     }
     if (count || emitted || s->ended) observer_publish_snapshot(s->handoff_queue, &s->snapshot);
     return emitted;

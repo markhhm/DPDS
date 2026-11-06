@@ -6,6 +6,9 @@
 #include <rte_eal.h>
 #include "../core/worker.h"
 #include "m7_oracle.h"
+static uint64_t storage_reads;
+struct m7_storage_stats __real_m7_storage_stats(const struct m7_storage*);
+struct m7_storage_stats __wrap_m7_storage_stats(const struct m7_storage *s){storage_reads++;return __real_m7_storage_stats(s);}
 static uint64_t repeated_searches;
 static bool refuse_head;
 intptr_t __real_hng_lines_pop_merged(struct Line *const*,const uint64_t*,uintptr_t,uint64_t,uint64_t,struct HngPacket*);
@@ -37,6 +40,8 @@ static void exhausted_output_pool(struct rte_mempool *pool)
     assert(!strcmp(host.diagnostics.invalid_reason,"M7 materialization pool exhausted"));
     struct m7_storage_stats used=m7_storage_stats(host.m7[0]);
     assert(used.materialize_exhaustions==1 && used.compact_discarded==1 && !used.items_live && !used.records_live && !used.cells_live);
+    assert(atomic_load(&host.m7_snapshot[0].materialize_exhaustions)==1);
+    assert(!atomic_load(&host.m7_snapshot[0].items_live) && !atomic_load(&host.m7_snapshot[0].records_live));
     m7_oracle_worker(&stats);m7_oracle_storage(0);
     if(m7_oracle)fprintf(m7_oracle,"invalid=%u,reason=%s\n",(unsigned)host.invalid,host.diagnostics.invalid_reason);
     for(unsigned i=0;i<pool->size;++i)rte_pktmbuf_free(held[i]);
@@ -77,6 +82,35 @@ static void rejected_head_after_materialize(struct rte_mempool *pool)
     assert(used.materialized==1 && !used.compact_discarded && m7_storage_drained(host.m7[0]));
     worker_end_input(&w);worker_state_cleanup(&w);host_cleanup();assert(rte_mempool_avail_count(pool)==pool->size);
 }
+static void publication_boundaries(struct rte_mempool *pool)
+{
+    assert(host_load("m7-engine.json"));host.port_count=2;host.ports[0]=0;host.ports[1]=1;
+    assert(host_storage_bind_pool(0,pool,rte_socket_id()));
+    struct worker_stats stats={0};struct worker_state w;worker_state_init_owner(&w,&stats,0);
+    struct rte_mbuf *out[MAX_BURST_SIZE];storage_reads=0;
+    for(unsigned i=0;i<100;++i)assert(worker_step_at(&w,NULL,0,out,clock_ns)==0);
+    assert(storage_reads==0); /* Unchanged idle steps must not aggregate or publish. */
+    for(unsigned i=0;i<65;++i) {
+        struct rte_mbuf *m=rte_pktmbuf_alloc(pool);assert(m);
+        unsigned char *b=(unsigned char *)rte_pktmbuf_append(m,60);assert(b);memset(b,0,60);b[12]=0x81;b[15]=100;
+        *packet_meta(m)=(struct packet_meta){.ingress_seq=i,.arrival_ns=i*1000000};clock_ns=(i+1)*1000000;
+        host_publish(0,i+1,clock_ns);assert(worker_step_at(&w,&m,1,out,clock_ns)==1);rte_pktmbuf_free(out[0]);
+        if(i<63)assert(storage_reads==0);
+        if(i==63)assert(storage_reads==1 && atomic_load(&host.m7_snapshot[0].copied_in)==64);
+    }
+    assert(atomic_load(&host.m7_snapshot[0].copied_in)==64);
+    assert(worker_step_at(&w,NULL,0,out,clock_ns)==0);
+    assert(atomic_load(&host.m7_snapshot[0].copied_in)==65); /* idle flush */
+    struct rte_mbuf *last=rte_pktmbuf_alloc(pool);assert(last);
+    unsigned char *b=(unsigned char *)rte_pktmbuf_append(last,60);assert(b);memset(b,0,60);b[12]=0x81;b[15]=100;
+    *packet_meta(last)=(struct packet_meta){.ingress_seq=65,.arrival_ns=65000000};clock_ns=66000000;
+    host_publish(0,66,clock_ns);assert(worker_step_at(&w,&last,1,out,clock_ns)==1);rte_pktmbuf_free(out[0]);
+    assert(atomic_load(&host.m7_snapshot[0].copied_in)==65);
+    /* Final cleanup must flush pending values even without another worker step. */
+    worker_end_input(&w);worker_state_cleanup(&w);
+    assert(atomic_load(&host.m7_snapshot[0].copied_in)==66 && !host.invalid);
+    host_cleanup();assert(rte_mempool_avail_count(pool)==pool->size);clock_ns=1000000;
+}
 int main(int argc,char **argv)
 {
     assert(rte_eal_init(argc,argv)>=0);m7_oracle_open("engine");
@@ -105,6 +139,7 @@ int main(int argc,char **argv)
     assert(rte_pktmbuf_mtod(output[0],unsigned char *)[12]==0x81);
     rte_pktmbuf_free(output[0]);
     worker_end_input(&worker);assert(worker_step_at(&worker,NULL,0,output,clock_ns)==0);
+    assert(atomic_load(&host.m7_snapshot[0].copied_in)==1); /* END forces pending state. */
     worker_state_cleanup(&worker);assert(!worker_has_backlog(&worker) && !host.invalid);
     m7_oracle_worker(&stats.worker);m7_oracle_storage(0);
     host_cleanup();assert(rte_mempool_avail_count(pool)==pool->size);
@@ -114,7 +149,7 @@ int main(int argc,char **argv)
     assert(strstr(report,"m7_line0_copied_in=1\n"));
     assert(strstr(report,"m7_line0_materialized=1\n"));
     assert(strstr(report,"m7_line0_normal_reserve=17\n"));free(report);
-    exhausted_output_pool(pool);core_limit(pool);m7_oracle_close();rejected_head_after_materialize(pool);
+    exhausted_output_pool(pool);core_limit(pool);m7_oracle_close();rejected_head_after_materialize(pool);publication_boundaries(pool);
     rte_mempool_free(pool);assert(rte_eal_cleanup()==0);m7_oracle_close();
     puts("M7 production pool quota, accepted copy custody and original deadlines: PASS");
 }

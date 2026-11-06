@@ -34,7 +34,7 @@ hybrid_proto = executable('hng-storage-hybrid', ['perf/storage_hybrid.c', 'commo
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 m7_engine_test = executable('m7-engine-test', ['tests/m7_engine.c'] + common_sources,
   dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
-  link_args: ['-Wl,--wrap=host_now_ns', '-Wl,--wrap=hng_lines_pop_merged', '-Wl,--wrap=hng_head_pop'], override_options: ['b_lto=false'],
+  link_args: ['-Wl,--wrap=host_now_ns', '-Wl,--wrap=hng_lines_pop_merged', '-Wl,--wrap=hng_head_pop', '-Wl,--wrap=m7_storage_stats'], override_options: ['b_lto=false'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('m7-engine', python, args: [meson.project_source_root() / 'tests/eal_args.py', m7_engine_test,
   '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '-m', '256',

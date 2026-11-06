@@ -8,6 +8,9 @@ struct worker_state {
     uint16_t handoff_queue;
     struct Engine *engine;
     bool has_storage;
+    /* Diagnostics may lag at most 64 active steps; idle/end/invalid/cleanup flush. */
+    bool storage_publication_pending;
+    uint16_t storage_publication_steps;
     uint64_t model_drops[RTE_MAX_ETHPORTS];
     struct m7_storage *storage[HNG_MAX_LINES];
     /* Cold guard: copy-out succeeded but the selected model ticket was rejected. */
