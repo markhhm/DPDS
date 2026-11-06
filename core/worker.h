@@ -10,6 +10,10 @@ struct worker_state {
     bool has_storage;
     uint64_t model_drops[RTE_MAX_ETHPORTS];
     struct m7_storage *storage[HNG_MAX_LINES];
+    /* Cold guard: copy-out succeeded but the selected model ticket was rejected. */
+    struct rte_mbuf *cancelled_materialization;
+    void *cancelled_token;
+    uint16_t cancelled_line;
     struct Line *line[HNG_MAX_LINES];
     struct worker_stats *stats;
     uint64_t consumed, admitted_frontier[RTE_MAX_ETHPORTS], shutdown_start, min_delay[HNG_MAX_LINES];

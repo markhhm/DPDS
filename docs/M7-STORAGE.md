@@ -45,9 +45,9 @@ A 16-byte stable tag is the model's payload pointer in either case.
 Compact data uses the ingress pool's NUMA socket and the DPDK heap; tags and
 Core metadata use ordinary process memory. Arenas are prefaulted before launch.
 
-The existing TX-ring free-slot budget limits output. The scheduler peeks the
-eligible merged model head, materializes it, then pops that same head and
-recycles its tag. A failed materialize leaves both the record and model head
+The existing TX-ring free-slot budget limits output. The scheduler selects the
+eligible merged model head once, materializes it, then consumes its one-use
+Core ticket and recycles its tag without scanning the group again. A failed materialize leaves both the record and model head
 owned until bounded abort cleanup. Record/cell storage returns only after
 successful copy-out; the original deadline, release time and physical ordering
 remain unchanged. NIC refused suffixes remain in the existing TX retry path.

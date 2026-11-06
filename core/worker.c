@@ -108,6 +108,12 @@ static uint64_t watermark(struct worker_state *s, uint16_t port)
 static void discard_model(struct worker_state *s, size_t line, const struct HngPacket *p, uint64_t now)
 {
     if (s->storage[line]) {
+        if (s->cancelled_materialization && s->cancelled_line==line && s->cancelled_token==p->packet_ptr) {
+            observer_terminal(s->producer,s->cancelled_materialization,OBS_SHUTDOWN,now);
+            rte_pktmbuf_free(s->cancelled_materialization);s->cancelled_materialization=NULL;
+            if (!m7_storage_release(s->storage[line],p->packet_ptr)) host_invalidate("cancelled M7 materialization tag invalid");
+            return;
+        }
         if (observer_enabled()) {
             struct observer_record r; observer_record_init(&r, OBS_TERMINAL, 1);
             r.reason=OBS_SHUTDOWN; r.at_ns=now;
@@ -268,14 +274,21 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         intptr_t chosen;
         struct rte_mbuf *materialized = NULL;
         if (s->has_storage) {
-            chosen = hng_lines_peek_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate);
-            if (chosen >= 0 && s->storage[s->group_line[g][chosen]] &&
-                !m7_storage_materialize(s->storage[s->group_line[g][chosen]], candidate.packet_ptr, &materialized)) {
-                host_invalidate(m7_storage_reason(s->storage[s->group_line[g][chosen]]));
-                break;
+            struct HngHead head;
+            chosen=hng_lines_peek_head(s->group_handle[g],w[g],s->group_size[g],now,limit[g],&head);
+            if (chosen>=0) {
+                size_t line=s->group_line[g][chosen];
+                if (s->storage[line] && !m7_storage_materialize(s->storage[line],head.packet_ptr,&materialized)) {
+                    host_invalidate(m7_storage_reason(s->storage[line]));break;
+                }
+                if (!hng_head_pop(&head)) {
+                    s->cancelled_materialization=materialized;s->cancelled_token=head.packet_ptr;s->cancelled_line=line;
+                    host_invalidate("model head changed during M7 materialization");break;
+                }
+                candidate.packet_ptr=head.packet_ptr;candidate.packet_bytes=head.packet_bytes;
             }
-        } else chosen = 0;
-        if (chosen < 0 || hng_lines_pop_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate) < 0) {
+        } else chosen=hng_lines_pop_merged(s->group_handle[g],w[g],s->group_size[g],now,limit[g],&candidate);
+        if (chosen<0) {
             /* Nothing on this port changes until the next step: stop retrying it. */
             blocked[g] = true;
             open--;

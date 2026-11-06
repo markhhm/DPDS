@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <rte_eal.h>
 #include "../core/worker.h"
+#include "m7_oracle.h"
 static const unsigned sizes[]={60,64,128,129,508,512,513,1518};
 static uint64_t now_ns=1000000000;
 uint64_t __wrap_host_now_ns(void){return now_ns;}
@@ -103,6 +104,7 @@ static struct rte_mbuf *packet(unsigned port,unsigned seq)
 }
 static void run(bool m7,unsigned q,const char *p,struct result *r,bool aborting)
 {
+    if(m7_oracle)fprintf(m7_oracle,"run,m7=%u,q=%u,p=%s,abort=%u\n",m7,q,p,aborting);
     char path[]="/tmp/hng-m7-worker-XXXXXX";configuration(m7,q,p,path);assert(host_load(path));unlink(path);
     host.port_count=2;host.ports[0]=0;host.ports[1]=1;
     for(unsigned k=0;k<2;++k)assert(host_storage_bind_pool(k,pools[k],rte_socket_id()));
@@ -128,23 +130,41 @@ static void run(bool m7,unsigned q,const char *p,struct result *r,bool aborting)
             const unsigned char header[]={0x81,0,0,100,0x88,0xb5};
             for(unsigned j=0;j<m->pkt_len;++j)
                 assert(b[j]==(j>=12 && j<18 ? header[j-12] : (unsigned char)(seq+j*13)));
+            if(m7_oracle){
+                fprintf(m7_oracle,"packet,owner=%u,index=%u,",k,idx);
+                const struct packet_meta *value=packet_meta(m);
+#define VALUE(name) fprintf(m7_oracle,#name "=%"PRIu64",",(uint64_t)value->name);
+                META_FIELDS(VALUE)
+#undef VALUE
+                fprintf(m7_oracle,"bytes=");for(unsigned j=0;j<m->pkt_len;++j)fprintf(m7_oracle,"%02x",b[j]);
+                fprintf(m7_oracle,"\n");
+            }
             r->meta[k][idx]=*packet_meta(m);r->seq[k][idx]=seq;rte_pktmbuf_free(m);
         }
         /* FFI output storage may have arbitrary previous bytes. Only the
          * declared fields are values; repr(C) padding has no defined value. */
         memset(&stats[k].lines[k],m7?0xa5:0x5a,sizeof(stats[k].lines[k]));
         worker_state_cleanup(w);assert(!worker_has_backlog(w));r->stats[k]=stats[k].lines[k];
+        if(m7_oracle){
+            fprintf(m7_oracle,"model,owner=%u,",k);
+#define VALUE(name) fprintf(m7_oracle,#name "=%"PRIu64",",(uint64_t)r->stats[k].name);
+            MODEL_FIELDS(VALUE)
+#undef VALUE
+            fprintf(m7_oracle,"\n");m7_oracle_worker(&stats[k]);if(m7)m7_oracle_storage(k);
+            fprintf(m7_oracle,"pool,owner=%u,free=%u,total=%u\n",k,rte_mempool_avail_count(pools[k]),pools[k]->size);
+        }
         assert(!stats[k].storage_drops && !stats[k].invalid_drops && !stats[k].tx_ring_drops);
         assert(stats[k].sent+stats[k].emulator_drops+stats[k].shutdown_drops==N);
         if(aborting)assert(stats[k].sent==0 && stats[k].shutdown_drops>0);
         if(m7)assert(m7_storage_drained(host.m7[k]));
         assert(rte_mempool_avail_count(pools[k])==pools[k]->size);
     }
+    if(m7_oracle)fprintf(m7_oracle,"invalid=%u,reason=%s\n",(unsigned)host.invalid,aborting?host.diagnostics.invalid_reason:"none");
     assert(host.invalid==aborting);host_cleanup();
 }
 int main(int argc,char **argv)
 {
-    assert(rte_eal_init(argc,argv)>=0);padding_is_not_a_counter();compare_diagnostics=true;
+    assert(rte_eal_init(argc,argv)>=0);padding_is_not_a_counter();compare_diagnostics=true;m7_oracle_open("worker");
     for(unsigned k=0;k<2;++k){char name[16];snprintf(name,sizeof(name),"m7_worker%u",k);
         pools[k]=rte_pktmbuf_pool_create(name,1023,0,RTE_ALIGN_CEIL(sizeof(struct packet_meta),RTE_MBUF_PRIV_ALIGN),
             RTE_MBUF_DEFAULT_BUF_SIZE,rte_socket_id());assert(pools[k]);}
@@ -163,6 +183,6 @@ int main(int argc,char **argv)
     }
     struct result aborted={0};run(true,32768,"0.5",&aborted,true);
     for(unsigned k=0;k<2;++k)rte_mempool_free(pools[k]);
-    assert(rte_eal_cleanup()==0);
+    assert(rte_eal_cleanup()==0);m7_oracle_close();
     puts("M7/legacy Q/selection/late/seq/deadline/full metadata/bytes differential, eight sizes, bidirectional END and abort: PASS");
 }
