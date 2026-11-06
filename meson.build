@@ -28,6 +28,31 @@ test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/cor
   env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
   workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
+hybrid_proto = executable('hng-storage-hybrid', ['perf/storage_hybrid.c', 'common/storage.c', 'common/storage_hybrid.c'],
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('storage-hybrid-capacity', python, args: [meson.project_source_root() / 'perf/storage_hybrid_capacity_test.py'],
+  workdir: meson.project_source_root(), timeout: 30)
+test('storage-hybrid-smoke', python, args: [meson.project_source_root() / 'perf/storage_hybrid.py', hybrid_proto,
+  '--m7-opt-in', '--thresholds', '512', '--trials', '1'],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
+hybrid_test = executable('storage-hybrid-test', ['tests/storage_hybrid.c', 'common/storage.c', 'common/storage_hybrid.c'],
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'])
+test('storage-hybrid', python, args: [meson.project_source_root() / 'tests/eal_args.py', hybrid_test,
+  '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-storage-hybrid'],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
+storage_proto = executable('hng-storage-proto', ['perf/storage_proto.c', 'common/storage.c'],
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('storage-capacity', python, args: [meson.project_source_root() / 'perf/storage_capacity_test.py'],
+  workdir: meson.project_source_root(), timeout: 30)
+test('storage-proto-smoke', python, args: [meson.project_source_root() / 'perf/storage_proto.py', storage_proto,
+  '--trials', '1'], workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
+storage_test = executable('storage-test', ['tests/storage.c', 'common/storage.c'],
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'])
+test('storage', python, args: [meson.project_source_root() / 'tests/eal_args.py', storage_test,
+  '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-storage'],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
 common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'common/diagnostics.c', 'core/worker.c', 'core/transmit.c']
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)

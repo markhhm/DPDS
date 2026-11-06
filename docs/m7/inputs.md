@@ -343,3 +343,24 @@ For trace, use the registered maximum delay/hold envelope and terminal policy in
 The measurement owner still registers observation duration, sample count, clocks, storage I/O,
 per-flow identity limits and observer-cost qualification before a run.
 The [M7 handoff](em-handoff-cx4.md) keeps those gates separate from this capacity calculation.
+
+## Independent compact-storage experiment
+
+The [standalone prototype](../M7-COMPACT-PROTOTYPE.md) records copy/allocator
+costs and memory accounting including one second of TX backpressure residence.
+It is not connected to the engine and does not replace the current memory
+budgets above. Its conservative full-residence plan exceeds 64 GiB; integration
+and any M7 opt-in remain subject to a separate decision.
+
+## Registered M7 handoff-hold experiment
+
+The [hybrid prototype](../M7-HYBRID-PROTOTYPE.md) scans charged-L2 threshold T
+and registers M7 handoff hold H=10000000 ns (10 ms), using D+H in capacity
+accounting. H is a registered failure threshold, **not a measured pause bound**.
+The proposed opt-in condition is continuous full handoff time strictly greater
+than H: INVALID with `TX handoff hold exceeded`. The standalone parameter
+can be recorded with `--hold-ns`; it is not an option accepted by the engine.
+Non-M7 terminal timeout remains 1 s. No production scheduler, input JSON,
+load, mix, t, delta, Q or C is changed by this experiment. Joint live-byte
+bounds and independent fixed-pool physical allocations are reported separately;
+shared backing and engine integration remain pending.
