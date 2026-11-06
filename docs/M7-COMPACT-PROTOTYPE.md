@@ -7,7 +7,11 @@ changes no workload, and does not alter the approved binaries or default
 storage for the 10G qualification and quarter-rate matrix. Engine integration
 requires a separate approved change with explicit M7 opt-in.
 
-The two measured design gates remain separate:
+The all-compact stage 2a results below are historical. The follow-on
+[hybrid/10 ms experiment](M7-HYBRID-PROTOTYPE.md) registers a separate prototype
+policy and does not enable it in the engine.
+
+The two stage 2a design gates remain separate:
 
 - CPU: quantify both copies and allocation/free before accepting the projected
   reduction in valid rate. No new CPU acceptance threshold is assumed.
