@@ -34,7 +34,7 @@ hybrid_proto = executable('hng-storage-hybrid', ['perf/storage_hybrid.c', 'commo
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 m7_engine_test = executable('m7-engine-test', ['tests/m7_engine.c'] + common_sources,
   dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
-  link_args: ['-Wl,--wrap=host_now_ns'], override_options: ['b_lto=false'],
+  link_args: ['-Wl,--wrap=host_now_ns', '-Wl,--wrap=hng_lines_pop_merged', '-Wl,--wrap=hng_head_pop', '-Wl,--wrap=m7_storage_stats'], override_options: ['b_lto=false'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('m7-engine', python, args: [meson.project_source_root() / 'tests/eal_args.py', m7_engine_test,
   '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '-m', '256',
@@ -68,6 +68,8 @@ m7_worker = executable('m7-worker-test', ['tests/m7_worker.c'] + common_sources,
 test('m7-worker', python, args: [meson.project_source_root() / 'tests/eal_args.py', m7_worker,
   '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '-m', '256', '--file-prefix=hng-m7-worker'],
   workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
+test('m7-baseline-semantics', python, args: [meson.project_source_root() / 'tests/m7_semantics.py', m7_worker, m7_engine_test],
+  workdir: meson.project_source_root() / 'tests', timeout: 60, is_parallel: false)
 backend_test = executable('m7-backend-test', ['tests/storage_engine.c', 'common/storage_engine.c', 'common/storage.c', 'common/storage_hybrid.c'],
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'])
 test('m7-backend', python, args: [meson.project_source_root() / 'tests/eal_args.py', backend_test,
