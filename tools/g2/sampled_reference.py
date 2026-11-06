@@ -39,6 +39,8 @@ class SampledReference:
                     or np.any(rows['segments']!=1) or np.any(rows['input_error']) or np.any(rows['length']==0)
                     or np.any(q<line['envelope']['min_q_bytes']) or np.any(q>line['envelope']['max_q_bytes'])):
                 raise ValueError('invalid sampled line arrival prefix')
+            if state['registered_lengths'] is not None and not np.all(np.isin(q,list(state['registered_lengths']))):
+                raise ValueError('frame outside registered M7 composition')
             prefix=self.mode=='stress' or state['trace'] is not None
             choices=wanted[indices]
 
@@ -106,6 +108,8 @@ class SampledReference:
                 or not event['length'] or event.get('input_error') or event.get('segments',1) != 1
                 or event.get('vlan_id',line['vlan_id']) != line['vlan_id']):
             raise ValueError('invalid sampled arrival prefix')
+        if state['registered_lengths'] is not None and q not in state['registered_lengths']:
+            raise ValueError('frame outside registered M7 composition')
         port.update(next_seq=seq+1,arrival=arrival)
         state['seq'] += 1
         ref.count += 1

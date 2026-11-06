@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include <assert.h>
+#include <rte_malloc.h>
 #include <stdio.h>
 #include <string.h>
 #include <rte_eal.h>
@@ -119,6 +120,32 @@ static void indirect_source(struct rte_mempool *pool)
     rte_pktmbuf_free(out);rte_pktmbuf_free(direct);
     assert(storage_destroy(s) && rte_mempool_avail_count(pool) == pool->size);
 }
+static void socket_storage(struct rte_mempool *pool)
+{
+    struct storage *s=storage_create_socket(1,24,rte_socket_id()); assert(s);
+    size_t bytes=0;
+    assert(rte_malloc_validate(s,&bytes)==0 && bytes>=2048);
+    struct rte_mbuf *m=rte_pktmbuf_alloc(pool),*out=NULL; assert(m);fill(m,1518);
+    struct storage_handle h; assert(storage_copy_in(s,m,&h));rte_pktmbuf_free(m);
+    assert(!storage_destroy(s)); /* Live records cannot be freed with their heap. */
+    assert(storage_materialize(s,h,pool,&out));
+    assert(out->pkt_len==1518);rte_pktmbuf_free(out);
+    assert(storage_destroy(s) && rte_mempool_avail_count(pool)==pool->size);
+}
+static void retained_terminal_observation(struct rte_mempool *pool)
+{
+    struct storage *s=storage_create(1,1);assert(s);
+    struct rte_mbuf *m=rte_pktmbuf_alloc(pool);assert(m);fill(m,60);
+    struct observer_packet expected,actual;
+    memcpy(&expected,&packet_meta(m)->observation,sizeof(expected));
+    struct storage_handle h;assert(storage_copy_in(s,m,&h));rte_pktmbuf_free(m);
+    /* Abort must attest custody without allocating a materialized mbuf. */
+    assert(storage_observation(s,h,&actual));
+    assert(!memcmp(&expected,&actual,sizeof(actual)));
+    assert(storage_discard(s,h));
+    assert(!storage_observation(s,h,&actual));
+    assert(storage_destroy(s) && rte_mempool_avail_count(pool)==pool->size);
+}
 int main(int argc, char **argv)
 {
     assert(rte_eal_init(argc, argv) >= 0);
@@ -153,7 +180,7 @@ int main(int argc, char **argv)
     assert(!stats.invalid && stats.copied_in == 8 && stats.materialized == 8);
     assert(stats.records_live == 0 && stats.cells_live == 0);
     assert(storage_destroy(s) && rte_mempool_avail_count(pool) == 255);
-    exhaustion(pool); materialize_failure(pool); shuffled_reclaim(pool); indirect_source(pool);
+    exhaustion(pool); materialize_failure(pool); shuffled_reclaim(pool); indirect_source(pool); socket_storage(pool); retained_terminal_observation(pool);
     rte_mempool_free(pool); assert(rte_eal_cleanup() == 0);
     puts("compact round-trip preserves every payload byte and all private metadata: PASS");
 }

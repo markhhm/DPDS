@@ -1,0 +1,43 @@
+{
+  "schema": "hng-v1",
+  "lines": [
+    {
+      "name": "test",
+      "ingress_port": 0,
+      "egress_port": 1,
+      "vlan_id": 100,
+      "model": {
+        "c_bps": 1000000,
+        "q_bytes": 64,
+        "t_ns": 0,
+        "delta_ns": 0,
+        "p": "1",
+        "seed": 1,
+        "storage_capacity_packets": 19,
+        "storage_capacity_bytes": 28842
+      },
+      "envelope": {
+        "min_q_bytes": 64,
+        "max_q_bytes": 1522,
+        "burst_bound_packets": 16
+      },
+      "m7_storage": {
+        "mode": "m7-hybrid-v1",
+        "composition": [
+          {
+            "l2_bytes": 64,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 512,
+            "weight": 1
+          },
+          {
+            "l2_bytes": 1522,
+            "weight": 1
+          }
+        ]
+      }
+    }
+  ]
+}

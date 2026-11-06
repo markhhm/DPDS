@@ -10,6 +10,7 @@
 #include <libdpds_core.h>
 #include "config.h"
 #include "observer.h"
+#include "storage_engine.h"
 
 extern _Atomic uint8_t quit_signal_receive, quit_signal_worker, quit_signal_transmit;
 #define HNG_MAX_LINES 4
@@ -27,6 +28,7 @@ struct ingress_frontier {
     _Atomic uint64_t version, enqueued, watermark_ns;
 } __attribute__((aligned(64)));
 _Static_assert(sizeof(struct ingress_frontier) == 64, "one frontier per cache line");
+struct model_drop_progress { _Atomic uint64_t drops; } __attribute__((aligned(64)));
 struct port_resources { uint16_t rx_descriptors, tx_descriptors; bool prepared; };
 enum host_role { HOST_MAIN, HOST_RX, HOST_SCHEDULER, HOST_TX, HOST_COMBINED };
 /* Each hot owner writes its own cache line; telemetry reads only atomics. */
@@ -51,6 +53,11 @@ struct host_context {
     struct Engine *engine;
     struct LineInfo lines[HNG_MAX_LINES];
     struct TxPolicy *policies[HNG_MAX_LINES];
+    bool m7_enabled;
+    struct M7StorageInfo m7_plan[HNG_MAX_LINES];
+    struct m7_storage *m7[HNG_MAX_LINES];
+    struct m7_storage_snapshot m7_snapshot[HNG_MAX_LINES];
+    struct model_drop_progress model_progress[RTE_MAX_ETHPORTS];
     /* Taken by host_load on the main lcore, before any owner launches. */
     struct Line *line_handle[HNG_MAX_LINES];
     _Atomic bool launched;
@@ -76,6 +83,11 @@ bool host_take_line_handles(void);
 /* Call on the main lcore immediately before launching pipeline lcores. */
 void host_mark_launched(void);
 void host_cleanup(void);
+/* Bind before owners launch; a no-op for classic lines. */
+bool host_storage_bind_pool(uint16_t ingress, struct rte_mempool *pool, int socket);
+void host_storage_publish(size_t line);
+struct rte_tel_data;
+void host_storage_report(FILE *out, struct rte_tel_data *tel);
 void host_invalidate(const char *reason);
 void host_diagnostics_bind(enum host_role role, unsigned owner);
 /* Main only: at the existing pre-launch epoch reset, before telemetry registration. */

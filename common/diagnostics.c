@@ -111,6 +111,7 @@ static void snapshot(FILE *out, struct rte_tel_data *tel)
         snprintf(key, sizeof(key), "rx%u_stopped_mono_ns", k);
         number(out, tel, key, atomic_load_explicit(&host.diagnostics.rx[k].stopped_mono_ns, memory_order_relaxed));
     }
+    host_storage_report(out, tel);
     struct host_diagnostics *d = &host.diagnostics;
     bool recorded = atomic_load_explicit(&d->invalid_recorded, memory_order_acquire);
     number(out, tel, "first_invalid_recorded", recorded);

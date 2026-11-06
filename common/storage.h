@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #ifndef HNG_COMPACT_STORAGE_H
 #define HNG_COMPACT_STORAGE_H
-/* Independent single-owner prototype. It is NOT linked into the engine. */
+/* Bounded single-owner compact storage. Allocation choice is explicit. */
 #include "common.h"
 #define STORAGE_MAX_BYTES 1518u
 #define STORAGE_CELL_BYTES 64u
@@ -20,6 +20,8 @@ struct storage_layout {
 };
 bool storage_layout(uint32_t records, uint32_t cells, struct storage_layout *out);
 struct storage *storage_create(uint32_t records, uint32_t cells);
+/* Production M7 backing: use the DPDK heap on the requested NUMA socket. */
+struct storage *storage_create_socket(uint32_t records, uint32_t cells, int socket);
 /* Never drops live objects; caller drains/discards them first. */
 bool storage_destroy(struct storage *s);
 /* Source remains caller-owned. False never consumes source or partial capacity. */
@@ -28,5 +30,7 @@ bool storage_copy_in(struct storage *s, const struct rte_mbuf *source, struct st
 bool storage_materialize(struct storage *s, struct storage_handle handle,
     struct rte_mempool *pool, struct rte_mbuf **out);
 bool storage_discard(struct storage *s, struct storage_handle handle);
+/* Terminal metadata remains readable without materializing or taking custody. */
+bool storage_observation(struct storage *s, struct storage_handle handle, struct observer_packet *out);
 struct storage_stats storage_stats(const struct storage *s);
 #endif

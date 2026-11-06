@@ -28,9 +28,18 @@ test('core-pcap-replay', python, args: [meson.project_source_root() / 'tests/cor
   env: ['HNG_PCAP_BINARY=' + core_pcap.full_path()], depends: core_pcap,
   workdir: meson.project_source_root() / 'dpds-core', timeout: 180, is_parallel: false)
 threads = dependency('threads')
+common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'common/diagnostics.c', 'common/storage.c', 'common/storage_hybrid.c', 'common/storage_engine.c', 'common/storage_host.c', 'core/worker.c', 'core/transmit.c']
 hybrid_proto = executable('hng-storage-hybrid', ['perf/storage_hybrid.c', 'common/storage.c', 'common/storage_hybrid.c'],
   dependencies: [dpdk, core], c_args: ['-UNDEBUG'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+m7_engine_test = executable('m7-engine-test', ['tests/m7_engine.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'],
+  link_args: ['-Wl,--wrap=host_now_ns'], override_options: ['b_lto=false'],
+  build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('m7-engine', python, args: [meson.project_source_root() / 'tests/eal_args.py', m7_engine_test,
+  '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '-m', '256',
+  '--vdev=net_null0,no-rx=1', '--vdev=net_null1,no-rx=1', '--file-prefix=hng-m7-engine'],
+  workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
 test('storage-hybrid-capacity', python, args: [meson.project_source_root() / 'perf/storage_hybrid_capacity_test.py'],
   workdir: meson.project_source_root(), timeout: 30)
 test('storage-hybrid-smoke', python, args: [meson.project_source_root() / 'perf/storage_hybrid.py', hybrid_proto,
@@ -53,7 +62,16 @@ storage_test = executable('storage-test', ['tests/storage.c', 'common/storage.c'
 test('storage', python, args: [meson.project_source_root() / 'tests/eal_args.py', storage_test,
   '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-storage'],
   workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
-common_sources = ['common/observer.c', 'common/observer_binary.c', 'common/common.c', 'common/diagnostics.c', 'core/worker.c', 'core/transmit.c']
+m7_worker = executable('m7-worker-test', ['tests/m7_worker.c'] + common_sources,
+  dependencies: [dpdk, core, threads], c_args: ['-UNDEBUG'], link_args: ['-Wl,--wrap=host_now_ns'],
+  override_options: ['b_lto=false'], build_rpath: meson.project_source_root() / 'dpds-core/target/release')
+test('m7-worker', python, args: [meson.project_source_root() / 'tests/eal_args.py', m7_worker,
+  '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '-m', '256', '--file-prefix=hng-m7-worker'],
+  workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
+backend_test = executable('m7-backend-test', ['tests/storage_engine.c', 'common/storage_engine.c', 'common/storage.c', 'common/storage_hybrid.c'],
+  dependencies: [dpdk, core], c_args: ['-UNDEBUG'])
+test('m7-backend', python, args: [meson.project_source_root() / 'tests/eal_args.py', backend_test,
+  '--no-pci', '--no-huge', '--no-telemetry', '--in-memory', '--file-prefix=hng-m7-backend'], timeout: 30, is_parallel: false)
 dpds_exe = executable('dpds', ['dpds.c', 'core/receive.c', 'core/combined.c'] + common_sources,
   dependencies: [dpdk, core, threads], build_rpath: meson.project_source_root() / 'dpds-core/target/release', install: true)
 foreach name: ['epoch_anchor', 'handoff', 'worker', 'tx', 'lifecycle', 'reorder', 'tx_trace', 'ledger', 'rings', 'recovery', 'split', 'rx_split', 'tx_pending', 'tx_burst', 'tx_burst_cases', 'observer', 'observer_split', 'observer_7', 'observer_snapshot']
@@ -84,6 +102,11 @@ foreach name: ['epoch_anchor', 'handoff', 'worker', 'tx', 'lifecycle', 'reorder'
     workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
 endforeach
 
+test('m7-handoff', python, args: [meson.project_source_root() / 'tests/eal_args.py',
+  meson.project_build_root() / 'handoff-test', '--no-pci', '--no-huge', '--no-telemetry', '--in-memory',
+  '--file-prefix=hng-m7-handoff', '--', 'm7'], workdir: meson.project_source_root() / 'tests',
+  timeout: 30, is_parallel: false)
+
 test('null-layouts', python, args: [meson.project_source_root() / 'tests/null_smoke.py', dpds_exe],
   workdir: meson.project_build_root(), timeout: 60, is_parallel: false)
 pool_cleanup = executable('pool-cleanup-fixture', ['dpds.c', 'tests/pool_cleanup.c', 'core/receive.c', 'core/combined.c'] + common_sources,
@@ -100,7 +123,7 @@ test('diagnostics', python, args: [meson.project_source_root() / 'tests/diagnost
 test('g2-software', python,
   args: [meson.project_source_root() / 'scripts/run-unittest-groups.py',
          'tools.g2.tests.test_online.OnlineTests',
-         'tools.g2.tests.test_reference', 'tools.g2.tests.test_probe',
+         'tools.g2.tests.test_reference', 'tools.g2.tests.test_m7_storage', 'tools.g2.tests.test_probe',
          'tools.g2.tests.test_protocol', 'tools.g2.tests.test_runner',
          'tools.g2.tests.test_calibration', 'tools.g2.tests.test_custody',
          'tools.g2.tests.test_reference_v1', 'tools.g2.tests.test_registration',
@@ -128,6 +151,7 @@ test('io-af-packet', python, args: [meson.project_source_root() / 'tests/io_pmd.
 
 # Host packet-rate benchmark over net_ring; the test is a short smoke run.
 ring_rate = executable('hng-ring-rate', ['perf/ring_rate.c', 'core/receive.c'] + common_sources,
+  link_args: ['-Wl,--wrap=hng_engine_load'], override_options: ['b_lto=false'],
   dependencies: [dpdk, core, threads, ring_pmd],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-ring-rate', python, args: [meson.project_source_root() / 'perf/ring_rate.py', ring_rate],
@@ -137,11 +161,15 @@ test('perf-ring-rate-split', python, args: [meson.project_source_root() / 'perf/
 test('perf-ring-rate-io-split', python, args: [meson.project_source_root() / 'perf/ring_rate.py', '--io-split', ring_rate,
   '--', '-d', '0.2', '-w', '0.05', '-n', '2046'],
   timeout: 60, is_parallel: false)
-pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/diagnostics.c', 'common/observer.c', 'common/observer_binary.c'],
+test('perf-ring-rate-m7', python, args: [meson.project_source_root() / 'tests/m7_rate.py', ring_rate],
+  workdir: meson.project_source_root(), timeout: 45, is_parallel: false)
+pool_calc = executable('hng-pool-calc', ['perf/pool_calc.c', 'common/common.c', 'common/diagnostics.c', 'common/observer.c', 'common/observer_binary.c', 'common/storage.c', 'common/storage_hybrid.c', 'common/storage_engine.c', 'common/storage_host.c'],
   dependencies: [dpdk, core, threads], link_args: ['-lm'],
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('perf-pool-calc', python, args: [meson.project_source_root() / 'perf/pool_calc_test.py', pool_calc],
   timeout: 60, is_parallel: false)
+test('perf-pool-calc-m7', python, args: ['-E', meson.project_source_root() / 'perf/pool_calc_m7_test.py', pool_calc],
+  workdir: meson.project_source_root(), timeout: 30, is_parallel: false)
 configure_file(input: 'perf/sched_bench.json', output: 'sched_bench.json', copy: true)
 configure_file(input: 'perf/sched_bench_prod.json', output: 'sched_bench_prod.json', copy: true)
 sched_bench = executable('hng-sched-bench', ['perf/sched_bench.c'] + common_sources,
@@ -161,6 +189,13 @@ binary_fixture = executable('observer-binary-fixture', ['tests/observer_binary.c
   build_rpath: meson.project_source_root() / 'dpds-core/target/release')
 test('observer-binary', python, args: [meson.project_source_root() / 'tests/native_binary.py', binary_fixture],
   workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
+test('m7-legacy-binary', python, args: [meson.project_source_root() / 'tests/m7_legacy.py', binary_fixture],
+  workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
+test('m7-native-compatibility', python, args: [meson.project_source_root() / 'tests/m7_legacy.py',
+  binary_fixture, 'observer-binary-m7.json'], workdir: meson.project_source_root() / 'tests',
+  depends: binary_fixture, timeout: 30, is_parallel: false)
+test('m7-native-reference', python, args: [meson.project_source_root() / 'tests/native_binary.py', binary_fixture,
+  'observer-binary-m7.json'], workdir: meson.project_source_root() / 'tests', timeout: 30, is_parallel: false)
 test('native-binary-decoder', python, args: ['-m', 'unittest', 'tools.g2.tests.test_native_binary'],
   workdir: meson.project_source_root(), timeout: 30)
 

@@ -13,6 +13,7 @@
 
 static uint64_t clock_ns;
 static unsigned tx_calls;
+static const char *capture_config="config.json";
 uint64_t __wrap_host_now_ns(void) { return clock_ns; }
 
 static uint16_t transmit(uint16_t port, uint16_t queue, struct rte_mbuf **items, uint16_t n)
@@ -27,8 +28,10 @@ static uint16_t transmit(uint16_t port, uint16_t queue, struct rte_mbuf **items,
  * queue peaks and every legacy JSON byte, including health, are reproducible. */
 static void capture(const char *directory, bool binary, struct rte_mempool *pool)
 {
-    assert(host_load("config.json"));
+    assert(host_load(capture_config));
     host.port_count = 2; host.ports[0] = 7; host.ports[1] = 13;
+    assert(host_storage_bind_pool(7,pool,rte_socket_id()));
+    assert(host_storage_bind_pool(13,pool,rte_socket_id()));
     char path[4096]; snprintf(path, sizeof(path), "%s/%s", directory, binary ? "native.hngb" : "native.jsonl");
     int target = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600); assert(target >= 0);
     int null_fd = open("/dev/null", O_WRONLY); assert(null_fd >= 0);
@@ -118,7 +121,8 @@ static void failed_capture(const char *directory, bool io_failure)
 int main(int argc, char **argv)
 {
     int eal = rte_eal_init(argc, argv); assert(eal >= 0);
-    argc -= eal; argv += eal; assert(argc == 2);
+    argc -= eal; argv += eal; assert(argc == 2 || argc == 3);
+    if(argc==3)capture_config=argv[2];
     struct rte_mempool *pool = rte_pktmbuf_pool_create("binary_fixture", 63, 0,
         RTE_ALIGN_CEIL(sizeof(struct packet_meta), RTE_MBUF_PRIV_ALIGN), RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     assert(pool);

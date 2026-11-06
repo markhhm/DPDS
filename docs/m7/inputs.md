@@ -31,7 +31,7 @@ For the proposed 100 us RX-poll pause allowance, budget **RX 16384 and TX 1024 p
 This is a sizing candidate, subject to device limits and measured poll-gap margin.
 The present engine has no runtime RX-descriptor option and still requests 4096.
 A separately approved engine change and new binary are prerequisites for requesting 16384.
-This PR changes no engine setting.
+The storage opt-in does not change descriptor requests.
 
 The [M7 lessons](em-handoff-cx4.md#rx-descriptors-and-the-shortest-frame-budget)
 include FCS in the frame size and add 20 bytes for preamble/SFD and IFG:
@@ -344,23 +344,83 @@ The measurement owner still registers observation duration, sample count, clocks
 per-flow identity limits and observer-cost qualification before a run.
 The [M7 handoff](em-handoff-cx4.md) keeps those gates separate from this capacity calculation.
 
-## Independent compact-storage experiment
+## Registered M7 storage option
 
-The [standalone prototype](../M7-COMPACT-PROTOTYPE.md) records copy/allocator
-costs and memory accounting including one second of TX backpressure residence.
-It is not connected to the engine and does not replace the current memory
-budgets above. Its conservative full-residence plan exceeds 64 GiB; integration
-and any M7 opt-in remain subject to a separate decision.
+The earlier mbuf tables above describe the **classic, non-opt-in** path. They
+remain applicable to unchanged B-prime/M6 inputs. For M7's registered composition,
+use [the hybrid storage contract](../M7-STORAGE.md) and these additional inputs:
 
-## Registered M7 handoff-hold experiment
+| C | Mix | Condition |
+| --- | --- | --- |
+| 80G | X | [c80-x-compact.json](../../examples/m7/c80-x-compact.json) |
+| 90G | X | [c90-x-compact.json](../../examples/m7/c90-x-compact.json) |
+| 80G | U | [c80-u-compact.json](../../examples/m7/c80-u-compact.json) |
+| 90G | U | [c90-u-compact.json](../../examples/m7/c90-u-compact.json) |
 
-The [hybrid prototype](../M7-HYBRID-PROTOTYPE.md) scans charged-L2 threshold T
-and registers M7 handoff hold H=10000000 ns (10 ms), using D+H in capacity
-accounting. H is a registered failure threshold, **not a measured pause bound**.
-The proposed opt-in condition is continuous full handoff time strictly greater
-than H: INVALID with `TX handoff hold exceeded`. The standalone parameter
-can be recorded with `--hold-ns`; it is not an option accepted by the engine.
-Non-M7 terminal timeout remains 1 s. No production scheduler, input JSON,
-load, mix, t, delta, Q or C is changed by this experiment. Joint live-byte
-bounds and independent fixed-pool physical allocations are reported separately;
-shared backing and engine integration remain pending.
+These JSON files are **formula-derived**, not direct expander output. They copy
+the corresponding original condition's model, ports, VLAN and envelope, add the
+explicit registration, and replace only Core storage packet/byte capacities with
+the exact quotas from the registered algorithm. Q retains the original B-prime
+Q/C time (7.456541 ms). Offered traffic remains two 100G L1 directions; t=142 ms,
+delta=320 ms, p=1, seed=1, mix, C and burst=16 are unchanged. T=1024, H=10 ms,
+W=10 ms and margin=5/4 are registered inputs. SHA-256 values are in
+[compact.sha256](../../examples/m7/compact.sha256); check them from `examples/m7`.
+The independent Fraction calculator and Core's pure quota API agree on all
+four plans without allocating production-size pools or Core arrays.
+
+For each per-line registration saved as `REGISTRATION_JSON`, reproduce sizing:
+
+```sh
+build/hng-pool-calc --c-bps "$C_BPS" --t-ms 142 --delta-ms 320 \
+  --q-ms 7.456541 --min-frame "$MIN_L2" --max-frame 1522 --burst 16 \
+  --lcores 7 --rx-desc 16384 --tx-desc 1024 --page-bytes 1073741824 \
+  --m7-registration "$REGISTRATION_JSON"
+```
+
+The registration JSON is the line's `m7_storage` object, not the whole config.
+`--m7-registration` uses a pure calculation API and does not start EAL.
+Production allocation still uses accepted descriptor counts. The table budgets
+16384 RX as the conservative candidate; the current request remains 4096.
+
+| C/mix | Slots/dir | Compact records/dir | Cells/dir | Normal reserve/dir | Compact bytes/dir | Normal pool objects/dir |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 80G X | 8335335 | 5556895 | 25006084 | 2778456 | 2767337792 | 2802296 |
+| 90G X | 9377250 | 6251505 | 28131828 | 3125761 | 3113253504 | 3149601 |
+| 80G U | 3887456 | 0 | 0 | 3887456 | 0 | 3911296 |
+| 90G U | 4373386 | 0 | 0 | 4373386 | 0 | 4397226 |
+
+Normal pool objects = normal reserve + 23840 transport objects per direction
+for RX16384/TX1024, seven 32-object caches, the existing ring/pending reserves
+and four RX-sized bursts. Compact arena bytes follow the exact layout in
+M7-STORAGE; round each arena plus 4096 B allocator allowance to 1 GiB pages.
+Each normal pool packs floor(1 GiB/2624) objects per page, then adds the existing
+mempool ring and header. Round both normal pools plus 39104 B ring allowance
+up to GiB, then add 1 GiB EAL margin. Add page-rounded compact arenas to EAL.
+Core costs two*slots*144 bytes; tags cost two*slots*16 bytes. Ordinary allocator
+rounding is covered by the separate 0.25 GiB margin. The tiny all-large compact
+controllers are also inside margin.
+
+| C/mix | Normal pages/dir (GiB) | Compact pages, both dirs (GiB) | EAL reserve incl. margin (GiB) | Core (GiB) | Tags (GiB) | Observer + ordinary margin (GiB) | Total (GiB, estimate) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 80G X | 7 | 6 | 22 | 2.235711 | 0.248412 | 1.25 | 25.734 |
+| 90G X | 8 | 6 | 24 | 2.515174 | 0.279464 | 1.25 | 28.045 |
+| 80G U | 10 | 0 | 22 | 1.042697 | 0.115855 | 1.25 | 24.409 |
+| 90G U | 11 | 0 | 24 | 1.173034 | 0.130337 | 1.25 | 26.553 |
+
+`LOAD_SOCKET_MEM` for the active node must cover the EAL column in MiB, e.g.
+24*1024=24576 MiB for 90G X, plus any separately registered PMD demand. The
+ordinary Core/tags/observer/margin ledger is additional memory, not hugepage
+capacity. With a recorded 40 GiB of reserved 1 GiB pages, the largest proposed
+EAL reserve leaves 16 GiB; that reservation fits. This does not prove current
+ordinary RAM, page availability, PMD setup or throughput. Re-read node memory,
+reserved 1 GiB pages, 2 MiB pages and process limits before scheduling M7.
+Per-node `HugePages_*` that only lists 2 MiB pages must not be used to infer
+absence of reserved 1 GiB pages. No production allocation was attempted here.
+
+For the opt-in STOP/DRAIN estimate, replace the earlier one-second handoff
+tolerance with registered H=0.010 s; keep all other Q/I/O terms. Thus the
+largest estimated fixed residence is 0.484954287 s at 80G X, rather than
+1.474954287 s. Retaining the conservative WARMUP_S=2, DRAIN_WAIT_S=2 and
+STOP_TIMEOUT_S=10 allowances is valid; those allowances never suppress the
+strict H failure gate. H is a failure threshold, not a measured scheduler gap.
+The CPU comparison and its observed regression are reported in M7-STORAGE.

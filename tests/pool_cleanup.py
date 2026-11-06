@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the production cleanup, including late INVALID metadata, against retained mbufs."""
 import os
+import json
 from pathlib import Path
 import signal
 import subprocess
@@ -11,15 +12,22 @@ from eal_args import eal_arguments
 from startup import wait_for_output
 
 binary = str(Path(sys.argv[1]).resolve())
-for invalid, startup in ((False, False), (True, False), (True, True)):
+for m7, invalid, startup in ((False,False,False),(False,True,False),(False,True,True),
+                             (True,False,False),(True,True,False),(True,True,True)):
     with tempfile.TemporaryDirectory(prefix="hng-pool-") as directory:
         stats = Path(directory) / "stats.txt"
         env = dict(os.environ, RUNTIME_DIRECTORY=directory)
         if invalid:
             env["HNG_TEST_START_INVALID" if startup else "HNG_TEST_CLOSE_INVALID"] = "1"
+        cfg=json.loads(Path('config.json').read_text())
+        for line in cfg['lines']:
+            line['m7_storage']={'mode':'m7-hybrid-v1','hold_ns':1,
+                'composition':[{'l2_bytes':64,'weight':1},{'l2_bytes':1522,'weight':1}]}
+        config_path=Path(directory)/'m7.json';config_path.write_text(json.dumps(cfg))
         command = [binary, *eal_arguments(7), "--no-pci", "--no-huge", "--in-memory", "--no-telemetry",
                    "-m", "256", "--file-prefix=hng-pool", "--vdev=net_null0,no-rx=1", "--vdev=net_null1,no-rx=1",
                    "--", "-o", str(stats)]
+        if m7: command += ["-c",str(config_path)]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         output = ""
         try:
@@ -54,7 +62,8 @@ for invalid, startup in ((False, False), (True, False), (True, True)):
             elif invalid:
                 assert "first_invalid_reason=fixture port cleanup failure" in report, report
                 assert "first_invalid_owner=main:0" in report, report
-            print(f"cross-port TX retention={986}, invalid={invalid}, startup={startup}: all ports close before pool free: PASS")
+            if m7: assert "m7_line0_items_live=0" in report,report
+            print(f"M7={m7} cross-port TX retention={986}, invalid={invalid}, startup={startup}: all ports close before pool free: PASS")
         finally:
             if process.poll() is None:
                 process.kill()

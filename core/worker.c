@@ -18,6 +18,11 @@ void worker_state_init_owner(struct worker_state *s, struct worker_stats *stats,
         /* Copy only owned handles; the main lcore took them before launch. */
         s->line[i] = host.line_handle[i];
         s->owned[i] = true;
+        s->storage[i] = host.m7[i];
+        if (host.m7_plan[i].slots) {
+            s->has_storage = true;
+            if (!s->storage[i]) host_invalidate("M7 storage not bound before owner launch");
+        }
         s->owned_lines[s->owned_count++] = (uint16_t)i;
         s->min_delay[i] = hng_line_min_delay(s->line[i]);
         /* Group owned lines by egress port, in line order. */
@@ -98,9 +103,51 @@ static uint64_t watermark(struct worker_state *s, uint16_t port)
     return s->admitted_frontier[port];
 }
 
+/* Compact tokens are never mbufs. Abort reads their retained observer metadata
+ * and returns storage directly, without requiring an output-pool allocation. */
+static void discard_model(struct worker_state *s, size_t line, const struct HngPacket *p, uint64_t now)
+{
+    if (s->storage[line]) {
+        if (observer_enabled()) {
+            struct observer_record r; observer_record_init(&r, OBS_TERMINAL, 1);
+            r.reason=OBS_SHUTDOWN; r.at_ns=now;
+            if (m7_storage_observation(s->storage[line], p->packet_ptr, &r.items[0])) observer_emit(s->producer, &r);
+            else observer_abort(OBS_ABORT_RESOURCE);
+        }
+        if (!m7_storage_discard(s->storage[line], p->packet_ptr)) host_invalidate("M7 abort storage token invalid");
+    } else {
+        observer_terminal(s->producer, p->packet_ptr, OBS_SHUTDOWN, now);
+        rte_pktmbuf_free(p->packet_ptr);
+    }
+}
+static void abort_model(struct worker_state *s, uint64_t now)
+{
+    s->aborted=true; observer_abort(OBS_ABORT_DRAIN);
+    for (uint16_t k=0; k<s->owned_count; ++k) {
+        size_t line=s->owned_lines[k]; struct HngPacket p;
+        while (hng_line_abort_pop(s->line[line], &p)) {
+            s->stats->shutdown_drops++; s->stats->shutdown_drop_bytes+=p.packet_bytes;
+            discard_model(s,line,&p,now);
+        }
+    }
+}
+
+static void *storage_commit(const struct HngPacket *packet, void *context)
+{
+    struct worker_state *s = context;
+    size_t line = packet_meta(packet->packet_ptr)->line;
+    if (line >= host.line_count || !s->storage[line]) {
+        host_invalidate("M7 storage owner missing"); return NULL;
+    }
+    void *token = m7_storage_commit(s->storage[line], packet);
+    if (!token) host_invalidate(m7_storage_reason(s->storage[line]));
+    return token;
+}
+
 uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
     uint16_t count, struct rte_mbuf **out_batch, uint64_t now)
 {
+    if (s->has_storage && host.invalid && !s->aborted) abort_model(s, now);
     /* Classify the whole input first, then admit it with one core call; offers stay in input order. */
     struct Line *handles[HNG_MAX_LINES];
     uint16_t line_of[2 * MAX_BURST_SIZE];
@@ -143,11 +190,15 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             }
             n++;
         }
-        hng_lines_offer_burst(handles, line_of, packets, bytes, arrivals, seqs, n, results, records);
+        if (s->has_storage)
+            hng_lines_offer_burst_storage(handles, line_of, packets, bytes, arrivals, seqs, n, results, records, storage_commit, s);
+        else hng_lines_offer_burst(handles, line_of, packets, bytes, arrivals, seqs, n, results, records);
         for (uint16_t k = 0; k < n; ++k) {
             struct rte_mbuf *m = offer[k];
             enum PushResult result = results[k];
             if (result == Accepted) {
+                /* Compact admission already returned the source to RX: never touch it. */
+                if (s->storage[line_of[k]]) continue;
                 /* Annotate now, while the mbuf is cached; the record never changes after admission. */
                 packet_meta(m)->release_ns = records[k].release_ns;
                 packet_meta(m)->deadline_ns = records[k].deadline_ns;
@@ -156,10 +207,13 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
             }
             if (result == QDrop || result == TraceLoss || result == TraceOutage) {
                 s->stats->emulator_drops++;
+                if (s->has_storage) s->model_drops[packet_meta(m)->ingress_port]++;
             } else if (result == StorageDrop) {
                 s->stats->storage_drops++;
                 s->stats->storage_drop_bytes += m->pkt_len;
-                host_invalidate("core delay storage exhausted");
+                struct m7_storage *storage=s->storage[line_of[k]];
+                if (storage && !m7_storage_reason(storage)) m7_storage_core_exhausted(storage);
+                host_invalidate(storage ? m7_storage_reason(storage) : "core delay storage exhausted");
             } else {
                 host_invalidate("core rejected timestamp/sequence/length");
                 discard_invalid(s, m, now);
@@ -171,6 +225,7 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         }
     }
     s->consumed += count;
+    if (s->has_storage && host.invalid && !s->aborted) abort_model(s, now);
     if (s->ended && !s->aborted) {
         bool sealed = true;
         for (uint16_t k = 0; k < s->owned_count; ++k)
@@ -210,17 +265,37 @@ uint16_t worker_step_at(struct worker_state *s, struct rte_mbuf **in_batch,
         uint16_t g = s->next_line++ % s->group_count;
         if (blocked[g]) continue;
         struct HngPacket candidate;
-        if (hng_lines_pop_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate) < 0) {
+        intptr_t chosen;
+        struct rte_mbuf *materialized = NULL;
+        if (s->has_storage) {
+            chosen = hng_lines_peek_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate);
+            if (chosen >= 0 && s->storage[s->group_line[g][chosen]] &&
+                !m7_storage_materialize(s->storage[s->group_line[g][chosen]], candidate.packet_ptr, &materialized)) {
+                host_invalidate(m7_storage_reason(s->storage[s->group_line[g][chosen]]));
+                break;
+            }
+        } else chosen = 0;
+        if (chosen < 0 || hng_lines_pop_merged(s->group_handle[g], w[g], s->group_size[g], now, limit[g], &candidate) < 0) {
             /* Nothing on this port changes until the next step: stop retrying it. */
             blocked[g] = true;
             open--;
             continue;
         }
         /* Dequeue does not touch the (usually cold) mbuf; admission annotated it. */
-        out_batch[emitted++] = candidate.packet_ptr;
+        if (materialized) {
+            if (!m7_storage_release(s->storage[s->group_line[g][chosen]], candidate.packet_ptr))
+                host_invalidate("M7 materialized model token mismatch");
+            out_batch[emitted++] = materialized;
+        } else out_batch[emitted++] = candidate.packet_ptr;
         s->stats->sent++;
         s->stats->sent_bytes += candidate.packet_bytes;
         if (emitted == MAX_BURST_SIZE) break;
+    }
+    if (s->has_storage && host.invalid && !s->aborted) abort_model(s, now);
+    for (unsigned k=0; s->has_storage && k<s->owned_count; ++k) {
+        size_t line=s->owned_lines[k];host_storage_publish(line);
+        uint16_t port=host.lines[line].ingress_port;
+        atomic_store_explicit(&host.model_progress[port].drops,s->model_drops[port],memory_order_relaxed);
     }
     if (count || emitted || s->ended) observer_publish_snapshot(s->handoff_queue, &s->snapshot);
     return emitted;
@@ -237,8 +312,7 @@ uint16_t worker_step(struct worker_state *s, struct rte_mbuf **in, uint16_t coun
             while (hng_line_abort_pop(s->line[s->owned_lines[k]], &p)) {
                 s->stats->shutdown_drops++;
                 s->stats->shutdown_drop_bytes += p.packet_bytes;
-                observer_terminal(s->producer, p.packet_ptr, OBS_SHUTDOWN, host_now_ns());
-                rte_pktmbuf_free(p.packet_ptr);
+                discard_model(s, s->owned_lines[k], &p, host_now_ns());
             }
         }
     }
@@ -263,13 +337,13 @@ void worker_state_cleanup(struct worker_state *s)
         while (hng_line_abort_pop(s->line[line], &p)) {
             s->stats->shutdown_drops++;
             s->stats->shutdown_drop_bytes += p.packet_bytes;
-            observer_terminal(s->producer, p.packet_ptr, OBS_SHUTDOWN, host_now_ns());
-            rte_pktmbuf_free(p.packet_ptr);
+            discard_model(s, line, &p, host_now_ns());
             s->aborted = true;
             observer_abort(OBS_ABORT_DRAIN);
             host_invalidate("forced scheduler cleanup");
         }
         hng_line_stats(s->line[line], &s->stats->lines[line]);
+        if (s->storage[line]) host_storage_publish(line);
     }
 }
 
@@ -322,6 +396,14 @@ int lcore_worker(struct lcore_parameters *parameters)
          * Leave the suffix in the model, with its original release/deadline/order. */
         unsigned free = rte_ring_free_count(parameters->worker_transmit_ring);
         wk.output_limit = free < MAX_BURST_SIZE ? (uint16_t)free : MAX_BURST_SIZE;
+        if (wk.has_storage) {
+            uint64_t now=host_now_ns();
+            for (unsigned k=0; k<wk.owned_count; ++k) {
+                size_t line=wk.owned_lines[k];
+                if (wk.storage[line] && !m7_storage_handoff(wk.storage[line], !free, hng_line_has_backlog(wk.line[line]), now))
+                    host_invalidate(m7_storage_reason(wk.storage[line]));
+            }
+        }
         if (!free && worker_has_backlog(&wk)) {
             uint64_t now = host_now_ns();
             if (!full) { full = true; full_since = now; }
