@@ -22,7 +22,8 @@ The 1518-byte case retains its mbufs, so compact copy and output allocation cost
 Inclusive rows contain their subset rows. Do not add them together.
 The admission and callback-shell rows subtract nested costs before the median.
 Separate row medians can therefore differ from the difference between two displayed medians.
-Wrappers and the callback proxy add overhead. The profile gives estimates for attribution, not absolute CPU accounting.
+
+Wrappers and the callback proxy add overhead. The profile gives estimates for attribution, not absolute CPU cost totals.
 The throughput comparison below uses executables without the probe.
 
 ## Before and after attribution
@@ -92,6 +93,7 @@ The throughput comparison below uses executables without the probe.
 The retained case identified the merged head search as a large avoidable cost.
 The new Core API selects a small head ticket once, then consumes that exact FIFO head.
 It keeps the original merge key, readiness, watermark and Q rules.
+
 A serialized scheduler owner holds the ticket across materialize. Other group mutations invalidate the ticket contract.
 The API rejects stale or repeated consume operations without model mutation.
 A defensive host failure path reclaims an already materialized mbuf and its empty tag exactly once.
@@ -99,13 +101,14 @@ A defensive host failure path reclaims an already materialized mbuf and its empt
 M7 diagnostic publication now occurs at most every 64 active steps, or at the next idle step.
 END, INVALID and final cleanup force publication. Unchanged idle steps do not read allocator statistics.
 The model-drop credit remains visible every step. It does not use the diagnostic publication budget.
+
 Live diagnostic values can lag within that step budget. A preempted owner has no wall-time freshness guarantee.
-Final and INVALID values include all completed changes. The existing fields and formats remain unchanged.
+Final and INVALID values include all completed changes. The original fields and formats remain unchanged.
 
 The callback shell costs roughly 4–7 ns per packet above the backend admission work.
 A burst callback requires additional transaction and failure semantics, so this change keeps per-packet admission.
 Scalar pool operations and hold checks are smaller costs than the merged head search.
-This change defers callback batching, bulk allocation and hold-check changes.
+This change defers burst callbacks, bulk allocation and hold-check changes.
 It does not change storage layout, registered quotas, workload, composition, deadlines or failure gates.
 The registered 90G X node estimate remains 28.045 GiB, with the same 24 GiB EAL reservation.
 
@@ -115,6 +118,7 @@ Both executables used the same seven distinct allowed CPUs, input configuration 
 Each case used 0.2 seconds of warmup and 1.5 seconds of measurement, with three trials per executable.
 The test alternated baseline/optimized order between trials. It ran one process at a time, with a 4 GiB address-space limit.
 All 24 trials drained, conserved packets and reclaimed both pools. Q drops and other drops were zero.
+
 The table gives medians of the mean throughput of the two directions.
 Actual populations can differ with bulk allocation and RX progress. The configured ceiling stays the same.
 
@@ -130,11 +134,11 @@ Its M7 registration uses offered_bps=400G. These are synthetic fixture values, n
 X uses equal fresh-packet counts of stored 60/508/1518 bytes, with registered charged lengths 64/512/1522.
 The fixed 64/512/1518 cases name stored bytes. Their charged lengths include four additional FCS bytes.
 
-The perf loader enforces logical population credit and caps backing storage to the fixture population.
+The perf loader enforces logical population credit and caps allocated storage to the fixture population.
 The production loader has no such shortcut. No production-size allocation or testbed execution formed part of this comparison.
 
 To reproduce the throughput comparison, prepare each M7 configuration as in [M7 storage](M7-STORAGE.md#software-rate-comparison).
-Use separate baseline and optimized executables and their matching Core libraries. Alternate their order across three trials.
+Use separate baseline and optimized executables, each with the Core library from its revision. Alternate their order across three trials.
 Set `RATE_CPUS` to seven distinct allowed CPU IDs. Set `RATE_SIZE` and `M7_RATE_CONFIG` for each case.
 
 ```sh
