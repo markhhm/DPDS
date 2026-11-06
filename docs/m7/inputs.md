@@ -343,3 +343,11 @@ For trace, use the registered maximum delay/hold envelope and terminal policy in
 The measurement owner still registers observation duration, sample count, clocks, storage I/O,
 per-flow identity limits and observer-cost qualification before a run.
 The [M7 handoff](em-handoff-cx4.md) keeps those gates separate from this capacity calculation.
+
+## Independent compact-storage experiment
+
+The [standalone prototype](../M7-COMPACT-PROTOTYPE.md) records copy/allocator
+costs and memory accounting including one second of TX backpressure residence.
+It is not connected to the engine and does not replace the current memory
+budgets above. Its conservative full-residence plan exceeds 64 GiB; integration
+and any M7 opt-in remain subject to a separate decision.
