@@ -13,32 +13,123 @@ Sparse DPDK port IDs are valid.
 
 ## Hardware planning
 
-The pool calculator, not mean occupancy, supplies the packet-memory bound.
-The example inputs use 100 Gbit/s, t=142 ms, delta=320 ms,
-Q=50 ms, 1,522-byte L2 frames, seven lcores and 2 MiB pages.
+Use the [pool calculator](perf/pool_calc.c) with the actual model and accepted
+RX/TX descriptor counts. Mean occupancy is not a memory bound.
+Physical use needs one RX queue and one TX queue per port, supported by the
+selected DPDK PMD. The seven-lcore layout uses six workers plus main.
+It does not distribute one line's admission work across multiple cores.
 
-The early **20 GiB minimum** covered cable+LEO in one direction: 19.413 GiB.
-The **40 GiB recommendation** covered both directions: 38.826 GiB.
+Each ingress port has one normal mbuf pool on its allocation NUMA node.
+Two ports on one node require the sum of both directional allocations there.
+EAL hugepage memory and ordinary Core/metadata memory are separate budgets.
+Do not count reserved hugepages as ordinary free RAM.
 
-That [host revision](https://github.com/markhhm/DPDS/tree/749d5543595bcd8fd2fd53eb0dd15fd1fc1c2182)
-used a 2,496-byte mbuf stride. Current observer metadata raises the stride to
-2,624 bytes. The same calculator inputs now give:
+### Classic storage: default for existing inputs
 
-| Configured directions | Lines per direction | Pool GiB, approximately |
-|---|---:|---:|
-| 1 | 2, cable and LEO | 20.405 |
-| 2 | 2 each | 40.81 |
+Without `m7_storage`, each accepted packet retains one normal mbuf.
+The startup envelope covers the smallest declared frame and assumes that every
+packet can have the full added delay. Smaller frames increase the slot count.
+B-prime and existing M6 inputs keep this path.
 
-Thus 20 / 40 GiB are historical budgets, not sufficient current reservations.
-The pools alone need at least 21 / 41 whole GiB for these two cases.
-Pool totals exclude the ordinary core heap that the calculator includes in `total_gib`.
+The following calculator examples prepare two simultaneous 100G offers, with
+one line per direction, t=142 ms, delta=320 ms and a Q service-time allowance of 7.456541 ms.
+U uses fixed 1522-byte charged L2 frames. X permits 64/512/1522-byte charged frames.
+The classic X bound covers the minimum size throughout the residence period.
 
-Add EAL headroom. Reserve separate ordinary RAM for core and observer metadata.
-Use the [calculator commands](#performance-tools) below with the actual
-frame, trace, port and NUMA layout. Smaller frames or longer holds need more memory.
+| Service C per direction | Frame envelope | EAL reserve, both directions (GiB) | EAL + Core + ordinary allowance (GiB, estimate) |
+| --- | --- | ---: | ---: |
+| 80G | U | 18 | 19.067 |
+| 90G | U | 20 | 21.169 |
+| 80G | X | 279 | 294.315 |
+| 90G | X | 313 | 330.198 |
 
-These estimates do not qualify a physical allocation or 100G operation.
-See [hardware bring-up](docs/BRING-UP.md) for the unresolved deployment decisions.
+Source: [classic M7 input calculation](docs/m7/inputs.md#mempools-and-numa-capacity).
+The calculation uses a 2624-byte mbuf stride, 144 Core bytes per slot,
+1 GiB pages, seven lcores and candidate RX/TX counts of 16384/1024.
+Totals include the documented EAL margin and 256 MiB ordinary allowance.
+Separate observer/capture allocations remain additional.
+
+The engine currently requests RX=4096 and TX=1024, then accepts PMD adjustments.
+RX=16384 above is a conservative 100G sizing candidate, not the current request.
+A new approved binary is necessary to request that larger ring.
+See [descriptor limits](docs/m7/inputs.md#descriptor-requests-and-packet-rates).
+
+The separate 10G B-prime X condition uses C=9G and RX/TX=4096/1024.
+It needs 33 GiB EAL and 34.945 GiB including Core and the ordinary allowance.
+Its [registered ledger](docs/m5/bprime-inputs.md#2-expanded-config_file-and-node-memory)
+uses its own EAL margin. Observer/capture memory remains additional.
+Earlier 20/40 GiB recommendations used a smaller mbuf stride and different inputs.
+They are not sufficient general reservations for current configurations.
+
+### M7 hybrid storage: explicit opt-in
+
+Registered M7 lines can copy small packets into compact storage and retain
+large packets as normal mbufs. The option does not change C, Q, t, delta or p.
+The following calculator totals use the registered equal-packet X mix or fixed U,
+T=1024, H=10 ms, W=10 ms and margin=5/4.
+The other sizing inputs match the classic 100G table.
+
+| Service C per direction | Registered mix | EAL reserve, both directions (GiB) | EAL + Core + tags + observer/ordinary allowances (GiB, estimate) |
+| --- | --- | ---: | ---: |
+| 80G | X | 22 | 25.734 |
+| 90G | X | 24 | 28.045 |
+| 80G | U | 22 | 24.409 |
+| 90G | U | 24 | 26.553 |
+
+Sources: [registered M7 inputs](docs/m7/inputs.md#registered-m7-storage-option)
+and [hybrid storage formulas](docs/M7-STORAGE.md#exact-capacity-policy).
+EAL includes the normal pools, page-rounded compact arenas and EAL margin.
+Totals add ordinary Core metadata, tags, a 1 GiB observer allowance and
+0.25 GiB ordinary margin. These allowances are estimates, not measured needs.
+Actual PMD, capture, observer and other process budgets can require more memory.
+
+For each allocation node, set `LOAD_SOCKET_MEM` and `--socket-limit` to cover
+that node's EAL column in MiB, plus separately registered PMD demand.
+Keep enough ordinary RAM for the other columns and all other allocations.
+Recalculate for different lines, frame ranges, descriptors, pages or allocator builds.
+Use the [calculator commands](#performance-tools) and
+[hardware preflight](docs/BRING-UP.md) before any physical run.
+No capacity estimate establishes successful allocation, timing accuracy or 100G operation.
+
+## Known limitations
+
+- **One scheduler owner per direction.** All flows on one line share one Q and
+  one admission sequence. The seven-lcore layout separates RX and TX but keeps
+  admission, storage and release work on that direction's scheduler.
+  [Software profiles](docs/M7-STORAGE-PERFORMANCE.md#directional-cpu-limit)
+  estimate about 206–221 ns per accepted X packet for the full M7 worker step.
+  This is the owner cost, not Core admission alone or a hardware rate limit.
+
+- **Software throughput is not `R_valid`.** One bounded
+  [M7 ring benchmark](docs/M7-STORAGE-PERFORMANCE.md#throughput-comparison)
+  measured 6.398 Mpps per direction for X, and 9.546 Mpps for stored 1518-byte frames.
+  These workstation results do not qualify wire timing, NIC losslessness or 100G.
+  [The 100G X calculation](docs/m7/inputs.md#descriptor-requests-and-packet-rates)
+  requires about 17.377 Mpps per direction with the registered FCS/wire-byte convention.
+  Report the highest rate that passes the registered hardware gates as `R_valid`.
+
+- **Registered M7 memory envelope.** Hybrid quotas cover the registered lengths
+  and composition, burst allowance, W and margin. They do not cover an arbitrary
+  all-small mix. An unregistered length or exhausted record/cell/tag/mbuf quota
+  invalidates the run. Storage exhaustion is not a model Q drop.
+  See [envelope enforcement](docs/M7-STORAGE.md#exact-capacity-policy).
+
+- **Bounded pauses and evidence.** Full handoffs, expired retries, NIC loss,
+  observer loss and capture-health failures retain their failure gates.
+  More RX descriptors cannot repair a sustained CPU deficit.
+  See [handoff bounds](docs/TX-HANDOFF.md) and [capture health](docs/PCAPNG.md).
+
+## Verified accuracy
+
+The result cells remain blank until registered M6/M7 hardware evidence is available.
+Software oracle passes and memory estimates do not fill this table.
+Retain clock qualification, complete capture health, per-packet order/loss checks
+and sampled timing/Q evidence with each measured result.
+
+| Milestone | Registered condition | Clock uncertainty | Measured OWD error | `R_valid` | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| M6 | | | | | |
+| M7 | | | | | |
 
 ## Build and software checks
 
@@ -234,9 +325,10 @@ python3 perf/ring_rate.py build/hng-ring-rate -- -b 1518 -d 3 -w 0.5
 The main lcore is a closed-loop generator. It recycles each frame that leaves
 an egress ring into the ingress ring it came from and refills the population
 after drops; each direction has its own pool, so its frames stay in that
-direction (every line must go from port q to port 1-q). The frames that can
-reach one TX handoff ring never exceed it, because the production scheduler
-invalidates a run instead of waiting for TX handoff space. So the population
+direction (every line must go from port q to port 1-q). This fixture caps the
+population at the usable TX handoff capacity. The production scheduler budgets
+output against free handoff slots and leaves the suffix in the model.
+The fixture population
 (`-n`) defaults to and is at most 1023 with one shared TX ring (4 and 5
 lcores) and 2046, split evenly, with one TX ring per direction (7 lcores). `perf/ring_rate.json` sets C = 400 Gbit/s,
 t = 2 us and Q = 1.5 MiB (1033 MTU frames, more than one direction's population)
@@ -393,8 +485,9 @@ A missed-deadline outage discard is a non-model failure.
 ## Resource and shutdown bounds
 
 Each ingress port has a pool on its NIC NUMA node, or the current node for a
-software port. Its object count includes all configured storage slots on that
-port, plus ring, cache, and burst reserves. Descriptor preflight runs before
+software port. Classic pools include all configured storage slots on that port.
+M7 normal pools use the registered retained-mbuf reserve, with separate compact
+arenas and tags. Both paths add ring, cache and burst reserves. Descriptor preflight runs before
 pool allocation. The pool includes the adjusted RX count and adjusted TX counts
 for each distinct mapped egress. Port setup uses those same descriptor counts.
 
