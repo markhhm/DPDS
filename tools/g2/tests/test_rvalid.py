@@ -1,0 +1,370 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Registered ascending searches consume sealed G2 decisions, never new gates."""
+import copy
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+class RvalidTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.plan = dict(schema='hng-m7-rvalid-plan-v1', registration_id='synthetic-plan',
+            scope='software-only', composition='X', config_sha256='a'*64,
+            ladder_bps_l1=[20_000_000_000, 25_000_000_000, 30_000_000_000],
+            observation_seconds=600, confirmation_runs=1,
+            cells=[dict(direction=str(p), line='cable', phase='measure') for p in (0, 1)])
+        self.index = dict(schema='hng-m7-rvalid-evidence-v1', registration_id='synthetic-plan',
+                          trials=[], confirmation=None)
+
+    def bundle(self, run, status='PASS', *, changes=None):
+        rows = [dict(cell, required=True, repeat=0, status='INVALID' if status=='INCONCLUSIVE' else status,
+            measurement_status=status, gates={g:dict(status='PASS') for g in ('median','p99','order','storage')},
+            reason_codes=[], observed_failures=[], offered_bps_l1=20_000_000_000,
+            measurement_window=dict(start_ns=0, end_ns=600_000_000_000, clock_id='common'))
+            for cell in self.plan['cells']]
+        if status == 'FAIL':
+            rows[0]['gates']['p99']['status'] = 'FAIL'
+            rows[0]['observed_failures'] = ['p99']
+        elif status == 'INCONCLUSIVE':
+            rows[0]['gates']['p99']['status'] = 'INCONCLUSIVE'
+            rows[0]['reason_codes'] = ['insufficient_main_samples']
+        value = dict(schema='hng-g2-report-v1', run=run, scope=self.plan['scope'],
+            status='INVALID' if status=='INCONCLUSIVE' else status, measurement_status=status,
+            reason_codes=[], rows=rows, sources=dict(config_sha256=self.plan['config_sha256']),
+            registration=dict(scope=self.plan['scope']), counters=None)
+        if changes:
+            changes(value)
+        raw = (json.dumps(value, allow_nan=False)+'\n').encode()
+        path = self.root/(run+'.json')
+        path.write_bytes(raw)
+        return dict(bundle=path.name, sha256=hashlib.sha256(raw).hexdigest())
+
+    def trial(self, index, status='PASS', changes=None):
+        rate = self.plan['ladder_bps_l1'][index]
+        entry = dict(rate_bps_l1=rate, **self.bundle('trial-'+str(index), status, changes=changes))
+        self.index['trials'].append(entry)
+        return entry
+
+    def confirm(self, index, status='PASS', changes=None):
+        self.index['confirmation'] = dict(rate_bps_l1=self.plan['ladder_bps_l1'][index],
+            **self.bundle('confirmation', status, changes=changes))
+
+    def invoke(self):
+        for name,value in (('plan.json',self.plan),('evidence.json',self.index)):
+            (self.root/name).write_text(json.dumps(value)+'\n')
+            if name == 'plan.json':
+                self.index['plan_sha256'] = hashlib.sha256((self.root/name).read_bytes()).hexdigest()
+        process = subprocess.run([sys.executable, '-m', 'tools.g2.rvalid',
+            str(self.root/'plan.json'), str(self.root/'evidence.json')],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(len(process.stdout.splitlines()), 1, process.stdout+process.stderr)
+        return process, json.loads(process.stdout)
+
+    def test_all_pass_requires_independent_confirmation_and_reports_tested_ceiling(self):
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout+process.stderr)
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['confirmed_rate_bps_l1'], 30_000_000_000)
+        self.assertIsNone(result['R_valid_bps_l1'])  # synthetic evidence is not hardware
+        self.assertTrue(result['tested_ceiling'])
+        self.assertIsNone(result['stop'])
+        self.assertEqual(len(result['stages']), 3)
+        self.assertEqual(result['scope'], 'software-only')
+
+
+    def test_middle_fail_stops_without_opening_later_bundle(self):
+        self.trial(0)
+        self.trial(1, 'FAIL')
+        self.index['trials'].append(dict(rate_bps_l1=self.plan['ladder_bps_l1'][2],
+                                         bundle='does-not-exist.json', sha256='0'*64))
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
+        self.assertEqual(result['stop']['status'], 'FAIL')
+        self.assertEqual(result['stop']['step'], 2)
+        self.assertEqual(result['stop']['failed_gates'], ['p99'])
+        self.assertEqual(len(result['stages']), 2)
+        self.assertEqual(result['ignored_trials'], 1)
+
+    def test_inconclusive_stops_but_previous_pass_can_be_confirmed(self):
+        self.trial(0)
+        self.trial(1, 'INCONCLUSIVE')
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['stop']['status'], 'INCONCLUSIVE')
+        self.assertIn('insufficient_main_samples', result['stop']['reason_codes'])
+        self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
+
+    def test_failed_repeat_never_falls_back_to_another_pass(self):
+        self.trial(0)
+        self.trial(1)
+        self.trial(2, 'FAIL')
+        self.confirm(1, 'FAIL')
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertEqual(result['status'], 'FAIL')
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIsNone(result['R_valid_bps_l1'])
+        self.assertIn('confirmation_not_pass', result['reason_codes'])
+
+    def test_missing_repeat_is_pending_not_pass(self):
+        self.trial(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertEqual(result['status'], 'INCONCLUSIVE')
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIn('confirmation_missing', result['reason_codes'])
+
+    def test_first_failure_has_no_valid_rate(self):
+        self.trial(0, 'FAIL')
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertIsNone(result['candidate_rate_bps_l1'])
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertEqual(result['stop']['step'], 1)
+
+    def test_unrun_step_stops_without_jump_to_later_pass(self):
+        self.trial(0)
+        self.trial(2)
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['stop']['step'], 2)
+        self.assertIn('bundle_missing', result['stop']['reason_codes'])
+        self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
+
+    def test_reused_run_is_not_independent_confirmation(self):
+        entry = self.trial(0)
+        self.index['confirmation'] = copy.deepcopy(entry)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIn('run_reused', result['confirmation']['reason_codes'])
+
+    def test_wrong_confirmation_rate_cannot_confirm(self):
+        self.trial(0)
+        self.confirm(1)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIn('confirmation_rate_mismatch', result['reason_codes'])
+
+    def test_bad_hash_is_inconclusive_and_previous_pass_is_preserved(self):
+        self.trial(0)
+        self.trial(1)['sha256'] = '0'*64
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertIn('bundle_hash_mismatch', result['stop']['reason_codes'])
+        self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
+
+    def test_plan_shape_and_unique_ascending_positive_rates(self):
+        mutations = [lambda p:p.update(ladder_bps_l1=[30, 20]),
+            lambda p:p.update(ladder_bps_l1=[20, 20]), lambda p:p.update(ladder_bps_l1=[True]),
+            lambda p:p.update(ladder_bps_l1=[0]), lambda p:p.update(confirmation_runs=2),
+            lambda p:p.update(composition='arbitrary'), lambda p:p.update(scope='unknown'),
+            lambda p:p.update(cells=p['cells'][:1]), lambda p:p.update(config_sha256='bad'),
+            lambda p:p.update(observation_seconds=0)]
+        original = copy.deepcopy(self.plan)
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.plan = copy.deepcopy(original)
+                mutate(self.plan)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                self.assertIn('search_input_error', result['reason_codes'])
+                self.assertIsNone(result['R_valid_bps_l1'])
+
+    def test_bundle_must_match_scope_config_cells_gates_and_duration(self):
+        mutations = [lambda b:b.update(schema='other'), lambda b:b.update(scope='physical'),
+            lambda b:b['sources'].update(config_sha256='b'*64), lambda b:b.update(rows=b['rows'][:1]),
+            lambda b:b['rows'][0]['gates'].pop('storage'),
+            lambda b:b['rows'][0]['gates']['median'].update(status='not_applicable'),
+            lambda b:b['rows'][0]['measurement_window'].update(end_ns=1),
+            lambda b:b['rows'][0].update(repeat='pooled'),
+            lambda b:b['rows'][0].update(required=False)]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.index['trials'] = []
+                self.trial(0, changes=mutate)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                self.assertEqual(result['stop']['status'], 'INCONCLUSIVE')
+                self.assertIsNone(result['candidate_rate_bps_l1'])
+
+    def test_physical_scope_returns_only_the_confirmed_tested_rate(self):
+        self.plan['scope'] = 'physical'
+        self.trial(0)
+        self.trial(1, 'FAIL')
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['R_valid_bps_l1'], self.plan['ladder_bps_l1'][0])
+        self.assertFalse(result['tested_ceiling'])
+
+    def test_duplicate_stage_rate_is_rejected_instead_of_selecting_a_pass(self):
+        self.trial(0, 'FAIL')
+        self.index['trials'].append(dict(self.index['trials'][0], **self.bundle('retry')))
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('search_input_error', result['reason_codes'])
+
+    def test_drop_attribution_preserves_layers_and_missing_is_not_zero(self):
+        def counters(b):
+            b['counters'] = dict(ports={'0':dict(q_drop=7, handoff_drop=2,
+                delay_storage_drop=1, trace_loss_drop=3)}, observer={},
+                diagnostics={'native:1':dict(nic_imissed=4, nic_rx_nombuf=None,
+                    m7_line0_record_exhaustions=1, m7_line0_hold_ns=10_000_000)})
+        self.trial(0, 'FAIL', changes=counters)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        layers = result['stages'][0]['drop_layers']
+        for name in ('nic', 'ring', 'storage', 'Q', 'model'):
+            self.assertEqual(layers[name]['status'], 'observed_nonzero')
+        self.assertEqual(layers['observer']['status'], 'unavailable')
+        self.assertNotIn('hold_ns', json.dumps(layers))
+        self.assertIn('nic_rx_nombuf', layers['nic']['unavailable_fields'])
+        self.assertEqual(result['stop']['bottleneck_layers'], ['nic','ring','storage'])
+        self.assertEqual(layers['Q']['counters'][0]['value'], 7)  # intended Q loss stays modeled
+
+
+    def test_registration_cannot_be_substituted_after_evidence_index_is_written(self):
+        self.trial(0)
+        self.confirm(0)
+        self.invoke()
+        path = self.root/'plan.json'
+        plan = json.loads(path.read_text())
+        plan['ladder_bps_l1'] = [20_000_000_000, 40_000_000_000]
+        path.write_text(json.dumps(plan)+'\n')
+        process = subprocess.run([sys.executable, '-m', 'tools.g2.rvalid', str(path),
+            str(self.root/'evidence.json')], capture_output=True, text=True, timeout=10)
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('plan_hash_mismatch', json.loads(process.stdout)['reason_codes'])
+
+    def test_row_disagreement_cannot_turn_bundle_pass_into_search_pass(self):
+        def mutate(b):
+            b['rows'][0]['gates']['order']['status'] = 'FAIL'
+        self.trial(0, changes=mutate)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('four_gates_not_all_pass', result['stop']['reason_codes'])
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+
+    def test_inconclusive_confirmation_does_not_report_rvalid(self):
+        self.trial(0)
+        self.confirm(0, 'INCONCLUSIVE')
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('confirmation_not_pass', result['reason_codes'])
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+
+    def test_failing_software_only_bundle_has_diagnostic_attribution_without_causal_claim(self):
+        self.trial(0, 'FAIL')
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertEqual(result['stop']['failed_gates'], ['p99'])
+        self.assertEqual(result['stop']['bottleneck_layers'], [])
+        self.assertEqual(result['stop']['drop_layers']['nic']['status'], 'unavailable')
+
+    def test_reads_actual_g2_bundle_output_without_requiring_new_producer_fields(self):
+        from tools.g2.bundle import build_bundle_report
+        from tools.g2.tests.test_bundle import fixture
+        raw = self.root/'raw'
+        raw.mkdir()
+        cfg, manifest, sources, calibration = fixture(raw)
+        bundle = build_bundle_report(cfg, {}, manifest, sources, calibration)
+        self.assertEqual(bundle['status'], 'PASS', bundle['reason_codes'])
+        # Keep the real bundle schema/fields; mirror its one synthetic cell to
+        # represent the other required direction, and register its real duration.
+        self.plan.update(config_sha256=bundle['sources']['config_sha256'], observation_seconds=1,
+            cells=[dict(direction=str(p), line=bundle['rows'][0]['line'], phase=bundle['rows'][0]['phase'])
+                   for p in (0, 1)])
+        bundle['rows'].append(dict(copy.deepcopy(bundle['rows'][0]), direction='1'))
+        def real(value):
+            run = value['run']
+            value.clear()
+            value.update(copy.deepcopy(bundle), run=run)
+        self.trial(0, changes=real)
+        self.trial(1, 'FAIL')
+        self.confirm(0, changes=real)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout+process.stderr)
+        self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
+
+
+    def test_actual_sampled_bundle_uses_registration_windows_and_keeps_coverage(self):
+        from tools.g2.bundle import build_bundle_report
+        from tools.g2.tests.test_bundle import fixture
+        from tools.g2.tests.test_sampled_bundle import checker
+        raw = self.root/'sampled-raw'
+        raw.mkdir()
+        cfg, manifest, sources, calibration = fixture(raw, flow_id='0a000001:0a000002:1:9000')
+        checker(raw, manifest, 400)
+        bundle = build_bundle_report(cfg, {}, manifest, sources, calibration, registration_root=raw)
+        self.assertEqual(bundle['status'], 'PASS', bundle['reason_codes'])
+        self.assertNotIn('measurement_window', bundle['rows'][0])
+        self.plan.update(config_sha256=bundle['sources']['config_sha256'], observation_seconds=1,
+            cells=[dict(direction=str(p), line=bundle['rows'][0]['line'], phase=bundle['rows'][0]['phase'])
+                   for p in (0, 1)])
+        bundle['rows'].append(dict(copy.deepcopy(bundle['rows'][0]), direction='1'))
+        def real(value):
+            run = value['run']
+            value.clear()
+            value.update(copy.deepcopy(bundle), run=run)
+        self.trial(0, changes=real)
+        self.trial(1, 'FAIL')
+        self.confirm(0, changes=real)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout+process.stderr)
+        self.assertEqual(result['stages'][0]['coverage'], bundle['coverage'])
+        self.assertIsNone(result['stages'][0]['measured_rates'][0]['offered_bps_l1'])
+
+    def test_duplicate_window_or_malformed_rows_are_inconclusive(self):
+        mutations = [lambda b:b.update(rows=None), lambda b:b.update(counters=['bad']),
+                     lambda b:b['rows'][0].update(gates=None)]
+        for mutate in mutations:
+            self.index['trials'] = []
+            self.trial(0, changes=mutate)
+            process, result = self.invoke()
+            self.assertEqual(process.returncode, 2, process.stdout)
+            self.assertEqual(result['stop']['status'], 'INCONCLUSIVE')
+
+    def test_invalid_json_is_one_line_inconclusive(self):
+        entry = self.trial(0)
+        raw = b'{"status":NaN}'
+        (self.root/entry['bundle']).write_bytes(raw)
+        entry['sha256'] = hashlib.sha256(raw).hexdigest()
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('bundle_unusable', result['stop']['reason_codes'])
+
+
+    def test_two_directions_must_share_the_registered_measurement_window(self):
+        def mutate(b):
+            b['rows'][1]['measurement_window'].update(start_ns=600_000_000_000, end_ns=1_200_000_000_000)
+        self.trial(0, changes=mutate)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('bundle_unusable', result['stop']['reason_codes'])
+
+    def test_plan_cannot_register_separate_one_way_phases_as_both_directions(self):
+        self.plan['cells'][1]['phase'] = 'later'
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIn('search_input_error', result['reason_codes'])
+
+
+if __name__ == '__main__':
+    unittest.main()
