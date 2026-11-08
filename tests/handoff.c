@@ -124,6 +124,14 @@ static void paused_pair(bool terminal)
             assert(tries < 1000); usleep(10);
         }
         assert(quit_signal_receive);
+        if (m7) {
+            /* Eager M7 abort must finish without any further fake-clock tick.
+             * Force that legal schedule instead of depending on the main
+             * thread racing an extra timestamp increment against the owners. */
+            for (unsigned tries = 0; atomic_load(&host.schedulers_running); ++tries) {
+                assert(tries < 10000); usleep(100);
+            }
+        }
         /* Preserve the independent shutdown gate: it aborts model-owned suffixes. */
         for (unsigned tries = 0; atomic_load(&host.schedulers_running); ++tries) {
             assert(tries < 10000);
@@ -159,7 +167,9 @@ static void paused_pair(bool terminal)
         assert(atomic_load(&host.diagnostics.invalid_recorded));
         assert(strcmp(host.diagnostics.invalid_reason, m7 ? "TX handoff hold exceeded" : "TX handoff terminal timeout") == 0);
         assert(strncmp(host.diagnostics.invalid_owner, "scheduler:", 10) == 0);
-        assert(host.diagnostics.invalid_at_ns < clock_ns && host.diagnostics.invalid_mono_ns > 0);
+        uint64_t expired_at = 500000000 + (m7 ? 100000 : TERMINAL_TIMEOUT_NS) + 1;
+        assert(host.diagnostics.invalid_at_ns >= expired_at && host.diagnostics.invalid_at_ns <= clock_ns);
+        assert(host.diagnostics.invalid_mono_ns > 0);
     }
     host_cleanup();
     assert(rte_mempool_avail_count(pool) == pool->size);

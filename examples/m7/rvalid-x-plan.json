@@ -1,0 +1,35 @@
+{
+  "schema": "hng-m7-rvalid-plan-v1",
+  "registration_id": "DRAFT-m7-c90-x",
+  "scope": "physical",
+  "composition": "X",
+  "config_sha256": "d721fe5129f018e83dcd82fbcf6b24988b8a2d6f44d70dacfce5fce37e6c85c9",
+  "ladder_bps_l1": [
+    20000000000,
+    25000000000,
+    30000000000,
+    35000000000,
+    40000000000,
+    50000000000,
+    60000000000,
+    70000000000,
+    80000000000,
+    90000000000,
+    100000000000
+  ],
+  "observation_seconds": 600,
+  "confirmation_runs": 1,
+  "cells": [
+    {
+      "direction": "0",
+      "line": "fixed-d0",
+      "phase": "steady"
+    },
+    {
+      "direction": "1",
+      "line": "fixed-d1",
+      "phase": "steady"
+    }
+  ],
+  "offer_rule": "DRAFT-register-generator-readback-rule"
+}
