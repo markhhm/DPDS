@@ -1,6 +1,6 @@
 {
   "schema": "hng-m7-rvalid-plan-v1",
-  "registration_id": "DRAFT-m7-c90-u",
+  "registration_id": "m7-c90-u-2026-11-08",
   "scope": "physical",
   "composition": "U",
   "config_sha256": "96fed67fdd0b2ec94df10b3c9f150956eb3503fcb32c57669b8ba2b378aaf338",
@@ -27,5 +27,8 @@
       "phase": "steady"
     }
   ],
-  "offer_rule": "DRAFT-register-generator-readback-rule"
+  "offer_rule": "DRAFT-register-generator-readback-rule",
+  "registration_status": "registered",
+  "registration_decision": "34e34ca6",
+  "confirmation_fallbacks": 1
 }

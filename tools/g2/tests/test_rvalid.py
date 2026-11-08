@@ -18,7 +18,7 @@ class RvalidTests(unittest.TestCase):
         self.plan = dict(schema='hng-m7-rvalid-plan-v1', registration_id='synthetic-plan',
             scope='software-only', composition='X', config_sha256='a'*64,
             ladder_bps_l1=[20_000_000_000, 25_000_000_000, 30_000_000_000],
-            observation_seconds=600, confirmation_runs=1, offer_rule='registered-offer-rule',
+            observation_seconds=600, confirmation_runs=1, confirmation_fallbacks=1, offer_rule='registered-offer-rule',
             cells=[dict(direction=str(p), line='cable', phase='measure') for p in (0, 1)])
         self.index = dict(schema='hng-m7-rvalid-evidence-v1', registration_id='synthetic-plan',
                           trials=[], confirmation=None)
@@ -62,16 +62,16 @@ class RvalidTests(unittest.TestCase):
         self.index['trials'].append(entry)
         return entry
 
-    def confirm(self, index, status='PASS', changes=None):
+    def confirm(self, index, status='PASS', changes=None, *, fallback=False):
         rate = self.plan['ladder_bps_l1'][index]
         def fill(b):
             for row in b['rows']:
                 row['offered_bps_l1'] = rate
             if changes:
                 changes(b)
-        entry = dict(rate_bps_l1=rate, **self.bundle('confirmation', status, changes=fill))
+        entry = dict(rate_bps_l1=rate, **self.bundle('fallback' if fallback else 'confirmation', status, changes=fill))
         entry['offer'] = self.offer(entry)
-        self.index['confirmation'] = entry
+        self.index['fallback_confirmation' if fallback else 'confirmation'] = entry
 
     def offer(self, entry, mutate=None):
         bundle = json.loads((self.root/entry['bundle']).read_text())
@@ -143,17 +143,18 @@ class RvalidTests(unittest.TestCase):
         self.assertIn('insufficient_main_samples', result['stop']['reason_codes'])
         self.assertEqual(result['confirmed_rate_bps_l1'], self.plan['ladder_bps_l1'][0])
 
-    def test_failed_repeat_never_falls_back_to_another_pass(self):
+    def test_failed_repeat_waits_for_registered_fallback_without_promoting_initial_pass(self):
         self.trial(0)
         self.trial(1)
         self.trial(2, 'FAIL')
         self.confirm(1, 'FAIL')
         process, result = self.invoke()
-        self.assertEqual(process.returncode, 1, process.stdout)
-        self.assertEqual(result['status'], 'FAIL')
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertEqual(result['status'], 'INCONCLUSIVE')
         self.assertIsNone(result['confirmed_rate_bps_l1'])
         self.assertIsNone(result['R_valid_bps_l1'])
-        self.assertIn('confirmation_not_pass', result['reason_codes'])
+        self.assertIn('fallback_confirmation_missing', result['reason_codes'])
+        self.assertEqual(result['confirmation']['status'], 'FAIL')
 
     def test_missing_repeat_is_pending_not_pass(self):
         self.trial(0)
@@ -209,7 +210,8 @@ class RvalidTests(unittest.TestCase):
     def test_plan_shape_and_unique_ascending_positive_rates(self):
         mutations = [lambda p:p.update(ladder_bps_l1=[30, 20]),
             lambda p:p.update(ladder_bps_l1=[20, 20]), lambda p:p.update(ladder_bps_l1=[True]),
-            lambda p:p.update(ladder_bps_l1=[0]), lambda p:p.update(confirmation_runs=2),
+            lambda p:p.update(ladder_bps_l1=[0]), lambda p:p.update(confirmation_runs=2), lambda p:p.update(confirmation_fallbacks=2),
+            lambda p:p.pop('confirmation_fallbacks'), lambda p:p.update(confirmation_fallbacks=True),
             lambda p:p.update(composition='arbitrary'), lambda p:p.update(scope='unknown'),
             lambda p:p.update(cells=p['cells'][:1]), lambda p:p.update(config_sha256='bad'),
             lambda p:p.update(observation_seconds=0)]
@@ -438,6 +440,142 @@ class RvalidTests(unittest.TestCase):
         process, result = self.invoke()
         self.assertEqual(process.returncode, 2, process.stdout)
         self.assertIsNone(result['R_valid_bps_l1'])
+
+
+    def test_first_confirmation_pass_never_opens_fallback(self):
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2)
+        self.index['fallback_confirmation'] = dict(rate_bps_l1=25_000_000_000,
+            bundle='must-not-open.json', sha256='0'*64)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['confirmed_step'], 3)
+        self.assertEqual(len(result['confirmations']), 1)
+        self.assertEqual(result['confirmations'][0]['step'], 3)
+        self.assertEqual(result['confirmations'][0]['run'], 'confirmation')
+        self.assertEqual(result['confirmations'][0]['status'], 'PASS')
+
+    def test_primary_fail_fallback_pass_returns_next_lower_pass_and_both_results(self):
+        self.plan['scope'] = 'physical'
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2, 'FAIL')
+        self.confirm(1, fallback=True)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['R_valid_bps_l1'], 25_000_000_000)
+        self.assertEqual(result['candidate_rate_bps_l1'], 30_000_000_000)
+        self.assertEqual(result['confirmed_step'], 2)
+        self.assertEqual([(c['step'],c['run'],c['status']) for c in result['confirmations']],
+                         [(3,'confirmation','FAIL'),(2,'fallback','PASS')])
+        self.assertEqual(result['confirmation']['status'], 'FAIL')
+
+    def test_two_failed_confirmations_return_null_and_never_open_third(self):
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2, 'FAIL')
+        self.confirm(1, 'FAIL', fallback=True)
+        self.index['third_confirmation'] = dict(rate_bps_l1=20_000_000_000,
+            bundle='must-not-open.json', sha256='0'*64)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIsNone(result['R_valid_bps_l1'])
+        self.assertIsNone(result['confirmed_step'])
+        self.assertEqual(len(result['confirmations']), 2)
+        self.assertEqual([c['status'] for c in result['confirmations']], ['FAIL','FAIL'])
+        self.assertIn('fallback_confirmation_not_pass', result['reason_codes'])
+
+    def test_no_lower_pass_returns_null_after_first_failed_confirmation(self):
+        self.trial(0)
+        self.trial(1, 'FAIL')
+        self.confirm(0, 'FAIL')
+        self.index['fallback_confirmation'] = dict(rate_bps_l1=1, bundle='must-not-open.json', sha256='0'*64)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertIsNone(result['R_valid_bps_l1'])
+        self.assertEqual(len(result['confirmations']), 1)
+        self.assertIn('no_lower_pass_stage', result['reason_codes'])
+
+    def test_inconclusive_confirmation_uses_same_single_fallback_rule(self):
+        for first, second, code in [('INCONCLUSIVE','PASS',0),('FAIL','INCONCLUSIVE',2),
+                                     ('INCONCLUSIVE','INCONCLUSIVE',2)]:
+            with self.subTest(first=first,second=second):
+                self.index['trials'] = []
+                self.trial(0)
+                self.trial(1)
+                self.trial(2, 'FAIL')
+                self.confirm(1, first)
+                self.confirm(0, second, fallback=True)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, code, process.stdout)
+                self.assertEqual([c['status'] for c in result['confirmations']], [first,second])
+                self.assertEqual(result['confirmed_rate_bps_l1'], 20_000_000_000 if code==0 else None)
+
+    def test_fallback_cannot_skip_next_lower_pass_or_repeat_same_rate(self):
+        for fallback in (0,2):
+            with self.subTest(fallback=fallback):
+                self.index['trials'] = []
+                for i in range(3):
+                    self.trial(i)
+                self.confirm(2, 'FAIL')
+                self.confirm(fallback, fallback=True)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                self.assertIsNone(result['confirmed_rate_bps_l1'])
+                self.assertIn('fallback_confirmation_rate_mismatch', result['reason_codes'])
+
+    def test_fallback_run_must_be_independent_of_every_consumed_run(self):
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2, 'FAIL')
+        self.index['fallback_confirmation'] = copy.deepcopy(self.index['trials'][1])
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIsNone(result['confirmed_rate_bps_l1'])
+        self.assertIn('run_reused', result['confirmations'][1]['reason_codes'])
+
+    def test_no_primary_attempt_remains_pending_and_does_not_open_fallback(self):
+        self.trial(0)
+        self.trial(1)
+        self.index['fallback_confirmation'] = dict(rate_bps_l1=20_000_000_000,
+            bundle='must-not-open.json', sha256='0'*64)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertEqual(result['confirmations'], [])
+        self.assertIn('confirmation_missing', result['reason_codes'])
+
+
+    def test_unusable_primary_retains_readable_run_and_prevents_fallback_reuse(self):
+        for mutate in (lambda b:b['sources'].update(config_sha256='b'*64),
+                       lambda b:b.update(scope='other'), lambda b:b.update(schema='other')):
+            with self.subTest(mutate=mutate):
+                self.index['trials'] = []
+                for i in range(3):
+                    self.trial(i)
+                self.confirm(2, 'FAIL', changes=mutate)
+                primary = self.index['confirmation']
+                self.confirm(1, changes=lambda b:b.update(run='confirmation'), fallback=True)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                self.assertIsNone(result['confirmed_rate_bps_l1'])
+                first, second = result['confirmations']
+                self.assertEqual(first['run'], 'confirmation')
+                self.assertEqual(first['bundle'], primary['bundle'])
+                self.assertEqual(first['sha256'], primary['sha256'])
+                self.assertIn('run_reused', second['reason_codes'])
+
+    def test_unusable_primary_can_fallback_to_distinct_valid_run_without_losing_evidence(self):
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2, changes=lambda b:b['sources'].update(config_sha256='b'*64))
+        self.confirm(1, fallback=True)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertEqual(result['confirmed_step'], 2)
+        self.assertEqual([(c['run'],c['status']) for c in result['confirmations']],
+                         [('confirmation','INCONCLUSIVE'),('fallback','PASS')])
 
 
 if __name__ == '__main__':

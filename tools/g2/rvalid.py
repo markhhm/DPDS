@@ -52,7 +52,9 @@ def validate_plan(plan, evidence):
     require(isinstance(rates, list) and bool(rates) and all(positive(r) for r in rates), 'invalid rate ladder')
     require(rates == sorted(set(rates)), 'rate ladder must be strictly ascending')
     require(positive(plan.get('observation_seconds')) and type(plan.get('confirmation_runs')) is int
-            and plan['confirmation_runs'] == 1, 'register a duration and exactly one independent confirmation')
+            and plan['confirmation_runs'] == 1 and type(plan.get('confirmation_fallbacks')) is int
+            and plan['confirmation_fallbacks'] == 1,
+            'register a duration, one independent confirmation and one lower-stage fallback')
     cells = plan.get('cells')
     require(isinstance(cells, list) and bool(cells), 'required cells missing')
     for row in cells:
@@ -140,23 +142,28 @@ def read_offer(reference, rate, plan, plan_hash, bundle_hash, run, windows, root
 def read_stage(trial, rate, plan, root, used_runs, plan_hash):
     if trial is None:
         return inconclusive(rate, 'bundle_missing')
+    identity = {name:trial[name] for name in ('bundle', 'sha256')
+                if isinstance(trial.get(name), str)}
     try:
         require(isinstance(trial.get('bundle'), str) and bool(trial['bundle']) and sha(trial.get('sha256')),
                 'bundle path and SHA256 required')
         path = root / trial['bundle']
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != trial['sha256']:
-            return inconclusive(rate, 'bundle_hash_mismatch')
+            return inconclusive(rate, 'bundle_hash_mismatch', **identity)
         report = strict_json(raw)
+        run = report.get('run')
+        require(isinstance(run, str) and bool(run), 'missing run ID')
+        identity['run'] = run
+        # A readable rejected attempt still used this run. Do not permit a
+        # fallback to relabel that same experiment as an independent attempt.
+        if run in used_runs:
+            return inconclusive(rate, 'run_reused', **identity)
+        used_runs.add(run)
         require(report.get('schema') == 'hng-g2-report-v1', 'unsupported G2 report schema')
         require(report.get('scope') == plan['scope'] and report['registration']['scope'] == plan['scope'],
                 'bundle scope mismatch')
         require(report['sources']['config_sha256'] == plan['config_sha256'], 'bundle config mismatch')
-        run = report.get('run')
-        require(isinstance(run, str) and bool(run), 'missing run ID')
-        if run in used_runs:
-            return inconclusive(rate, 'run_reused', run=run)
-        used_runs.add(run)
         require(report.get('status') in ('PASS', 'FAIL', 'INVALID', 'INCONCLUSIVE')
                 and report.get('measurement_status') in ('PASS', 'FAIL', 'INVALID', 'INCONCLUSIVE'),
                 'missing G2 measurement status')
@@ -215,7 +222,7 @@ def read_stage(trial, rate, plan, root, used_runs, plan_hash):
                         delivered_bps_l2=row.get('delivered_bps_l2'), l7_bps=row.get('l7_bps'), pps=row.get('pps'))
                         for row in rows])
     except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
-        return inconclusive(rate, 'bundle_unusable', error=str(exc))
+        return inconclusive(rate, 'bundle_unusable', error=str(exc), **identity)
 
 
 def judge(plan, evidence, root):
@@ -231,7 +238,8 @@ def judge(plan, evidence, root):
     result = dict(schema='hng-m7-rvalid-result-v1', registration_id=plan['registration_id'],
         scope=plan['scope'], composition=plan['composition'], status='INCONCLUSIVE',
         R_valid_bps_l1=None, confirmed_rate_bps_l1=None, candidate_rate_bps_l1=candidate,
-        tested_ceiling=stop is None, stop=stop, stages=stages, confirmation=None, reason_codes=[],
+        tested_ceiling=stop is None, stop=stop, stages=stages, confirmation=None, confirmations=[],
+        confirmed_step=None, reason_codes=[],
         ignored_trials=sum(rate not in {s['rate_bps_l1'] for s in stages} for rate in trials),
         hardware_qualification='not_assessed; consumes supplied G2 decisions',
         rate_basis='registered offered L1 per direction; measured rates retained separately',
@@ -245,13 +253,37 @@ def judge(plan, evidence, root):
     elif not isinstance(repeat, dict) or type(repeat.get('rate_bps_l1')) is not int or repeat['rate_bps_l1'] != candidate:
         result['reason_codes'] = ['confirmation_rate_mismatch']
     else:
-        confirmation = read_stage(repeat, candidate, plan, root, used_runs, evidence.get('plan_sha256'))
+        passed = [stage for stage in stages if stage['status'] == 'PASS']
+        confirmation = dict(read_stage(repeat, candidate, plan, root, used_runs, evidence.get('plan_sha256')),
+                            step=passed[-1]['step'])
         result.update(confirmation=confirmation, status=confirmation['status'])
+        result['confirmations'].append(confirmation)
         if confirmation['status'] == 'PASS':
-            result.update(confirmed_rate_bps_l1=candidate,
+            result.update(confirmed_rate_bps_l1=candidate, confirmed_step=confirmation['step'],
                           R_valid_bps_l1=candidate if plan['scope'] == 'physical' else None)
         else:
             result['reason_codes'] = ['confirmation_not_pass']
+            if len(passed) < 2:
+                result['reason_codes'].append('no_lower_pass_stage')
+                return result
+            lower = passed[-2]
+            fallback = evidence.get('fallback_confirmation')
+            if fallback is None:
+                result.update(status='INCONCLUSIVE', reason_codes=['confirmation_not_pass', 'fallback_confirmation_missing'])
+            elif (not isinstance(fallback, dict) or type(fallback.get('rate_bps_l1')) is not int
+                    or fallback['rate_bps_l1'] != lower['rate_bps_l1']):
+                result.update(status='INCONCLUSIVE', reason_codes=['confirmation_not_pass', 'fallback_confirmation_rate_mismatch'])
+            else:
+                # Exactly one retreat to the next lower initial PASS; never recurse.
+                second = dict(read_stage(fallback, lower['rate_bps_l1'], plan, root, used_runs,
+                                         evidence.get('plan_sha256')), step=lower['step'])
+                result['confirmations'].append(second)
+                result['status'] = second['status']
+                if second['status'] == 'PASS':
+                    result.update(confirmed_rate_bps_l1=lower['rate_bps_l1'], confirmed_step=lower['step'],
+                                  R_valid_bps_l1=lower['rate_bps_l1'] if plan['scope'] == 'physical' else None)
+                else:
+                    result['reason_codes'].append('fallback_confirmation_not_pass')
     return result
 
 

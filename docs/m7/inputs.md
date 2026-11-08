@@ -7,8 +7,8 @@ It prepares two simultaneous 100G L1 directions, one emulator line per direction
 The M7 sequence is STL probes, then long-RTT ASTF, then selected applications.
 Report the highest rate that passes all G2 gates as `R_valid`.
 A smaller passing rate remains that rate.
-Register the [R_valid search procedure](rvalid-search.md) before a rate search;
-its draft ladders require approval before apparatus use.
+Use the [registered R_valid search procedure](rvalid-search.md) (decision
+34e34ca6); qualify apparatus and seal its offer rule before apparatus use.
 These are preparation inputs and capacity estimates. No hardware result follows from this document.
 
 ## Source and executable identity
