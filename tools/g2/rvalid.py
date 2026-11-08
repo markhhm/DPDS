@@ -145,21 +145,33 @@ def read_stage(trial, rate, plan, root, used_runs, plan_hash):
     identity = {name:trial[name] for name in ('bundle', 'sha256')
                 if isinstance(trial.get(name), str)}
     try:
-        require(isinstance(trial.get('bundle'), str) and bool(trial['bundle']) and sha(trial.get('sha256')),
+        require(isinstance(trial.get('bundle'), str) and bool(trial['bundle']),
                 'bundle path and SHA256 required')
         path = root / trial['bundle']
         raw = path.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != trial['sha256']:
+        valid_hash = sha(trial.get('sha256'))
+        hash_matches = valid_hash and hashlib.sha256(raw).hexdigest() == trial['sha256']
+        try:
+            report = strict_json(raw)
+        except ValueError:
+            if valid_hash and not hash_matches:
+                return inconclusive(rate, 'bundle_hash_mismatch', **identity)
+            raise
+        run = report.get('run') if isinstance(report, dict) else None
+        readable_run = isinstance(run, str) and bool(run)
+        reused = False
+        if readable_run:
+            identity['run'] = run
+            # Untrusted identity is exclusion-only, never evidence of a PASS.
+            # Even a rejected hash must not let a fallback reuse this run.
+            reused = run in used_runs
+            used_runs.add(run)
+        require(valid_hash, 'bundle path and SHA256 required')
+        if not hash_matches:
             return inconclusive(rate, 'bundle_hash_mismatch', **identity)
-        report = strict_json(raw)
-        run = report.get('run')
-        require(isinstance(run, str) and bool(run), 'missing run ID')
-        identity['run'] = run
-        # A readable rejected attempt still used this run. Do not permit a
-        # fallback to relabel that same experiment as an independent attempt.
-        if run in used_runs:
+        require(readable_run, 'missing run ID')
+        if reused:
             return inconclusive(rate, 'run_reused', **identity)
-        used_runs.add(run)
         require(report.get('schema') == 'hng-g2-report-v1', 'unsupported G2 report schema')
         require(report.get('scope') == plan['scope'] and report['registration']['scope'] == plan['scope'],
                 'bundle scope mismatch')

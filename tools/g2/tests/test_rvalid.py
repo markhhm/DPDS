@@ -577,6 +577,114 @@ class RvalidTests(unittest.TestCase):
         self.assertEqual([(c['run'],c['status']) for c in result['confirmations']],
                          [('confirmation','INCONCLUSIVE'),('fallback','PASS')])
 
+    def test_hash_mismatch_reserves_same_run_like_correct_hash_even_in_another_file(self):
+        self.plan['scope'] = 'physical'
+        for bad_hash in (False, True):
+            for copied_file in (False, True):
+                with self.subTest(bad_hash=bad_hash, copied_file=copied_file):
+                    self.index['trials'] = []
+                    for i in range(3):
+                        self.trial(i)
+                    self.confirm(1, fallback=True)
+                    fallback = self.index['fallback_confirmation']
+                    primary = dict(copy.deepcopy(fallback), rate_bps_l1=30_000_000_000)
+                    if bad_hash:
+                        primary['sha256'] = '0'*64
+                    self.index['confirmation'] = primary
+                    if copied_file:
+                        target = self.root/'copied-report.json'
+                        target.write_bytes((self.root/fallback['bundle']).read_bytes())
+                        fallback['bundle'] = target.name
+                    process, result = self.invoke()
+                    self.assertEqual(process.returncode, 2, process.stdout)
+                    self.assertIsNone(result['R_valid_bps_l1'])
+                    first, second = result['confirmations']
+                    self.assertEqual(first['status'], 'INCONCLUSIVE')
+                    self.assertIn('bundle_hash_mismatch' if bad_hash else 'offer_unverified', first['reason_codes'])
+                    self.assertEqual(first['run'], 'fallback')
+                    self.assertEqual(first['bundle'], primary['bundle'])
+                    self.assertEqual(first['sha256'], primary['sha256'])
+                    self.assertIn('run_reused', second['reason_codes'])
+
+    def test_bad_hash_does_not_reject_a_genuinely_distinct_fallback_run(self):
+        self.plan['scope'] = 'physical'
+        for i in range(3):
+            self.trial(i)
+        self.confirm(2)
+        self.index['confirmation']['sha256'] = '0'*64
+        self.confirm(1, fallback=True)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        first, second = result['confirmations']
+        self.assertEqual((first.get('run'), first['status']), ('confirmation','INCONCLUSIVE'))
+        self.assertEqual(first['reason_codes'], ['bundle_hash_mismatch'])
+        self.assertEqual((second['run'], second['status']), ('fallback','PASS'))
+        self.assertEqual(result['R_valid_bps_l1'], 25_000_000_000)
+
+    def test_structural_and_offer_early_returns_also_reserve_readable_runs(self):
+        for failure in ('rows', 'config', 'offer'):
+            with self.subTest(failure=failure):
+                self.index['trials'] = []
+                for i in range(3):
+                    self.trial(i)
+                def mutate(b):
+                    if failure == 'rows':
+                        b['rows'] = None
+                    elif failure == 'config':
+                        b['sources'].pop('config_sha256')
+                if failure == 'rows':
+                    self.index['confirmation'] = dict(rate_bps_l1=30_000_000_000,
+                        **self.bundle('confirmation', changes=mutate))
+                else:
+                    self.confirm(2, changes=mutate)
+                primary = self.index['confirmation']
+                if failure == 'offer':
+                    primary['offer']['sha256'] = '0'*64
+                self.confirm(1, changes=lambda b:b.update(run='confirmation'), fallback=True)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                first, second = result['confirmations']
+                self.assertEqual(first['run'], 'confirmation')
+                self.assertIn('offer_unverified' if failure == 'offer' else 'bundle_unusable', first['reason_codes'])
+                self.assertIn('run_reused', second['reason_codes'])
+                self.assertIsNone(result['R_valid_bps_l1'])
+
+    def test_malformed_sha_reference_still_reserves_readable_run(self):
+        for declared_hash in (None, '', 'not-a-sha256'):
+            with self.subTest(declared_hash=declared_hash):
+                self.index['trials'] = []
+                for i in range(3):
+                    self.trial(i)
+                self.confirm(2)
+                self.index['confirmation']['sha256'] = declared_hash
+                self.confirm(1, changes=lambda b:b.update(run='confirmation'), fallback=True)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                first, second = result['confirmations']
+                self.assertEqual(first['reason_codes'], ['bundle_unusable'])
+                self.assertEqual(first.get('run'), 'confirmation')
+                self.assertEqual(second['reason_codes'], ['run_reused'])
+
+    def test_unreadable_run_preserves_hash_error_priority(self):
+        for malformed in (b'{', b'[]', b'{}'):
+            for bad_hash in (False, True):
+                with self.subTest(malformed=malformed, bad_hash=bad_hash):
+                    self.index['trials'] = []
+                    for i in range(3):
+                        self.trial(i)
+                    self.confirm(2)
+                    primary = self.index['confirmation']
+                    (self.root/primary['bundle']).write_bytes(malformed)
+                    primary['sha256'] = '0'*64 if bad_hash else hashlib.sha256(malformed).hexdigest()
+                    self.confirm(1, fallback=True)
+                    process, result = self.invoke()
+                    self.assertEqual(process.returncode, 0, process.stdout)
+                    first, second = result['confirmations']
+                    self.assertEqual(first['reason_codes'],
+                                     ['bundle_hash_mismatch' if bad_hash else 'bundle_unusable'])
+                    self.assertNotIn('run', first)
+                    self.assertEqual(second['status'], 'PASS')
+
 
 if __name__ == '__main__':
     unittest.main()
