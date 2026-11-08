@@ -167,3 +167,54 @@ They also cover watermarks, global limits, sealed Q drain and rejected stale or 
 Host tests cover the publication budget, idle/END/INVALID/final flush and a rejected consume after materialize.
 A combined fixture passes compact and retained packets through materialize, PMD prefix acceptance, refused suffix and terminal timeout.
 It checks payload/order/deadlines, strict timeout boundaries, packet conservation and full pool recovery.
+
+## Directional CPU limit
+
+A later CPU analysis used the same source tree as DPDS `659a0d5f` and its Core pin `327ba722`.
+The Core merge `9bb5e30d` has the same tree as that pin.
+This analysis added private benchmark probes. It did not change the engine or add a CPU layout.
+
+The fixture kept the throughput section's model, mix, population ceiling and seven-CPU layout.
+It used seed 1, no native observer, 0.2 seconds of warmup and 1.5 seconds of measurement.
+Each probe used three trials and two scheduler owners. Heavy processes ran serially with a 4 GiB address-space limit.
+The bounded population is not a production-scale residence or memory qualification.
+
+Cycle probes sampled separate regions about once per 1024 calls, with different phases and empty-timer overhead correction.
+The analysis separated empty RX/TX polls from steps with input packets.
+It calculated each nested-cost difference per owner before the median.
+Probe overhead and workstation contention remain sources of error.
+
+| Measured region | ns per accepted X packet, estimate | Scope |
+| --- | ---: | --- |
+| Full `worker_step_at`, lighter probes | 205.62 | Classification, admission, storage, merge, output and publication |
+| Full `worker_step_at`, detailed probes | 220.56 | Same work, with more instrumentation |
+| Core admission excluding accepted callback | 56.93 | Subset of the detailed worker profile |
+| Accepted callback, inclusive | 60.51 | Storage conversion and its call/context overhead |
+| Compact copy-in | 31.17 | Subset of callback, amortized over all X packets |
+| Callback excluding compact copy-in | 29.85 | Remaining transaction work, calculated before the median |
+| Merged head select and consume | 30.33 | Logical release/FIFO order |
+| Materialize, inclusive | 45.93 | Allocation, metadata, copy-out and compact reclamation |
+| Storage diagnostic publication | 0.07 | Periodic or forced atomic snapshots |
+
+Rows overlap. Do not sum them into a second total.
+The full worker estimate is approximately 206–221 ns per accepted X packet.
+It is not the cost of Core admission alone.
+
+Same-tree uninstrumented X trials in that later session returned 4.801/4.720/4.812 Mpps per direction.
+The earlier matched comparison returned 6.398 Mpps. Different sessions and instrumentation do not define a universal CPU rate limit.
+
+The [100G registered X calculation](m7/inputs.md#descriptor-requests-and-packet-rates)
+requires 17.377 Mpps per direction, or 57.55 ns per offered packet.
+This software fixture has no Q drops, so its offered and accepted packet counts agree.
+Production Q drops can change accepted-only storage work, but admission must process every offered frame.
+Neither profile qualifies physical throughput, wire-time accuracy or `R_valid`.
+
+One scheduler currently owns each direction's admission and output work.
+The source is [`worker_state_init_owner` and `worker_step_at`](../core/worker.c).
+One line retains one shared Q, selection sequence and service state.
+The registered M7 X inputs contain one line per direction, unlike the two-line-per-direction perf fixture.
+Separate flow shards with separate Q states cannot preserve that model.
+
+Copy offload and a split admission/release design remain unimplemented.
+More cores alone do not establish the required rate or preserve transactional storage failures.
+Existing classic and M7 paths remain unchanged. Hardware runs must retain their registered workload and report actual `R_valid` and bottlenecks.
