@@ -30,5 +30,6 @@
       "line": "fixed-d1",
       "phase": "steady"
     }
-  ]
+  ],
+  "offer_rule": "DRAFT-register-generator-readback-rule"
 }

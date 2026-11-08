@@ -27,6 +27,8 @@ Register:
 - Exact ascending offered **L1 bit/s per direction**, step order, required cells,
   scope, duration, warmup/drain and exactly one independent confirmation.
   Freeze a registration ID and SHA256 of the plan's actual bytes.
+  Register an `offer_rule` ID specifying how generator readbacks qualify the
+  commanded offer and composition over the complete observation window.
 - The expected bundle `sources.config_sha256`. The full reporter uses its
   registered config hash; the sampled reporter uses SHA256 of the canonical
   validated config. Use the producer's documented convention consistently.
@@ -208,7 +210,8 @@ The separate index is filled as runs finish; it must reference the frozen plan
 hash. Paths are relative to the index's directory (absolute operator paths
 also work). Each `bundle` is the reporter's **report.json**, not its input
 manifest, verdict.json, matrix summary, sampled packet stream or raw capture.
-Use file SHA256, not a reserialized JSON digest:
+Each consumed trial and confirmation also references the offer qualification
+receipt below. Use file SHA256, not a reserialized JSON digest:
 
 ```json
 {
@@ -216,13 +219,16 @@ Use file SHA256, not a reserialized JSON digest:
   "registration_id": "REGISTERED_ID",
   "plan_sha256": "PLAN_FILE_SHA256",
   "trials": [
-    {"rate_bps_l1": 20000000000, "bundle": "step-01/report.json", "sha256": "REPORT_FILE_SHA256"},
-    {"rate_bps_l1": 25000000000, "bundle": "step-02/report.json", "sha256": "REPORT_FILE_SHA256"}
+    {"rate_bps_l1": 20000000000, "bundle": "step-01/report.json", "sha256": "REPORT_FILE_SHA256",
+     "offer": {"path": "step-01/offer.json", "sha256": "OFFER_FILE_SHA256"}},
+    {"rate_bps_l1": 25000000000, "bundle": "step-02/report.json", "sha256": "REPORT_FILE_SHA256",
+     "offer": {"path": "step-02/offer.json", "sha256": "OFFER_FILE_SHA256"}}
   ],
   "confirmation": {
     "rate_bps_l1": 20000000000,
     "bundle": "confirmation/report.json",
-    "sha256": "REPORT_FILE_SHA256"
+    "sha256": "REPORT_FILE_SHA256",
+    "offer": {"path": "confirmation/offer.json", "sha256": "OFFER_FILE_SHA256"}
   }
 }
 ```
@@ -232,6 +238,53 @@ This example confirms step 1 after a non-PASS step 2. Omit unrun trials; use
 rates are errors, not retry candidates. The file is read-only; the tool opens
 bundles in ladder order, stops before opening higher entries, and reports
 `ignored_trials`. Their presence does not authorize running them.
+
+### Offer receipt boundary
+
+Existing sampled bundles have no full-population offered-rate readback or
+composition attestation. A rate label in the index cannot establish either.
+Even the full bundle's ingress throughput cannot alone qualify an upstream
+generator whose traffic was lost before capture. Supply a sealed
+`hng-m7-offer-v1` receipt for each run, using this minimal operator/backend
+interchange contract:
+
+```json
+{
+  "schema": "hng-m7-offer-v1",
+  "run": "RUN_ID_FROM_BUNDLE",
+  "plan_sha256": "PLAN_FILE_SHA256",
+  "bundle_sha256": "REPORT_FILE_SHA256",
+  "composition": "X",
+  "rate_bps_l1": 20000000000,
+  "rule": "REGISTERED_OFFER_RULE_ID",
+  "status": "PASS",
+  "windows": {
+    "steady": {"start_ns": 2000000000, "end_ns": 602000000000, "clock_id": "engine"}
+  },
+  "directions": [
+    {"direction": "0", "target_bps_l1": 20000000000, "measured_bps_l1": 20000000000},
+    {"direction": "1", "target_bps_l1": 20000000000, "measured_bps_l1": 20000000000}
+  ]
+}
+```
+
+The backend/operator supplies this decision from the registered generator
+readback procedure and retains its raw statistics, composition evidence and
+clock/interval mapping. `windows` names the G2 measurement intervals, not
+unconverted generator monotonic timestamps. Qualification must cover those
+intervals and both simultaneous directions. The numbers above are illustrative.
+Do not write PASS merely by copying the commanded rate into `measured_bps_l1`.
+No generic receipt writer or apparatus controller is added by this tool.
+This is an explicit evidence boundary to be connected before physical use.
+
+The rule must be fixed before seeing the run, under the same pre-run approval
+as the ladder. The judge verifies hashes, run/condition/window binding, both
+targets, positive finite readbacks and the receipt's PASS decision. It does
+**not** choose a new speed tolerance, infer composition from model config,
+read TRex software packet counters, or reclassify G2 gates. Missing/unqualified
+receipt means `offer_unverified` and prevents a G2 PASS from qualifying a
+search step. An existing G2 FAIL remains FAIL with its original reasons.
+Receipt hashes detect substitution, not a dishonest external qualification.
 
 Output is one JSON line, schema `hng-m7-rvalid-result-v1`:
 
@@ -246,7 +299,7 @@ Output is one JSON line, schema `hng-m7-rvalid-result-v1`:
   drop layers and nonzero diagnostic bottleneck layers. Null for all-PASS.
 - `tested_ceiling`: true for an all-PASS ladder. Do not extrapolate beyond it.
 - `stages`, `confirmation`: consumed evidence hashes, run IDs, original coverage,
-  gate/reason summaries and available measured L1/L2/L7/pps. Sampled reporters
+  gate/reason summaries, offer receipt readbacks and available measured L1/L2/L7/pps. Sampled reporters
   may omit measured rates; those remain null, never guessed from sample counts.
 - `hardware_qualification`: explicitly not assessed by this aggregation tool.
   Existing sampled/full evidence limits remain attached to each stage.

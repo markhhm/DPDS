@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -46,6 +47,7 @@ def validate_plan(plan, evidence):
     require(plan.get('scope') in ('physical', 'software-only') and plan.get('composition') in ('U', 'X'),
             'invalid search scope/composition')
     require(sha(plan.get('config_sha256')), 'invalid config hash')
+    require(isinstance(plan.get('offer_rule'), str) and bool(plan['offer_rule']), 'register the offer qualification rule')
     rates = plan.get('ladder_bps_l1')
     require(isinstance(rates, list) and bool(rates) and all(positive(r) for r in rates), 'invalid rate ladder')
     require(rates == sorted(set(rates)), 'rate ladder must be strictly ascending')
@@ -106,7 +108,36 @@ def inconclusive(rate, reason, **details):
                 bottleneck_layers=[], drop_layers=drop_layers({}), **details)
 
 
-def read_stage(trial, rate, plan, root, used_runs):
+def read_offer(reference, rate, plan, plan_hash, bundle_hash, run, windows, root):
+    """Consume a registered apparatus decision, without inventing rate tolerance."""
+    try:
+        require(isinstance(reference, dict) and sha(reference.get('sha256')), 'offer receipt missing')
+        raw = (root / reference['path']).read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == reference['sha256'], 'offer hash mismatch')
+        offer = strict_json(raw)
+        require(offer['schema'] == 'hng-m7-offer-v1' and offer['run'] == run
+                and offer['plan_sha256'] == plan_hash and offer['bundle_sha256'] == bundle_hash,
+                'offer receipt identity mismatch')
+        require(offer['composition'] == plan['composition'] and offer['rate_bps_l1'] == rate
+                and offer['rule'] == plan['offer_rule'], 'offer condition/rule mismatch')
+        require(set(offer['windows']) == set(windows) and all(
+            tuple(offer['windows'][phase][key] for key in ('start_ns', 'end_ns', 'clock_id')) == interval
+            for phase, interval in windows.items()), 'offer measurement window mismatch')
+        directions = offer['directions']
+        require(len(directions) == 2 and {d['direction'] for d in directions} ==
+                {c['direction'] for c in plan['cells']}, 'offer directions mismatch')
+        for d in directions:
+            require(type(d['target_bps_l1']) is int and d['target_bps_l1'] == rate
+                    and type(d['measured_bps_l1']) in (int, float)
+                    and math.isfinite(d['measured_bps_l1']) and d['measured_bps_l1'] > 0,
+                    'offer target/readback missing')
+        require(offer['status'] == 'PASS', 'registered offer qualification is not PASS')
+        return dict(status='PASS', source=reference, directions=directions, rule=offer['rule'])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+        return dict(status='INCONCLUSIVE', error=str(exc), source=reference)
+
+
+def read_stage(trial, rate, plan, root, used_runs, plan_hash):
     if trial is None:
         return inconclusive(rate, 'bundle_missing')
     try:
@@ -169,16 +200,21 @@ def read_stage(trial, rate, plan, root, used_runs):
             status = 'PASS'
         elif state == report['status'] == 'PASS':
             reasons.add('four_gates_not_all_pass')
+        offer = read_offer(trial.get('offer'), rate, plan, plan_hash, trial['sha256'], run, windows_seen, root)
+        if offer['status'] != 'PASS':
+            reasons.add('offer_unverified')
+            if status == 'PASS':
+                status = 'INCONCLUSIVE'
         layers = drop_layers(report)
         bottlenecks = [name for name in ('nic', 'ring', 'storage', 'other', 'observer')
                        if layers[name]['status'] == 'observed_nonzero']
         return dict(rate_bps_l1=rate, status=status, run=run, bundle=trial['bundle'], sha256=trial['sha256'],
                     reason_codes=sorted(reasons), failed_gates=sorted(failed), bottleneck_layers=bottlenecks,
-                    drop_layers=layers, coverage=report.get('coverage'), measured_rates=[dict(zip(('direction','line','phase'), cell_key(row)),
+                    drop_layers=layers, offer=offer, coverage=report.get('coverage'), measured_rates=[dict(zip(('direction','line','phase'), cell_key(row)),
                         offered_bps_l1=row.get('offered_bps_l1'), delivered_bps_l1=row.get('delivered_bps_l1'),
                         delivered_bps_l2=row.get('delivered_bps_l2'), l7_bps=row.get('l7_bps'), pps=row.get('pps'))
                         for row in rows])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
         return inconclusive(rate, 'bundle_unusable', error=str(exc))
 
 
@@ -186,7 +222,7 @@ def judge(plan, evidence, root):
     trials = validate_plan(plan, evidence)
     stages, used_runs, stop, candidate = [], set(), None, None
     for step, rate in enumerate(plan['ladder_bps_l1'], 1):
-        stage = dict(read_stage(trials.get(rate), rate, plan, root, used_runs), step=step)
+        stage = dict(read_stage(trials.get(rate), rate, plan, root, used_runs, evidence.get('plan_sha256')), step=step)
         stages.append(stage)
         if stage['status'] != 'PASS':
             stop = stage
@@ -209,7 +245,7 @@ def judge(plan, evidence, root):
     elif not isinstance(repeat, dict) or type(repeat.get('rate_bps_l1')) is not int or repeat['rate_bps_l1'] != candidate:
         result['reason_codes'] = ['confirmation_rate_mismatch']
     else:
-        confirmation = read_stage(repeat, candidate, plan, root, used_runs)
+        confirmation = read_stage(repeat, candidate, plan, root, used_runs, evidence.get('plan_sha256'))
         result.update(confirmation=confirmation, status=confirmation['status'])
         if confirmation['status'] == 'PASS':
             result.update(confirmed_rate_bps_l1=candidate,
@@ -234,10 +270,12 @@ def main(argv=None):
         else:
             result = judge(plan, evidence, args.evidence.parent)
             result['plan_sha256'] = evidence['plan_sha256']
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        output = json.dumps(result, sort_keys=True, allow_nan=False)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
         result = dict(schema='hng-m7-rvalid-result-v1', status='INCONCLUSIVE', R_valid_bps_l1=None,
                       confirmed_rate_bps_l1=None, reason_codes=['search_input_error'], error=str(exc))
-    print(json.dumps(result, sort_keys=True, allow_nan=False))
+        output = json.dumps(result, sort_keys=True, allow_nan=False)
+    print(output)
     return {'PASS':0, 'FAIL':1, 'INCONCLUSIVE':2}[result['status']]
 
 

@@ -18,7 +18,7 @@ class RvalidTests(unittest.TestCase):
         self.plan = dict(schema='hng-m7-rvalid-plan-v1', registration_id='synthetic-plan',
             scope='software-only', composition='X', config_sha256='a'*64,
             ladder_bps_l1=[20_000_000_000, 25_000_000_000, 30_000_000_000],
-            observation_seconds=600, confirmation_runs=1,
+            observation_seconds=600, confirmation_runs=1, offer_rule='registered-offer-rule',
             cells=[dict(direction=str(p), line='cable', phase='measure') for p in (0, 1)])
         self.index = dict(schema='hng-m7-rvalid-evidence-v1', registration_id='synthetic-plan',
                           trials=[], confirmation=None)
@@ -48,13 +48,49 @@ class RvalidTests(unittest.TestCase):
 
     def trial(self, index, status='PASS', changes=None):
         rate = self.plan['ladder_bps_l1'][index]
-        entry = dict(rate_bps_l1=rate, **self.bundle('trial-'+str(index), status, changes=changes))
+        def fill(b):
+            for row in b['rows']:
+                row['offered_bps_l1'] = rate
+            if changes:
+                changes(b)
+        entry = dict(rate_bps_l1=rate, **self.bundle('trial-'+str(index), status, changes=fill))
+        if (self.root/entry['bundle']).is_file():
+            try:
+                entry['offer'] = self.offer(entry)
+            except (KeyError, TypeError):
+                entry['offer'] = None
         self.index['trials'].append(entry)
         return entry
 
     def confirm(self, index, status='PASS', changes=None):
-        self.index['confirmation'] = dict(rate_bps_l1=self.plan['ladder_bps_l1'][index],
-            **self.bundle('confirmation', status, changes=changes))
+        rate = self.plan['ladder_bps_l1'][index]
+        def fill(b):
+            for row in b['rows']:
+                row['offered_bps_l1'] = rate
+            if changes:
+                changes(b)
+        entry = dict(rate_bps_l1=rate, **self.bundle('confirmation', status, changes=fill))
+        entry['offer'] = self.offer(entry)
+        self.index['confirmation'] = entry
+
+    def offer(self, entry, mutate=None):
+        bundle = json.loads((self.root/entry['bundle']).read_text())
+        windows = {row['phase']:row.get('measurement_window') for row in bundle['rows']}
+        for phase, window in windows.items():
+            if window is None:
+                windows[phase] = next(w for w in bundle['registration']['windows'] if w['phase']==phase)
+        doc = dict(schema='hng-m7-offer-v1', run=bundle['run'],
+            plan_sha256=hashlib.sha256((json.dumps(self.plan)+'\n').encode()).hexdigest(),
+            bundle_sha256=entry['sha256'], composition=self.plan['composition'],
+            rate_bps_l1=entry['rate_bps_l1'], rule=self.plan['offer_rule'], status='PASS',
+            windows=windows, directions=[dict(direction=str(p),target_bps_l1=entry['rate_bps_l1'],
+                measured_bps_l1=entry['rate_bps_l1']) for p in (0,1)])
+        if mutate:
+            mutate(doc)
+        path = self.root/(entry['bundle']+'.offer.json')
+        raw = (json.dumps(doc)+'\n').encode()
+        path.write_bytes(raw)
+        return dict(path=path.name,sha256=hashlib.sha256(raw).hexdigest())
 
     def invoke(self):
         for name,value in (('plan.json',self.plan),('evidence.json',self.index)):
@@ -364,6 +400,44 @@ class RvalidTests(unittest.TestCase):
         process, result = self.invoke()
         self.assertEqual(process.returncode, 2, process.stdout)
         self.assertIn('search_input_error', result['reason_codes'])
+
+
+    def test_missing_offer_receipt_never_turns_a_rate_label_into_rvalid(self):
+        self.plan['scope'] = 'physical'
+        self.trial(0)['offer'] = None
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIsNone(result['R_valid_bps_l1'])
+        self.assertIn('offer_unverified', result['stop']['reason_codes'])
+
+    def test_offer_readback_decision_and_binding_are_required(self):
+        mutations = [lambda o:o.update(status='INCONCLUSIVE'), lambda o:o.update(status='FAIL'),
+            lambda o:o.update(composition='U'), lambda o:o.update(bundle_sha256='0'*64),
+            lambda o:o.update(plan_sha256='0'*64), lambda o:o.update(run='different'),
+            lambda o:o.update(rule='posthoc-rule'), lambda o:o.update(rate_bps_l1=1),
+            lambda o:o.update(directions=o['directions'][:1]),
+            lambda o:o['directions'][1].update(target_bps_l1=1),
+            lambda o:o['directions'][0].update(measured_bps_l1=None),
+            lambda o:o.update(windows={})]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.index['trials'] = []
+                entry = self.trial(0)
+                entry['offer'] = self.offer(entry, mutate)
+                process, result = self.invoke()
+                self.assertEqual(process.returncode, 2, process.stdout)
+                self.assertIn('offer_unverified', result['stop']['reason_codes'])
+                self.assertIsNone(result['candidate_rate_bps_l1'])
+
+    def test_nonfinite_json_number_emits_one_line_inconclusive(self):
+        entry = self.trial(0)
+        raw = (self.root/entry['bundle']).read_bytes().replace(b'20000000000', b'1e999')
+        (self.root/entry['bundle']).write_bytes(raw)
+        entry['sha256'] = hashlib.sha256(raw).hexdigest()
+        self.confirm(0)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 2, process.stdout)
+        self.assertIsNone(result['R_valid_bps_l1'])
 
 
 if __name__ == '__main__':
