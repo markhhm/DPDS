@@ -131,6 +131,8 @@ variation, real PMDs, long residence and observation overhead can lower rates.
    Any new search needs a new registered plan and does not erase these results.
 
 The tool checks distinct run IDs across all consumed stages and both confirmations.
+A readable run ID is reserved before hash or structure checks reject an attempt;
+this untrusted identity can only exclude reuse, never qualify a PASS.
 A fresh label alone does not prove an independent experiment: the operator
 must retain the separate raw-input/capture provenance. The tool consumes
 existing decisions and cannot independently attest physical qualification.
