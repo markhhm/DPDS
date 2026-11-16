@@ -13,7 +13,9 @@ from .reference import strict_json
 GATES = ('median', 'p99', 'order', 'storage')
 LAYERS = {
     'nic': {'nic_imissed', 'nic_ierrors', 'nic_oerrors', 'nic_rx_nombuf',
-            'rx_missed_errors', 'rx_errors', 'tx_errors', 'rx_mbuf_allocation_errors'},
+            'rx_missed_errors', 'rx_errors', 'tx_errors', 'rx_mbuf_allocation_errors',
+            'rx_out_of_buffer', 'rx_phy_crc_errors', 'rx_phy_discard_packets',
+            'tx_phy_discard_packets'},
     'ring': {'handoff_drop', 'rx_handoff_drop', 'tx_handoff_drop', 'rx_ring_drops', 'tx_ring_drops'},
     'storage': {'delay_storage_drop', 'storage_drops'},
     'Q': {'q_drop', 'q_drops'},
