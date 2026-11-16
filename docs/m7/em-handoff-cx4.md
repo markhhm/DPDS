@@ -265,6 +265,10 @@ Record standard `imissed`, `ierrors`, `oerrors` and `rx_nombuf` alongside them.
 Include supported `rx_out_of_buffer`, `rx_phy_crc_errors`, `rx_phy_discard_packets` and `tx_phy_discard_packets` in `M7_XSTATS`.
 The [source](https://github.com/DPDK/dpdk/blob/v26.03/drivers/net/mlx5/linux/mlx5_ethdev_os.c#L1538-L1591) maps DPDK `rx_phy_discard_packets` to Linux `rx_discards_phy`.
 Do not confuse these two namespaces.
+DPDK 26.03 documents `out_of_buffer` as unavailable on NICs older than ConnectX-7.
+The mlx5 `imissed` implementation reads that device counter and can retain a prior value if the read fails.
+For ConnectX-4, do not treat zero `imissed` as complete proof of zero receive loss.
+Verify available counters and use independent capture and packet-conservation evidence.
 
 Use before/after deltas under one unchanged counter epoch. Do not reset counters or restart ports within an attempt.
 Testpmd's noninteractive SIGTERM exit prints basic statistics, not a final xstats report.

@@ -11,6 +11,33 @@ import unittest
 
 
 class RvalidTests(unittest.TestCase):
+    def test_mlx5_nic_xstats_are_attributed_without_summing_or_fabricating(self):
+        from tools.g2.rvalid import drop_layers
+        report = {'counters': {'ports': {'0': {'rx_out_of_buffer': 3,
+                    'rx_phy_discard_packets': 2, 'rx_phy_crc_errors': 1,
+                    'tx_phy_discard_packets': None, 'nic_imissed': 3}}}}
+        nic = drop_layers(report)['nic']
+        self.assertEqual(nic['status'], 'observed_nonzero')
+        self.assertEqual({row['field']: row['value'] for row in nic['counters']},
+                         {'rx_out_of_buffer': 3, 'rx_phy_discard_packets': 2,
+                          'rx_phy_crc_errors': 1, 'nic_imissed': 3})
+        self.assertEqual(nic['unavailable_fields'], ['tx_phy_discard_packets'])
+
+    def test_mlx5_counters_survive_rvalid_failed_stage_attribution(self):
+        def counters(bundle):
+            bundle['counters'] = {'ports': {}, 'observer': {}, 'diagnostics': {
+                'native:0': {'rx_out_of_buffer': 3, 'rx_phy_discard_packets': 2,
+                             'rx_phy_crc_errors': 1, 'tx_phy_discard_packets': None}}}
+        self.trial(0, 'FAIL', changes=counters)
+        process, result = self.invoke()
+        self.assertEqual(process.returncode, 1, process.stdout)
+        self.assertIn('nic', result['stop']['bottleneck_layers'])
+        nic = result['stop']['drop_layers']['nic']
+        self.assertEqual({row['field']:row['value'] for row in nic['counters']},
+                         {'rx_out_of_buffer': 3, 'rx_phy_discard_packets': 2,
+                          'rx_phy_crc_errors': 1})
+        self.assertEqual(nic['unavailable_fields'], ['tx_phy_discard_packets'])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

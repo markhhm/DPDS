@@ -200,7 +200,7 @@ The CLI exposes counters present in the bundle's `counters.ports`,
 
 | Layer | Existing evidence examples | Interpretation |
 |---|---|---|
-| NIC | nic_imissed, nic_ierrors, nic_oerrors, nic_rx_nombuf; device error aliases | Non-model loss/error evidence; retain per-port xstats endpoints |
+| NIC | nic_imissed, nic_ierrors, nic_oerrors, nic_rx_nombuf; device error aliases including mlx5 `rx_out_of_buffer`, `rx_phy_crc_errors`, `rx_phy_discard_packets`, `tx_phy_discard_packets` | Non-model loss/error attribution; retain per-port xstats endpoints. Counters can overlap and are not summed. Explicit null values are unavailable; absent fields are not listed. Observed zero does not prove complete NIC coverage. |
 | ring | handoff_drop, rx_handoff_drop, tx_handoff_drop, rx_ring_drops, tx_ring_drops | Non-model handoff loss; ring high-water/loop gaps help diagnose but are not drop counts |
 | storage | delay_storage_drop, storage_drops, m7_lineN_*_exhaustions | Non-model exhaustion; retain item/record/cell/normal/materialize/Core cause |
 | Q | q_drop, q_drops | Intended shared-Q model decisions; not NIC loss |
