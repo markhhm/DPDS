@@ -36,7 +36,14 @@ Use a new `RUN_ID` and output directory for every attempt.
 Keep `mlx5_core`, `mlx5_ib` and `ib_uverbs` loaded. Keep both PFs bound to
 `mlx5_core`. This is the [mlx5 bifurcated path](https://doc.dpdk.org/guides-26.03/platform/mlx5.html#linux-prerequisites).
 Do not bind either card to `vfio-pci`. Do not reset, flash or change link type here.
-ConnectX-4 Lx is not the 100G ConnectX-4 in this procedure.
+
+Record each card's exact OPN and confirm its 100GbE capability before traffic:
+
+- ConnectX-4 EN: `MCX415A-CCAT` or `MCX416A-CCAT`, as listed in the [NVIDIA EN manual](https://networking-docs.nvidia.com/connectx4enhw/introduction).
+- ConnectX-4 VPI: `MCX455A-ECAT` or `MCX456A-ECAT`, as listed in the [NVIDIA VPI manual](https://networking-docs.nvidia.com/connectx4vpihw/introduction). Confirm Ethernet mode without changing it here.
+- Reject ConnectX-4 Lx for this 100G procedure. Its maximum is 50G, as specified in the [NVIDIA Lx product brief](https://network.nvidia.com/files/doc-2020/pb-connectx-4-lx-en-card.pdf) and [DPDK 26.03 device table](https://doc.dpdk.org/guides-26.03/nics/mlx5.html#supported-devices).
+
+The family name or PCI device ID alone does not establish 100GbE capability.
 
 Use builds with the mlx5 PMD, PCI bus and matching `libibverbs`/`libmlx5` providers.
 The X710-only static bundle does not include this stack. Do not reuse it.
@@ -87,6 +94,12 @@ export DPDK_TESTPMD="$TESTPMD"
 Use the [CX-4 environment](../../examples/bringup-cx4.env) and
 [checker contract](../BRING-UP.md#preflight). Require both tables and manifests to report PASS.
 Each card must negotiate **8 GT/s x16**, independently of its advertised `LnkCap`.
+The [PCIe Gen3 encoding budget](https://www.cl.cam.ac.uk/research/srg/netos/projects/pcie-bench/neugebauer2018understanding.pdf) gives `8 GT/s × 16 × 128/130 = 126.03 Gb/s` per direction, before transaction overhead.
+Thus one Gen3 x16 link can carry at most one 100G port near line rate with large frames.
+It cannot carry two 100G ports simultaneously at line rate.
+This budget does not establish 100G throughput for small frames.
+Keep one active 100G port on each of two distinct cards, as required above.
+
 Require `mlx5_core` binding and DPDK's `mlx5_pci` driver for these PCI PFs.
 The checker validates six exact version fields. It does not compare RDMA/DOCA package versions.
 
@@ -265,8 +278,13 @@ Record standard `imissed`, `ierrors`, `oerrors` and `rx_nombuf` alongside them.
 Include supported `rx_out_of_buffer`, `rx_phy_crc_errors`, `rx_phy_discard_packets` and `tx_phy_discard_packets` in `M7_XSTATS`.
 The [source](https://github.com/DPDK/dpdk/blob/v26.03/drivers/net/mlx5/linux/mlx5_ethdev_os.c#L1538-L1591) maps DPDK `rx_phy_discard_packets` to Linux `rx_discards_phy`.
 Do not confuse these two namespaces.
-DPDK 26.03 documents `out_of_buffer` as unavailable on NICs older than ConnectX-7.
-The mlx5 `imissed` implementation reads that device counter and can retain a prior value if the read fails.
+In [DPDK 26.03](https://doc.dpdk.org/guides-26.03/nics/mlx5.html#hairpin-ports), the pre-ConnectX-7 restriction concerns `out_of_buffer` for hairpin queues (Hairpin Ports, Limitations, item 3).
+It does not declare port-level `imissed` unavailable on ConnectX-4.
+For port-level `imissed`, [`mlx5_os_read_dev_stat()`](https://github.com/DPDK/dpdk/blob/v26.03/drivers/net/mlx5/linux/mlx5_os.c#L3335-L3378) reads the device `out_of_buffer` through the DevX queue counter when allocated.
+Otherwise it reads sysfs `hw_counters/out_of_buffer`, first under the port and then under the device if the port file cannot open.
+A failed DevX read returns directly, without a sysfs retry.
+If the counter read fails, [`mlx5_stats_get()`](https://github.com/DPDK/dpdk/blob/v26.03/drivers/net/mlx5/mlx5_stats.c#L270-L283) keeps the prior `imissed` value.
+
 For ConnectX-4, do not treat zero `imissed` as complete proof of zero receive loss.
 Verify available counters and use independent capture and packet-conservation evidence.
 
